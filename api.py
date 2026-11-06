@@ -28,7 +28,7 @@ def read_root():
 @app.get("/api/search")
 async def search_movie(q: str = Query(..., description="Movie name to search")):
     try:
-        url = f"https://moviebox.ng/wefeed-h5api-bff/subject/search?keyword={q}"
+        url = f"https://h5.aoneroom.com/wefeed-h5api-bff/subject/search?keyword={q}"
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=MOVIEBOX_HEADERS)
             response.raise_for_status()
@@ -51,7 +51,7 @@ async def search_movie(q: str = Query(..., description="Movie name to search")):
 @app.get("/api/stream/{subject_id}")
 async def get_stream(subject_id: str, se: int = 0, ep: int = 0):
     try:
-        url = f"https://moviebox.ng/wefeed-h5api-bff/media/play?subjectId={subject_id}&se={se}&ep={ep}"
+        url = f"https://h5.aoneroom.com/wefeed-h5api-bff/media/play?subjectId={subject_id}&se={se}&ep={ep}"
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=MOVIEBOX_HEADERS)
             response.raise_for_status()
