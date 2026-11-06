@@ -36,7 +36,7 @@ async def search_movie(q: str = Query(..., description="Movie name to search")):
         url = f"{MOVIEBOX_BASE_URL}/search?q={q}"
         
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=MOVIEBOX_HEADERS, timeout=30.0)
+            response = await client.get(url, headers=MOVIEBOX_HEADERS, timeout=30.0, follow_redirects=True)
             response.raise_for_status()
             data = response.json()
             
