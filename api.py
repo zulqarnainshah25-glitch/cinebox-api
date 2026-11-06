@@ -33,7 +33,7 @@ def read_root():
 async def search_movie(q: str = Query(..., description="Movie name to search")):
     try:
         # Asal endpoint jo localhost wale code mein tha
-        url = f"{MOVIEBOX_BASE_URL}/wefeed-h5api-bff/subject/search?keyword={q}"
+        url = f"{MOVIEBOX_BASE_URL}/search?q={q}"
         
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=MOVIEBOX_HEADERS, timeout=30.0)
