@@ -22,7 +22,7 @@ MOVIEBOX_HEADERS = {
 }
 
 # MovieBox ka asal Base URL (jo localhost par chala tha)
-MOVIEBOX_BASE_URL = "https://api3.aoneroom.com"
+MOVIEBOX_BASE_URL = "https://h5.aoneroom.com"
 
 @app.get("/")
 def read_root():
