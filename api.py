@@ -12,13 +12,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Wohi headers jo aapke localhost par kaam kar rahe the
 MOVIEBOX_HEADERS = {
     "User-Agent": "com.community.mbox.in/50020130 (Linux; U; Android 14; en_IN; Pixel 8; Build/UD1A.230803.041; Cronet/145.0.7582.0)",
     "Referer": "https://api3.aoneroom.com/",
     "Accept": "application/json"
 }
 
-# YEH WOHI HOST HAI JO AAPKE LOCALHOST PAR CHALA THA
+# YEH WOH HOST HAI JAHAN SE AAPKO DATA MILA THA
 MOVIEBOX_BASE_URL = "https://h5.aoneroom.com"
 
 @app.get("/")
@@ -28,17 +29,17 @@ def read_root():
 @app.get("/api/search")
 async def search_movie(q: str = Query(..., description="Movie name to search")):
     try:
-        # Wohi rasta jo localhost par chala tha (search API)
+        # Wohi search URL
         url = f"{MOVIEBOX_BASE_URL}/wefeed-h5api-bff/subject/search?keyword={q}"
         
         async with httpx.AsyncClient() as client:
+            # follow_redirects=True bohot zaroori hai
             response = await client.get(url, headers=MOVIEBOX_HEADERS, timeout=30.0, follow_redirects=True)
             
-            # JSON check
             try:
                 data = response.json()
             except Exception:
-                return {"status": "error", "message": "MovieBox ne JSON nahi bheja. Shayad rasta ghalat hai."}
+                return {"status": "error", "message": "MovieBox ne JSON nahi bheja."}
             
             results = []
             if "data" in data and "items" in data["data"]:
@@ -56,7 +57,7 @@ async def search_movie(q: str = Query(..., description="Movie name to search")):
 @app.get("/api/stream/{subject_id}")
 async def get_stream(subject_id: str, se: int = 0, ep: int = 0):
     try:
-        # Wohi stream rasta jo localhost par chala tha
+        # Wohi stream URL
         url = f"{MOVIEBOX_BASE_URL}/wefeed-h5api-bff/media/play?subjectId={subject_id}&se={se}&ep={ep}"
         
         async with httpx.AsyncClient() as client:
