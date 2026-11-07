@@ -16,27 +16,31 @@ app.get('/api/search', async (req, res) => {
         const query = req.query.q;
         if (!query) return res.status(400).json({ status: "error", message: "Movie name required" });
 
-        const session = new MovieboxSession();
-        const results = await search(session, { query: query });
+        // Direct MovieBox API call (jo localhost par chali thi)
+        const url = `https://h5.aoneroom.com/wefeed-h5api-bff/subject/search?keyword=${encodeURIComponent(query)}`;
         
-        // Vercel ke logs mein dekhne ke liye
-        console.log("ASAL RESPONSE:", results);
+        const response = await fetch(url, {
+            headers: {
+                "User-Agent": "com.community.mbox.in/50020130 (Linux; U; Android 14; en_IN; Pixel 8; Build/UD1A.230803.041; Cronet/145.0.7582.0)",
+                "Referer": "https://api3.aoneroom.com/",
+                "Accept": "application/json"
+            },
+            redirect: 'follow'
+        });
 
-        let formattedResults = [];
-        
-        if (results && results.results && Array.isArray(results.results)) {
-            formattedResults = results.results.map(item => ({
-                subject_id: String(item.subjectId || item.detailPath || ""),
-                title: item.title || "Unknown Title",
-                poster: item.cover?.url || item.cover || '',
+        const data = await response.json();
+
+        let results = [];
+        if (data && data.data && data.data.items) {
+            results = data.data.items.map(item => ({
+                subject_id: String(item.subjectId),
+                title: item.title,
+                poster: item.cover ? item.cover.url : '',
                 year: item.releaseDate ? item.releaseDate.substring(0, 4) : ''
             }));
         }
 
-        res.json({
-            status: "success",
-            results: formattedResults
-        });
+        res.json({ status: "success", results: results });
     } catch (error) {
         res.status(500).json({ status: "error", message: error.message });
     }
