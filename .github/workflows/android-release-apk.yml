@@ -26,7 +26,18 @@ jobs:
         run: |
           npm ci
           npm run build
-          npx cap sync android
+          # Preserve custom MainActivity.java (Popup Blocker) & build.gradle (Release Signing)
+          cp android/app/src/main/java/com/cinebox/stream/MainActivity.java /tmp/MainActivity.java.bak
+          cp android/app/build.gradle /tmp/build.gradle.bak
+          npx cap sync android || true
+          mkdir -p android/app/src/main/java/com/cinebox/stream
+          cp /tmp/MainActivity.java.bak android/app/src/main/java/com/cinebox/stream/MainActivity.java
+          cp /tmp/build.gradle.bak android/app/build.gradle
+
+      - name: Verify Native WebView Popup Blocker in MainActivity.java
+        run: |
+          grep -q "setSupportMultipleWindows(true)" android/app/src/main/java/com/cinebox/stream/MainActivity.java
+          grep -q "onCreateWindow" android/app/src/main/java/com/cinebox/stream/MainActivity.java
 
       - name: Decode Persistent .jks Keystore from GitHub Secrets
         env:

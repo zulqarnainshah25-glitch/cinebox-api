@@ -59,7 +59,9 @@ export const InAppUpdateDialog: React.FC<InAppUpdateDialogProps> = ({
         <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800/80 flex items-center gap-2 text-[11px] text-slate-300">
           <ShieldCheck className="w-4 h-4 text-[#10d97b] shrink-0" />
           <span>
-            Signature-Safe Release APK: Installs directly over your current app without losing downloads or watchlist.
+            {updateInfo.isGoogleDriveLink
+              ? 'Google Drive Verified APK: Official global download link updated by Admin. Installs over your current app without losing data.'
+              : 'Signature-Safe Release APK: Installs directly over your current app without losing downloads or watchlist.'}
           </span>
         </div>
 
@@ -74,13 +76,14 @@ export const InAppUpdateDialog: React.FC<InAppUpdateDialogProps> = ({
 
           <a
             href={updateInfo.apkUrl}
+            target="_blank"
+            rel="noopener noreferrer"
             data-testid="update-now-btn"
             download={`CineBox-v${updateInfo.remoteVersion}.apk`}
-            rel="noopener noreferrer"
             className="flex-1 py-2.5 px-4 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-lg transition-colors min-h-[42px]"
           >
             <Download className="w-4 h-4" />
-            <span>Update Now</span>
+            <span>{updateInfo.isGoogleDriveLink ? 'Download APK (Google Drive)' : 'Update Now'}</span>
           </a>
         </div>
       </div>

@@ -73,6 +73,13 @@ import {
   parseMovieFileName,
   VideoHosterFileItem,
 } from '../services/videoHosterIntegration';
+import {
+  bumpSemverPatchVersion,
+  DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
+  extractGoogleDriveFileId,
+  toGoogleDriveDirectDownloadUrl,
+} from '../services/inAppUpdateService';
+import { sanitizeSafeUrl } from '../utils/securityValidator';
 
 interface AdminAndDeliverablesModalProps {
   initialTab: 'admin' | 'deliverables';
@@ -261,6 +268,7 @@ npx cap open android
 cd android && ./gradlew assembleDebug`;
 
 type AdminSectionTab =
+  | 'apk-download'
   | 'links'
   | 'bulk'
   | 'users'
@@ -392,6 +400,34 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
   const [showAppOpenAdOnce, setShowAppOpenAdOnce] = useState<boolean>(
     appConfig.show_app_open_ad_once !== false
   );
+
+  // Global APK Download Link (Google Drive / Direct URL) & Version State
+  const [apkDownloadUrl, setApkDownloadUrl] = useState<string>(
+    appConfig.apk_download_url || DEFAULT_GLOBAL_APK_DOWNLOAD_URL
+  );
+  const [apkLatestVersion, setApkLatestVersion] = useState<string>(
+    appConfig.apk_latest_version || '1.0.1'
+  );
+  const [apkReleaseNotes, setApkReleaseNotes] = useState<string>(
+    appConfig.apk_release_notes ||
+      'Latest CineBox Android APK (Google Drive Global Download, Native WebView Popup Blocker & Signature-Safe Update).'
+  );
+
+  useEffect(() => {
+    if (appConfig.apk_download_url) {
+      setApkDownloadUrl(appConfig.apk_download_url);
+    }
+    if (appConfig.apk_latest_version) {
+      setApkLatestVersion(appConfig.apk_latest_version);
+    }
+    if (appConfig.apk_release_notes !== undefined) {
+      setApkReleaseNotes(appConfig.apk_release_notes);
+    }
+  }, [
+    appConfig.apk_download_url,
+    appConfig.apk_latest_version,
+    appConfig.apk_release_notes,
+  ]);
 
   // Forgot Admin PIN Recovery State
   const [showForgotPin, setShowForgotPin] = useState<boolean>(false);
@@ -790,10 +826,35 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       admob_app_open_id: admobAppOpenId.trim(),
       open_ads_same_tab: openAdsSameTab,
       show_app_open_ad_once: showAppOpenAdOnce,
+      apk_download_url: apkDownloadUrl.trim() || DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
+      apk_latest_version: apkLatestVersion.trim() || '1.0.1',
+      apk_release_notes: apkReleaseNotes.trim(),
       ...partialOverride,
     });
     onConfigUpdated(res.config);
-    showTempBanner('Global App Config & Security Policies saved (Ad-Free Mode Active)!');
+    showTempBanner('Global App Config & APK Download Link saved to Supabase across all users!');
+  };
+
+  const handleSaveGlobalApkDownloadLink = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const safeUrl = sanitizeSafeUrl(apkDownloadUrl);
+    if (!safeUrl || !safeUrl.startsWith('https://')) {
+      showTempBanner('Error: Please enter a valid HTTPS APK Download Link (e.g. Google Drive or GitHub link).');
+      return;
+    }
+    const cleanVer =
+      apkLatestVersion.trim().replace(/^v/i, '') || '1.0.1';
+    const res = await updateAppConfig({
+      apk_download_url: safeUrl,
+      apk_latest_version: cleanVer,
+      apk_release_notes: apkReleaseNotes.trim(),
+    });
+    setApkDownloadUrl(res.config.apk_download_url || safeUrl);
+    setApkLatestVersion(res.config.apk_latest_version || cleanVer);
+    onConfigUpdated(res.config);
+    showTempBanner(
+      `Global APK Download Link (v${cleanVer}) updated! All Web & APK users now receive this link globally.`
+    );
   };
 
   const handleSaveApiCredentials = (e: React.FormEvent) => {
@@ -877,6 +938,20 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
         {/* Navigation Tabs — ONLY visible/active after Admin Authentication */}
         {isAdminUnlocked && (
           <div className="flex items-center gap-2 px-5 py-3 bg-[#0f131c] border-b border-slate-800 overflow-x-auto no-scrollbar">
+            <button
+              type="button"
+              data-testid="admin-tab-apk-download"
+              onClick={() => setActiveTab('apk-download')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                activeTab === 'apk-download'
+                  ? 'bg-[#10d97b] text-slate-950'
+                  : 'bg-amber-950/70 border border-amber-500/40 text-amber-300 hover:bg-amber-900/60'
+              }`}
+            >
+              <Download className="w-4 h-4" />
+              <span>📲 APK Download Link (Google Drive)</span>
+            </button>
+
             <button
               type="button"
               data-testid="admin-tab-bulk"
@@ -1122,6 +1197,154 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                 </div>
               </form>
             )
+          ) : activeTab === 'apk-download' ? (
+            /* =================================================================
+               TAB 0: GLOBAL APK DOWNLOAD LINK & VERSION MANAGER (GOOGLE DRIVE / DIRECT)
+               ================================================================= */
+            <form
+              onSubmit={handleSaveGlobalApkDownloadLink}
+              data-testid="admin-apk-download-form"
+              className="space-y-5 max-w-3xl"
+            >
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/70 to-slate-900 border border-[#10d97b]/40 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm sm:text-base font-extrabold text-white flex items-center gap-2">
+                    <Smartphone className="w-5 h-5 text-[#10d97b]" />
+                    <span>
+                      Global APK Download Link &amp; Version Manager (Google Drive / Direct URL)
+                    </span>
+                  </h3>
+                  <span className="px-2.5 py-1 rounded-lg bg-[#10d97b]/15 border border-[#10d97b]/40 text-[11px] font-mono font-bold text-[#10d97b]">
+                    Active Global Version: v{apkLatestVersion || '1.0.1'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Jab bhi aap naya APK build kar ke <strong>Google Drive</strong> par upload karein,
+                  uska naya link yahan paste karein aur <strong>APK Version</strong> barha dein
+                  (jaise <code>1.0.1</code> se <code>1.0.2</code>). Save karte hi yeh link{' '}
+                  <strong className="text-[#10d97b]">Supabase `app_config`</strong> ke zariye
+                  globally har Website user aur har installed APK user ke liye foran update ho
+                  jayega!
+                </p>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4">
+                <div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                    <label className="block text-xs font-bold text-white">
+                      1. Google Drive / Direct APK Download Link (`apk_download_url`) *
+                    </label>
+                    {extractGoogleDriveFileId(apkDownloadUrl) && (
+                      <span
+                        data-testid="gdrive-detected-badge"
+                        className="px-2 py-0.5 rounded bg-emerald-950 border border-[#10d97b]/40 text-[10px] font-mono font-bold text-[#10d97b]"
+                      >
+                        ✓ Google Drive File ID: {extractGoogleDriveFileId(apkDownloadUrl)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="url"
+                      required
+                      data-testid="admin-apk-download-url-input"
+                      value={apkDownloadUrl}
+                      onChange={(e) => setApkDownloadUrl(e.target.value)}
+                      placeholder="https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing"
+                      className="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-white focus:border-[#10d97b] focus:outline-none"
+                    />
+                    {extractGoogleDriveFileId(apkDownloadUrl) && (
+                      <button
+                        type="button"
+                        data-testid="convert-gdrive-direct-btn"
+                        onClick={() => {
+                          const direct = toGoogleDriveDirectDownloadUrl(apkDownloadUrl);
+                          if (direct) {
+                            setApkDownloadUrl(direct);
+                            showTempBanner(
+                              'Converted Google Drive share link to Direct Download URL!'
+                            );
+                          }
+                        }}
+                        className="px-3.5 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-200 font-bold text-xs whitespace-nowrap"
+                      >
+                        Convert to Direct Drive Download URL
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Supports Google Drive Share links (<code>/file/d/.../view?usp=sharing</code>),
+                    Google Drive Direct links (<code>/uc?export=download&amp;id=...</code>), GitHub
+                    Releases, or any HTTPS APK URL.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-white mb-1.5">
+                      2. Latest APK Version (`apk_latest_version`) *
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        required
+                        data-testid="admin-apk-version-input"
+                        value={apkLatestVersion}
+                        onChange={(e) => setApkLatestVersion(e.target.value)}
+                        placeholder="1.0.2"
+                        className="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-white focus:border-[#10d97b] focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        data-testid="bump-apk-version-btn"
+                        onClick={() =>
+                          setApkLatestVersion((prev) => bumpSemverPatchVersion(prev))
+                        }
+                        className="px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[#10d97b] font-bold text-xs whitespace-nowrap"
+                      >
+                        +1 Bump ({bumpSemverPatchVersion(apkLatestVersion)})
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-white mb-1.5">
+                      3. What&apos;s New / Release Notes (`apk_release_notes`)
+                    </label>
+                    <input
+                      type="text"
+                      data-testid="admin-apk-release-notes-input"
+                      value={apkReleaseNotes}
+                      onChange={(e) => setApkReleaseNotes(e.target.value)}
+                      placeholder="New Google Drive APK release with performance improvements..."
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:border-[#10d97b] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-2">
+                  <button
+                    type="submit"
+                    data-testid="save-global-apk-link-btn"
+                    className="px-5 py-3 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-lg transition-colors"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Save &amp; Update APK Download Link Globally</span>
+                  </button>
+
+                  <a
+                    href={apkDownloadUrl || DEFAULT_GLOBAL_APK_DOWNLOAD_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="test-admin-apk-link-btn"
+                    className="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold text-xs flex items-center gap-1.5"
+                  >
+                    <Globe className="w-4 h-4 text-[#10d97b]" />
+                    <span>Test Current Download Link</span>
+                  </a>
+                </div>
+              </div>
+            </form>
           ) : activeTab === 'bulk' ? (
             /* =================================================================
                TAB 1: BULK MOVIES LINK UPLOAD (CSV / JSON / FILE + HOSTER CLONE)
@@ -1922,6 +2145,45 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                     placeholder="Enter new Admin PIN"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
                   />
+                </div>
+              </div>
+
+              {/* Quick Global APK Download Link (Google Drive) Updater in Tab 5 as well */}
+              <div className="p-4 rounded-2xl bg-slate-900 border border-[#10d97b]/30 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <Download className="w-4 h-4 text-[#10d97b]" />
+                    <span>Global APK Download Link (Google Drive / Direct URL)</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#10d97b]">
+                    v{apkLatestVersion || '1.0.1'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[10px] text-slate-400 mb-1">
+                      Google Drive / Direct APK URL (`apk_download_url`)
+                    </label>
+                    <input
+                      type="url"
+                      value={apkDownloadUrl}
+                      onChange={(e) => setApkDownloadUrl(e.target.value)}
+                      placeholder="https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">
+                      Latest APK Version (`apk_latest_version`)
+                    </label>
+                    <input
+                      type="text"
+                      value={apkLatestVersion}
+                      onChange={(e) => setApkLatestVersion(e.target.value)}
+                      placeholder="1.0.2"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                    />
+                  </div>
                 </div>
               </div>
 

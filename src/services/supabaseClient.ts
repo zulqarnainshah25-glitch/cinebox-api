@@ -22,6 +22,11 @@ import {
   sanitizeReferralCode,
   TRIAL_DURATION_MS,
 } from './platformTrialReferralService';
+import {
+  decodeGlobalApkConfigCarrier,
+  DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
+  encodeGlobalApkConfigCarrier,
+} from './inAppUpdateService';
 
 /**
  * TASK 4: Least-Privilege Public Column Projections
@@ -80,6 +85,10 @@ export const DEFAULT_APP_CONFIG: AppConfigRecord = {
   admob_app_open_id: 'ca-app-pub-3940256099942544/9257395921',
   open_ads_same_tab: true,
   show_app_open_ad_once: false,
+  apk_download_url: DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
+  apk_latest_version: '1.0.1',
+  apk_release_notes:
+    'Latest CineBox Android APK (Google Drive Global Download, Native WebView Popup Blocker & Signature-Safe Update).',
 };
 
 /**
@@ -895,13 +904,17 @@ export async function deleteAppUser(userId: string): Promise<void> {
   }
 }
 
+let memoryAppConfigFallback: AppConfigRecord | null = null;
+
 export async function fetchAppConfig(): Promise<AppConfigRecord> {
-  let localConfig = { ...DEFAULT_APP_CONFIG };
+  let localConfig: AppConfigRecord = memoryAppConfigFallback
+    ? { ...DEFAULT_APP_CONFIG, ...memoryAppConfigFallback }
+    : { ...DEFAULT_APP_CONFIG };
   if (typeof window !== 'undefined') {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.APP_CONFIG);
       if (raw) {
-        localConfig = { ...DEFAULT_APP_CONFIG, ...JSON.parse(raw) };
+        localConfig = { ...localConfig, ...JSON.parse(raw) };
       }
     } catch {
       // Ignore parse error
@@ -924,14 +937,21 @@ export async function fetchAppConfig(): Promise<AppConfigRecord> {
         delete (safePublicData as any).admin_pin_hash;
         delete (safePublicData as any).admin_email;
 
-        const hasLocalOverride =
-          typeof window !== 'undefined' && Boolean(localStorage.getItem(STORAGE_KEYS.APP_CONFIG));
+        // Decode Global APK Download Link & Version carrier from Supabase `popup_ad_image`
+        const decodedApkMeta = decodeGlobalApkConfigCarrier(safePublicData.popup_ad_image);
+        if (decodedApkMeta) {
+          safePublicData.apk_download_url = decodedApkMeta.apkUrl;
+          safePublicData.apk_latest_version = decodedApkMeta.version;
+          safePublicData.apk_release_notes = decodedApkMeta.releaseNotes;
+        }
+
         localConfig = {
           ...localConfig,
           ...safePublicData,
           is_ads_enabled: false,
           banner_ad_html: '',
         };
+        memoryAppConfigFallback = { ...localConfig };
         if (typeof window !== 'undefined') {
           localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(localConfig));
         }
@@ -939,6 +959,21 @@ export async function fetchAppConfig(): Promise<AppConfigRecord> {
     } catch {
       // Graceful fallback
     }
+  }
+
+  // Also ensure any local carrier in popup_ad_image is decoded
+  const localDecodedApk = decodeGlobalApkConfigCarrier(localConfig.popup_ad_image);
+  if (localDecodedApk) {
+    localConfig.apk_download_url = localDecodedApk.apkUrl;
+    localConfig.apk_latest_version = localDecodedApk.version;
+    localConfig.apk_release_notes = localDecodedApk.releaseNotes;
+  }
+
+  if (!localConfig.apk_download_url) {
+    localConfig.apk_download_url = DEFAULT_GLOBAL_APK_DOWNLOAD_URL;
+  }
+  if (!localConfig.apk_latest_version) {
+    localConfig.apk_latest_version = '1.0.1';
   }
 
   if (
@@ -951,6 +986,7 @@ export async function fetchAppConfig(): Promise<AppConfigRecord> {
   // Strictly enforce 100% Ad-Free mode
   localConfig.is_ads_enabled = false;
   localConfig.banner_ad_html = '';
+  memoryAppConfigFallback = { ...localConfig };
   return localConfig;
 }
 
@@ -958,6 +994,28 @@ export async function updateAppConfig(
   partial: Partial<AppConfigRecord>
 ): Promise<{ ok: boolean; config: AppConfigRecord }> {
   const current = await fetchAppConfig();
+
+  const nextApkDownloadUrl =
+    partial.apk_download_url !== undefined
+      ? sanitizeSafeUrl(partial.apk_download_url) || current.apk_download_url || DEFAULT_GLOBAL_APK_DOWNLOAD_URL
+      : current.apk_download_url || DEFAULT_GLOBAL_APK_DOWNLOAD_URL;
+
+  const nextApkVersion =
+    partial.apk_latest_version !== undefined
+      ? partial.apk_latest_version.replace(/[<>'"`;\s]/g, '').replace(/^v/i, '').trim() || '1.0.1'
+      : current.apk_latest_version || '1.0.1';
+
+  const nextApkReleaseNotes =
+    partial.apk_release_notes !== undefined
+      ? partial.apk_release_notes.replace(/[<>]/g, '').trim().slice(0, 280)
+      : current.apk_release_notes || DEFAULT_APP_CONFIG.apk_release_notes || '';
+
+  const apkCarrierString = encodeGlobalApkConfigCarrier({
+    version: nextApkVersion,
+    apkUrl: nextApkDownloadUrl,
+    releaseNotes: nextApkReleaseNotes,
+  });
+
   const updated: AppConfigRecord = {
     ...current,
     ...partial,
@@ -967,10 +1025,26 @@ export async function updateAppConfig(
       partial.decentralized_manifest_url !== undefined
         ? sanitizeSafeUrl(partial.decentralized_manifest_url) || ''
         : current.decentralized_manifest_url || '',
+    apk_download_url: nextApkDownloadUrl,
+    apk_latest_version: nextApkVersion,
+    apk_release_notes: nextApkReleaseNotes,
+    popup_ad_image: apkCarrierString,
+    direct_ad_link: nextApkDownloadUrl,
   };
+
+  memoryAppConfigFallback = { ...updated };
 
   if (typeof window !== 'undefined') {
     localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(updated));
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('cinebox_global_config_sync');
+        bc.postMessage(updated);
+        bc.close();
+      }
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
   }
 
   const client = getSupabaseClient();
@@ -980,11 +1054,11 @@ export async function updateAppConfig(
         id: 1,
         app_name: updated.app_name,
         primary_theme: updated.primary_theme,
-        is_ads_enabled: updated.is_ads_enabled,
-        popup_ad_image: updated.popup_ad_image,
+        is_ads_enabled: false,
+        popup_ad_image: apkCarrierString,
         popup_ad_link: updated.popup_ad_link,
-        direct_ad_link: updated.direct_ad_link,
-        banner_ad_html: updated.banner_ad_html,
+        direct_ad_link: nextApkDownloadUrl,
+        banner_ad_html: '',
         admin_pin_hash: updated.admin_pin_hash || '1234',
         admin_email: updated.admin_email || 'ZulqarnainShah25@gmail.com',
         official_website: updated.official_website,

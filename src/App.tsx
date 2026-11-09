@@ -319,19 +319,33 @@ export default function App() {
     }
     setMovieLinksMap(map);
 
+    // 4. In-App Update Checker: Compare global Supabase `app_config` (Google Drive APK Link & Version) or /version.json against installed App version
+    checkForInAppApkUpdate({ globalAppConfig: cfg }).then((res) => {
+      if (res.checked && res.updateAvailable) {
+        setUpdateCheckResult(res);
+      }
+    });
+
     // If a Global Decentralized Manifest URL is configured, automatically sync from it in the background
     if (cfg.decentralized_manifest_url) {
       syncFromRemoteDecentralizedNode(cfg.decentralized_manifest_url)
         .then(async (syncRes) => {
           if (syncRes.ok) {
-            const [freshLinks, freshUsers] = await Promise.all([
+            const [freshCfg, freshLinks, freshUsers] = await Promise.all([
+              fetchAppConfig(),
               fetchAllMovieLinks(),
               fetchAllAppUsers(),
             ]);
+            setAppConfig(freshCfg);
             const nextMap: Record<number, MovieLinkRecord> = {};
             for (const r of freshLinks) nextMap[r.tmdb_id] = r;
             setMovieLinksMap(nextMap);
             setAppUsers(freshUsers);
+            checkForInAppApkUpdate({ globalAppConfig: freshCfg }).then((res) => {
+              if (res.checked && res.updateAvailable) {
+                setUpdateCheckResult(res);
+              }
+            });
           }
         })
         .catch(() => {});
@@ -341,13 +355,6 @@ export default function App() {
   useEffect(() => {
     refreshSupabaseData();
     setDetectedPlatform(detectAppPlatform());
-
-    // 4. In-App Update Checker: Fetch /version.json on startup & compare with App.getInfo().version
-    checkForInAppApkUpdate().then((res) => {
-      if (res.checked && res.updateAvailable) {
-        setUpdateCheckResult(res);
-      }
-    });
 
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -361,6 +368,49 @@ export default function App() {
       if (refFromUrl) {
         setInitialReferralCode(refFromUrl);
       }
+
+      // Sync global config across tabs and when window regains focus
+      const handleFocusSync = () => {
+        fetchAppConfig()
+          .then((latestCfg) => {
+            setAppConfig(latestCfg);
+            checkForInAppApkUpdate({ globalAppConfig: latestCfg }).then((res) => {
+              if (res.checked && res.updateAvailable) {
+                setUpdateCheckResult(res);
+              }
+            });
+          })
+          .catch(() => {});
+      };
+      window.addEventListener('focus', handleFocusSync);
+
+      let bc: BroadcastChannel | null = null;
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          bc = new BroadcastChannel('cinebox_global_config_sync');
+          bc.onmessage = (ev) => {
+            if (ev?.data && typeof ev.data === 'object') {
+              const incomingCfg = ev.data as AppConfigRecord;
+              setAppConfig(incomingCfg);
+              checkForInAppApkUpdate({ globalAppConfig: incomingCfg }).then((res) => {
+                if (res.checked && res.updateAvailable) {
+                  setUpdateCheckResult(res);
+                  setIsUpdateDialogDismissed(false);
+                }
+              });
+            }
+          };
+        }
+      } catch {
+        // ignore
+      }
+
+      return () => {
+        window.removeEventListener('focus', handleFocusSync);
+        if (bc) {
+          bc.close();
+        }
+      };
     }
   }, []);
 
@@ -862,18 +912,37 @@ export default function App() {
             </div>
           </form>
 
-          {/* Right Action: ONLY shown when Admin Session is Unlocked (Hidden from regular users!) */}
-          {isAdminUnlocked && (
-            <button
-              type="button"
-              data-testid="header-admin-console-btn"
-              onClick={() => setAdminModalState({ open: true, tab: 'admin' })}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-950/90 hover:bg-emerald-900 border border-[#10d97b]/60 text-xs font-extrabold text-[#10d97b] shrink-0 whitespace-nowrap"
-            >
-              <ShieldCheck className="w-4 h-4" />
-              <span>Admin Console</span>
-            </button>
-          )}
+          {/* Right Actions: Global APK Download Link + Restricted Admin Console */}
+          <div className="flex items-center gap-2 shrink-0">
+            {appConfig.apk_download_url && (
+              <a
+                href={appConfig.apk_download_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="header-download-apk-btn"
+                title={`Download Official Android APK (v${appConfig.apk_latest_version || '1.0.1'})`}
+                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#142920] hover:bg-[#193529] border border-[#10d97b]/40 text-xs font-extrabold text-[#10d97b] whitespace-nowrap transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">
+                  Download APK (v{appConfig.apk_latest_version || '1.0.1'})
+                </span>
+                <span className="sm:hidden">APK</span>
+              </a>
+            )}
+
+            {isAdminUnlocked && (
+              <button
+                type="button"
+                data-testid="header-admin-console-btn"
+                onClick={() => setAdminModalState({ open: true, tab: 'admin' })}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-950/90 hover:bg-emerald-900 border border-[#10d97b]/60 text-xs font-extrabold text-[#10d97b] shrink-0 whitespace-nowrap"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                <span>Admin Console</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Top Horizontal Category Tabs */}
@@ -1923,7 +1992,15 @@ export default function App() {
             }
             showToast('Admin Session Locked.');
           }}
-          onConfigUpdated={(nextCfg) => setAppConfig(nextCfg)}
+          onConfigUpdated={(nextCfg) => {
+            setAppConfig(nextCfg);
+            checkForInAppApkUpdate({ globalAppConfig: nextCfg }).then((res) => {
+              if (res.checked && res.updateAvailable) {
+                setUpdateCheckResult(res);
+                setIsUpdateDialogDismissed(false);
+              }
+            });
+          }}
           onLinksUpdated={refreshSupabaseData}
           onUsersUpdated={(updatedUsers) => setAppUsers(updatedUsers)}
           onPreviewPopupAd={() => {

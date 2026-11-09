@@ -146,6 +146,9 @@ export interface AppConfigRecord {
   admob_app_open_id?: string;
   open_ads_same_tab?: boolean;
   show_app_open_ad_once?: boolean;
+  apk_download_url?: string;
+  apk_latest_version?: string;
+  apk_release_notes?: string;
 }
 
 export interface DecentralizedManifestPayload {

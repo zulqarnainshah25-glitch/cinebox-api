@@ -1,9 +1,14 @@
+import { AppConfigRecord } from '../types/movie';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
 
 export const DEFAULT_CURRENT_APP_VERSION = '1.0.0';
 export const DEFAULT_VERSION_JSON_URL = '/version.json';
+export const DEFAULT_GLOBAL_APK_DOWNLOAD_URL =
+  'https://drive.google.com/file/d/1CineBoxOfficialReleaseApk/view?usp=sharing';
 export const GITHUB_VERSION_JSON_EXAMPLE_URL =
   'https://raw.githubusercontent.com/cinebox-official/cinebox-apk/main/version.json';
+
+export const CINEBOX_APK_META_PREFIX = 'CINEBOX_APK_META::';
 
 export interface RemoteVersionManifest {
   version: string;
@@ -18,7 +23,149 @@ export interface InAppUpdateCheckResult {
   remoteVersion: string;
   apkUrl: string;
   releaseNotes: string;
+  isGoogleDriveLink?: boolean;
+  source?: 'supabase-global-config' | 'version-json';
   error?: string;
+}
+
+/**
+ * Extracts a Google Drive File ID from common Google Drive URL formats:
+ * - `https://drive.google.com/file/d/{FILE_ID}/view?usp=sharing`
+ * - `https://drive.google.com/open?id={FILE_ID}`
+ * - `https://drive.google.com/uc?export=download&id={FILE_ID}`
+ * - `https://drive.usercontent.google.com/download?id={FILE_ID}&export=download`
+ */
+export function extractGoogleDriveFileId(rawUrl: string | null | undefined): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  const safe = sanitizeSafeUrl(trimmed);
+  if (!safe) return null;
+
+  try {
+    const parsed = new URL(safe);
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host !== 'drive.google.com' &&
+      host !== 'docs.google.com' &&
+      host !== 'drive.usercontent.google.com'
+    ) {
+      return null;
+    }
+
+    // 1. Check /file/d/{FILE_ID}
+    const pathMatch = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]{6,120})/);
+    if (pathMatch && pathMatch[1]) {
+      return pathMatch[1];
+    }
+
+    // 2. Check ?id={FILE_ID}
+    const queryId = parsed.searchParams.get('id');
+    if (queryId && /^[a-zA-Z0-9_-]{6,120}$/.test(queryId.trim())) {
+      return queryId.trim();
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Converts a standard Google Drive share link (`/file/d/{ID}/view?usp=sharing`)
+ * into a direct download link (`https://drive.google.com/uc?export=download&id={ID}`).
+ * If the URL is not a Google Drive link, returns the sanitized URL unchanged.
+ */
+export function toGoogleDriveDirectDownloadUrl(rawUrl: string | null | undefined): string {
+  const safe = sanitizeSafeUrl(rawUrl);
+  if (!safe) return '';
+  const fileId = extractGoogleDriveFileId(safe);
+  if (!fileId) return safe;
+  return `https://drive.google.com/uc?export=download&id=${fileId}`;
+}
+
+/**
+ * Increments the patch segment of a semantic version string (e.g. "1.0.1" -> "1.0.2").
+ */
+export function bumpSemverPatchVersion(version: string | null | undefined): string {
+  const clean = (version || '1.0.0')
+    .trim()
+    .replace(/^v/i, '')
+    .split('-')[0];
+  const parts = clean.split('.').map((n) => parseInt(n, 10));
+  const major = Number.isFinite(parts[0]) && parts[0] >= 0 ? parts[0] : 1;
+  const minor = Number.isFinite(parts[1]) && parts[1] >= 0 ? parts[1] : 0;
+  const patch = Number.isFinite(parts[2]) && parts[2] >= 0 ? parts[2] + 1 : 1;
+  return `${major}.${minor}.${patch}`;
+}
+
+/**
+ * Encodes global APK metadata (`version`, `apkUrl`, `releaseNotes`) into a compact string carrier
+ * so it can be persisted inside existing guaranteed `public.app_config` columns in Supabase
+ * even before optional schema migrations are executed.
+ */
+export function encodeGlobalApkConfigCarrier(meta: {
+  version: string;
+  apkUrl: string;
+  releaseNotes?: string;
+}): string {
+  const safeUrl = sanitizeSafeUrl(meta.apkUrl) || '';
+  const cleanVersion =
+    (meta.version || '1.0.1')
+      .trim()
+      .replace(/^v/i, '')
+      .replace(/[^0-9a-zA-Z._-]/g, '')
+      .slice(0, 32) || '1.0.1';
+  const cleanNotes = (meta.releaseNotes || '')
+    .replace(/[<>]/g, '')
+    .trim()
+    .slice(0, 280);
+
+  return `${CINEBOX_APK_META_PREFIX}${JSON.stringify({
+    version: cleanVersion,
+    apkUrl: safeUrl,
+    releaseNotes: cleanNotes,
+  })}`;
+}
+
+/**
+ * Decodes a `CINEBOX_APK_META::` carrier string from Supabase `public.app_config`.
+ */
+export function decodeGlobalApkConfigCarrier(rawCarrier: string | null | undefined): {
+  version: string;
+  apkUrl: string;
+  releaseNotes: string;
+} | null {
+  if (
+    !rawCarrier ||
+    typeof rawCarrier !== 'string' ||
+    !rawCarrier.startsWith(CINEBOX_APK_META_PREFIX)
+  ) {
+    return null;
+  }
+  try {
+    const jsonPart = rawCarrier.slice(CINEBOX_APK_META_PREFIX.length);
+    const parsed = JSON.parse(jsonPart) as Record<string, unknown>;
+    const safeUrl =
+      typeof parsed.apkUrl === 'string' ? sanitizeSafeUrl(parsed.apkUrl) : null;
+    if (!safeUrl || !safeUrl.startsWith('https://')) {
+      return null;
+    }
+    const rawVer =
+      typeof parsed.version === 'string' && parsed.version.trim()
+        ? parsed.version.trim().replace(/^v/i, '')
+        : '1.0.1';
+    const notes =
+      typeof parsed.releaseNotes === 'string'
+        ? parsed.releaseNotes.replace(/[<>]/g, '').trim().slice(0, 280)
+        : '';
+    return {
+      version: rawVer,
+      apkUrl: safeUrl,
+      releaseNotes: notes,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -88,7 +235,7 @@ export async function getInstalledAppVersion(overrideVersion?: string): Promise<
 
 /**
  * Validates and parses the `version.json` payload:
- * `{ "version": "1.0.1", "apk_url": "https://github.com/.../app-release.apk" }`
+ * `{ "version": "1.0.1", "apk_url": "https://drive.google.com/... or https://github.com/.../app-release.apk" }`
  * Rejects non-HTTPS or XSS `apk_url` values.
  */
 export function parseRemoteVersionManifest(rawPayload: unknown): {
@@ -131,14 +278,44 @@ export function parseRemoteVersionManifest(rawPayload: unknown): {
 }
 
 /**
- * Fetches `version.json` on app startup and compares its `version` against `App.getInfo().version`.
+ * Checks for an In-App APK Update on startup or when the Admin updates `app_config` globally:
+ * 1. First checks if a valid global APK download URL & version are configured in Supabase `app_config`
+ *    (`globalAppConfig.apk_download_url` and `globalAppConfig.apk_latest_version`).
+ * 2. Otherwise fetches `/version.json` and compares its `version` against `App.getInfo().version`.
  */
 export async function checkForInAppApkUpdate(options?: {
   versionJsonUrl?: string;
   currentVersionOverride?: string;
+  globalAppConfig?: Partial<AppConfigRecord> | null;
   fetchImpl?: typeof fetch;
 }): Promise<InAppUpdateCheckResult> {
   const currentVersion = await getInstalledAppVersion(options?.currentVersionOverride);
+
+  // 1. Check Admin-configured Global APK Link in Supabase `app_config`
+  if (options?.globalAppConfig?.apk_download_url) {
+    const globalParsed = parseRemoteVersionManifest({
+      version: options.globalAppConfig.apk_latest_version || '1.0.1',
+      apk_url: options.globalAppConfig.apk_download_url,
+      release_notes:
+        options.globalAppConfig.apk_release_notes ||
+        'New CineBox APK version available via Global Admin Download Link.',
+    });
+
+    if (globalParsed.valid && globalParsed.manifest) {
+      const isNewer = compareSemverVersions(globalParsed.manifest.version, currentVersion) > 0;
+      return {
+        checked: true,
+        updateAvailable: isNewer,
+        currentVersion,
+        remoteVersion: globalParsed.manifest.version,
+        apkUrl: globalParsed.manifest.apk_url,
+        releaseNotes: globalParsed.manifest.release_notes || '',
+        isGoogleDriveLink: Boolean(extractGoogleDriveFileId(globalParsed.manifest.apk_url)),
+        source: 'supabase-global-config',
+      };
+    }
+  }
+
   const targetUrl = options?.versionJsonUrl || DEFAULT_VERSION_JSON_URL;
   const fetchFn = options?.fetchImpl || (typeof fetch !== 'undefined' ? fetch : undefined);
 
@@ -198,6 +375,8 @@ export async function checkForInAppApkUpdate(options?: {
       remoteVersion: parsed.manifest.version,
       apkUrl: parsed.manifest.apk_url,
       releaseNotes: parsed.manifest.release_notes || '',
+      isGoogleDriveLink: Boolean(extractGoogleDriveFileId(parsed.manifest.apk_url)),
+      source: 'version-json',
     };
   } catch (err) {
     return {
@@ -314,3 +493,40 @@ jobs:
         with:
           name: app-release-signed
           path: android/app/build/outputs/apk/release/app-release.apk`;
+
+export const ANDROID_MAIN_ACTIVITY_POPUP_BLOCKER_JAVA = `package com.cinebox.stream;
+
+import android.os.Bundle;
+import android.os.Message;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebChromeClient;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        if (getBridge() != null && getBridge().getWebView() != null) {
+            WebView webView = getBridge().getWebView();
+            WebSettings settings = webView.getSettings();
+
+            settings.setJavaScriptCanOpenWindowsAutomatically(false);
+            settings.setSupportMultipleWindows(true);
+            settings.setMediaPlaybackRequiresUserGesture(false);
+
+            webView.setWebChromeClient(new BridgeWebChromeClient(getBridge()) {
+                @Override
+                public boolean onCreateWindow(
+                    WebView view,
+                    boolean isDialog,
+                    boolean isUserGesture,
+                    Message resultMsg
+                ) {
+                    return false;
+                }
+            });
+        }
+    }
+}`;

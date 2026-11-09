@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Code2,
   Copy,
+  Download,
   History,
   LogIn,
   LogOut,
@@ -18,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   Sliders,
+  Smartphone,
   Star,
   Trash2,
   Tv,
@@ -238,6 +240,45 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
           )}
         </button>
       </div>
+
+      {/* Global Android APK Download Card (Synced with Admin Panel Google Drive / Direct Link) */}
+      {appConfig.apk_download_url && (
+        <div
+          data-testid="profile-download-apk-card"
+          className="w-full p-4 rounded-2xl bg-gradient-to-r from-[#0e241b] to-[#131d29] border border-[#10d97b]/35 flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-[#10d97b]/15 border border-[#10d97b]/40 text-[#10d97b] flex items-center justify-center shrink-0">
+              <Smartphone className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-2 flex-wrap">
+                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.1'})</span>
+                <span className="px-2 py-0.5 rounded bg-emerald-950 border border-[#10d97b]/40 text-[10px] font-mono text-[#10d97b]">
+                  Global Cloud Link
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 truncate mt-0.5">
+                {appConfig.apk_release_notes ||
+                  'Download the latest signed CineBox APK directly from Google Drive.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href={appConfig.apk_download_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="profile-download-apk-btn"
+              className="px-3.5 py-2 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs flex items-center gap-1.5 shadow-md transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download APK</span>
+            </a>
+          </div>
+        </div>
+      )}
 
       {/* Referral & Rewards Center Card (Share https://site/ref/{code} via navigator.share) */}
       {(() => {

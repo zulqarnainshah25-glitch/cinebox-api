@@ -1821,3 +1821,114 @@ test('System 4: Signature-Safe In-App Update Checker (version.json vs App.getInf
   assert.equal(ANDROID_BUILD_GRADLE_SIGNING_CONFIG.includes('release-keystore.jks'), true);
   assert.equal(GITHUB_ACTIONS_JKS_WORKFLOW_YAML.includes('CINEBOX_KEYSTORE_BASE64'), true);
 });
+
+test('Android Native WebView Popup Blocker: MainActivity.java exists at android/app/src/main/java/com/cinebox/stream/MainActivity.java and overrides onCreateWindow returning false without iframe sandbox', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  const mainActivityPath = path.resolve(
+    process.cwd(),
+    'android/app/src/main/java/com/cinebox/stream/MainActivity.java'
+  );
+  assert.equal(fs.existsSync(mainActivityPath), true);
+
+  const javaCode = fs.readFileSync(mainActivityPath, 'utf8');
+  assert.equal(javaCode.includes('package com.cinebox.stream;'), true);
+  assert.equal(javaCode.includes('public class MainActivity extends BridgeActivity'), true);
+  assert.equal(javaCode.includes('settings.setJavaScriptCanOpenWindowsAutomatically(false);'), true);
+  assert.equal(javaCode.includes('settings.setSupportMultipleWindows(true);'), true);
+  assert.equal(javaCode.includes('public boolean onCreateWindow('), true);
+  assert.equal(javaCode.includes('return false;'), true);
+
+  // Also verify workflow preserves MainActivity.java during APK build
+  const workflowPath = path.resolve(
+    process.cwd(),
+    '.github/workflows/android-release-apk.yml'
+  );
+  const workflowYaml = fs.readFileSync(workflowPath, 'utf8');
+  assert.equal(
+    workflowYaml.includes('android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    true
+  );
+});
+
+test('Global Admin APK Download Link (Google Drive / Direct URL): extracts Google Drive file IDs, converts to direct download URL, persists globally in app_config, and triggers In-App Update Checker', async () => {
+  const {
+    extractGoogleDriveFileId,
+    toGoogleDriveDirectDownloadUrl,
+    bumpSemverPatchVersion,
+    encodeGlobalApkConfigCarrier,
+    decodeGlobalApkConfigCarrier,
+    checkForInAppApkUpdate,
+  } = await import('../services/inAppUpdateService');
+  const { updateAppConfig, fetchAppConfig } = await import('../services/supabaseClient');
+
+  // 1. Google Drive File ID extraction & Direct URL conversion
+  const shareUrl =
+    'https://drive.google.com/file/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ_99/view?usp=sharing';
+  assert.equal(extractGoogleDriveFileId(shareUrl), '1aBcDeFgHiJkLmNoPqRsTuVwXyZ_99');
+  assert.equal(
+    toGoogleDriveDirectDownloadUrl(shareUrl),
+    'https://drive.google.com/uc?export=download&id=1aBcDeFgHiJkLmNoPqRsTuVwXyZ_99'
+  );
+
+  const openUrl = 'https://drive.google.com/open?id=1xYzAbCdEfGhIjKlMnOpQrStUv';
+  assert.equal(extractGoogleDriveFileId(openUrl), '1xYzAbCdEfGhIjKlMnOpQrStUv');
+
+  // Non-Drive URL returns null for fileId and preserves safe URL
+  assert.equal(
+    extractGoogleDriveFileId('https://github.com/cinebox/releases/app.apk'),
+    null
+  );
+  // Malicious XSS URL is rejected
+  assert.equal(extractGoogleDriveFileId('javascript:alert(1)'), null);
+  assert.equal(toGoogleDriveDirectDownloadUrl('javascript:alert(1)'), '');
+
+  // 2. Version bump helper
+  assert.equal(bumpSemverPatchVersion('1.0.1'), '1.0.2');
+  assert.equal(bumpSemverPatchVersion('v2.4.9'), '2.4.10');
+
+  // 3. Global Supabase Carrier encode/decode & XSS stripping
+  const encoded = encodeGlobalApkConfigCarrier({
+    version: '1.0.5',
+    apkUrl: shareUrl,
+    releaseNotes: 'New Google Drive APK <script>alert(1)</script> update',
+  });
+  const decoded = decodeGlobalApkConfigCarrier(encoded);
+  assert.ok(decoded);
+  assert.equal(decoded?.version, '1.0.5');
+  assert.equal(decoded?.apkUrl, shareUrl);
+  assert.equal(decoded?.releaseNotes.includes('<script>'), false);
+
+  // Rejects non-HTTPS carrier URLs
+  const insecureCarrier = 'CINEBOX_APK_META::{"version":"1.0.5","apkUrl":"http://evil.com/a.apk"}';
+  assert.equal(decodeGlobalApkConfigCarrier(insecureCarrier), null);
+
+  // 4. Admin updates APK Download Link & Version in global app_config -> checkForInAppApkUpdate uses new Google Drive link
+  const newDriveUrl =
+    'https://drive.google.com/uc?export=download&id=1NewVersionApkGoogleDriveId2026';
+  const savedRes = await updateAppConfig({
+    apk_download_url: newDriveUrl,
+    apk_latest_version: '1.0.6',
+    apk_release_notes: 'Updated Google Drive APK v1.0.6',
+  });
+  assert.equal(savedRes.ok, true);
+  assert.equal(savedRes.config.apk_download_url, newDriveUrl);
+  assert.equal(savedRes.config.apk_latest_version, '1.0.6');
+
+  const fetchedCfg = await fetchAppConfig();
+  assert.equal(fetchedCfg.apk_download_url, newDriveUrl);
+  assert.equal(fetchedCfg.apk_latest_version, '1.0.6');
+
+  const updateCheck = await checkForInAppApkUpdate({
+    currentVersionOverride: '1.0.1',
+    globalAppConfig: fetchedCfg,
+  });
+  assert.equal(updateCheck.checked, true);
+  assert.equal(updateCheck.updateAvailable, true);
+  assert.equal(updateCheck.remoteVersion, '1.0.6');
+  assert.equal(updateCheck.apkUrl, newDriveUrl);
+  assert.equal(updateCheck.isGoogleDriveLink, true);
+  assert.equal(updateCheck.source, 'supabase-global-config');
+});
+
