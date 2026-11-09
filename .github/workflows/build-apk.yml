@@ -31,7 +31,7 @@ jobs:
         run: npm run build
 
       - name: Sync Capacitor
-        run: npx cap sync android
+        run: node ./node_modules/@capacitor/cli/bin/capacitor sync android # <-- YEH LINE BADLI HAI
 
       - name: Build Debug APK
         run: |
