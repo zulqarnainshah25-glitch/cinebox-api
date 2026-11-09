@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Signed Android APK
 
 on:
   push:
@@ -24,28 +24,37 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      # Yahan humne Capacitor CLI ko install karna shamil kiya hai
       - name: Install Dependencies
         run: |
           npm install --legacy-peer-deps
-          npm install @capacitor/cli --legacy-peer-deps
+          npm install @capacitor/cli @capacitor/core @capacitor/android --legacy-peer-deps
 
       - name: Build Web App
         run: npm run build
 
-      # Ab npx cap sync bina kisi masle ke chalega
       - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: Build Debug APK
+      - name: Decode Keystore
+        id: decode_keystore
+        uses: timheuer/base64-to-file@v1.2
+        with:
+          fileName: 'cinebox-release.jks'
+          encodedString: ${{ secrets.KEYSTORE_BASE64 }}
+
+      - name: Build Signed Release APK
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=${{ steps.decode_keystore.outputs.filePath }} \
+            -Pandroid.injected.signing.store.password=${{ secrets.KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }}
 
-      - name: Upload APK Artifact
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: CineBox-Debug-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: CineBox-Release-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
