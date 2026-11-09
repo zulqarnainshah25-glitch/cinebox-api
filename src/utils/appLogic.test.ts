@@ -1,0 +1,1605 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  sanitizeSafeUrl,
+  sanitizeFileName,
+  buildPublicExportPath,
+  sanitizeBannerHtml,
+  verifyAdminPinWithRateLimit,
+  validateMovieLinkInput,
+  validateAppUserInput,
+  parseDirectBulkMovieLinksInput,
+  evaluateGlobalUserAccess,
+  generateAllottedUserId,
+  verifyAdminPinRecovery,
+  parseAdsterraSnippet,
+} from './securityValidator';
+import {
+  buildEmbedServerList,
+  getCleanIframeAttributes,
+  resolvePlaybackPlan,
+  parseFileSizeMB,
+  formatPlayerTimecode,
+  FALLBACK_TEST_MP4_720P,
+  sanitizeSearchQuery,
+  addRecentSearchQuery,
+  removeRecentSearchQuery,
+} from './streamResolver';
+import {
+  parseMovieFileName,
+  parseHosterFilesList,
+} from '../services/videoHosterIntegration';
+import {
+  buildCustomFetchHeaders,
+  sanitizeHeaderValue,
+} from './blobStreamFetcher';
+import {
+  buildProxiedUrl,
+  MOVIEBOX_REQUIRED_HEADERS,
+  parseMovieBoxSearchResponse,
+  parseMovieBoxStreamResponse,
+} from '../services/movieBoxDirectApi';
+
+test('Security: sanitizeSafeUrl allows valid https/http and blocks XSS schemes', () => {
+  assert.equal(
+    sanitizeSafeUrl('https://commondatastorage.googleapis.com/sample.mp4'),
+    'https://commondatastorage.googleapis.com/sample.mp4'
+  );
+  assert.equal(sanitizeSafeUrl('javascript:alert(document.cookie)'), null);
+  assert.equal(sanitizeSafeUrl('JAVASCRIPT:eval("evil()")'), null);
+  assert.equal(sanitizeSafeUrl('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(sanitizeSafeUrl(''), null);
+  assert.equal(sanitizeSafeUrl(null), null);
+});
+
+test('Security: sanitizeFileName and buildPublicExportPath block path traversal attacks', () => {
+  const maliciousTitle = '../../../etc/passwd [Hindi] <script>';
+  const safeName = sanitizeFileName(maliciousTitle, '720p', 'mp4');
+  assert.equal(safeName.includes('..'), false);
+  assert.equal(safeName.includes('/'), false);
+  assert.equal(safeName.includes('<'), false);
+  assert.equal(safeName, 'etcpasswd_Hindi_script_720p.mp4');
+
+  const publicPath = buildPublicExportPath('../../RootHack', 'Immortal [Hindi]', '720p');
+  assert.equal(publicPath, 'Download/RootHack/Immortal_Hindi_720p.mp4');
+});
+
+test('Security: sanitizeBannerHtml strips script tags, iframes, and inline event handlers', () => {
+  const dirtyHtml =
+    '<div onclick="stealToken()">Promo <script> evil() </script><img src="x" onerror="alert(1)" /><a href="javascript:hack()">Click</a></div>';
+  const cleanHtml = sanitizeBannerHtml(dirtyHtml);
+  assert.equal(cleanHtml.includes('<script'), false);
+  assert.equal(cleanHtml.includes('onclick'), false);
+  assert.equal(cleanHtml.includes('onerror'), false);
+  assert.equal(cleanHtml.includes('javascript:'), false);
+  assert.equal(cleanHtml.includes('Promo'), true);
+});
+
+test('Security: verifyAdminPinWithRateLimit enforces lockout after 5 failed attempts', () => {
+  let state = { failedAttempts: 0, lockedUntilMs: 0 };
+  const now = 1_700_000_000_000;
+
+  for (let i = 1; i <= 4; i++) {
+    const res = verifyAdminPinWithRateLimit('0000', '1234', state, now);
+    assert.equal(res.allowed, false);
+    assert.equal(res.locked, false);
+    state = res.nextState;
+  }
+
+  const fifth = verifyAdminPinWithRateLimit('0000', '1234', state, now);
+  assert.equal(fifth.allowed, false);
+  assert.equal(fifth.locked, true);
+  assert.equal(fifth.remainingLockSeconds, 60);
+  state = fifth.nextState;
+
+  const duringLock = verifyAdminPinWithRateLimit('1234', '1234', state, now + 10_000);
+  assert.equal(duringLock.allowed, false);
+  assert.equal(duringLock.locked, true);
+
+  const afterExpiry = verifyAdminPinWithRateLimit('1234', '1234', state, now + 61_000);
+  assert.equal(afterExpiry.allowed, true);
+  assert.equal(afterExpiry.locked, false);
+  assert.equal(afterExpiry.nextState.failedAttempts, 0);
+});
+
+test('Validation: validateMovieLinkInput rejects invalid tmdb_id or malicious URLs', () => {
+  const badId = validateMovieLinkInput({ tmdb_id: -5, language: 'Hindi' });
+  assert.equal(badId.valid, false);
+
+  const badUrl = validateMovieLinkInput({
+    tmdb_id: 533535,
+    direct_video_url: 'javascript:alert(1)',
+  });
+  assert.equal(badUrl.valid, false);
+
+  const valid = validateMovieLinkInput({
+    tmdb_id: 533535,
+    title: 'Deadpool & Wolverine',
+    language: 'Hindi',
+    direct_video_url: 'https://cdn.example.com/movie.m3u8',
+  });
+  assert.equal(valid.valid, true);
+  assert.equal(valid.sanitized?.tmdb_id, 533535);
+});
+
+test('Hybrid Player: resolvePlaybackPlan defaults to Server 3 (2Embed) and hides sandbox-blocked Server 2 & Server 4', () => {
+  const moviePlan = resolvePlaybackPlan(550, null, 'movie');
+  assert.equal(moviePlan.preferredMode, 'embed');
+  assert.equal(moviePlan.directVideoUrl, null);
+  assert.equal(typeof moviePlan.testFallbackMp4Url, 'string');
+  assert.ok(moviePlan.testFallbackMp4Url.startsWith('https://'));
+  // Server 3 (2Embed), Server 1 (VidSrc.sh), and 3 Hindi/Dual-Audio servers are returned
+  assert.equal(moviePlan.embedServers.length, 5);
+  assert.equal(moviePlan.embedServers[0].id, 'auto-server-3');
+  assert.equal(moviePlan.embedServers[0].url, 'https://www.2embed.cc/embed/550');
+  assert.equal(moviePlan.embedServers[1].id, 'auto-server-1');
+  assert.equal(moviePlan.embedServers[1].url, 'https://vidsrc.sh/embed/movie/550?ds_lang=en');
+  assert.equal(moviePlan.embedServers[2].id, 'hindi-multiembed');
+  assert.equal(moviePlan.embedServers[3].id, 'hindi-autoembed');
+  assert.equal(moviePlan.embedServers[4].id, 'hindi-vidsrc-icu');
+
+  const tvPlanDefault = resolvePlaybackPlan(1399, null, 'tv', 1, 1);
+  assert.equal(tvPlanDefault.preferredMode, 'embed');
+  assert.equal(tvPlanDefault.embedServers.length, 5);
+  assert.equal(tvPlanDefault.embedServers[0].id, 'auto-server-3');
+  assert.equal(tvPlanDefault.embedServers[0].url, 'https://www.2embed.cc/embedtv/1399&s=1&e=1');
+  assert.equal(tvPlanDefault.embedServers[1].id, 'auto-server-1');
+  assert.equal(tvPlanDefault.embedServers[1].url, 'https://vidsrc.sh/embed/tv/1399/1/1?ds_lang=en');
+
+  const tvPlanS2E5 = buildEmbedServerList(1399, 'tv', 2, 5);
+  assert.equal(tvPlanS2E5[0].url, 'https://www.2embed.cc/embedtv/1399&s=2&e=5');
+  assert.equal(tvPlanS2E5[1].url, 'https://vidsrc.sh/embed/tv/1399/2/5?ds_lang=en');
+
+  const hlsPlan = resolvePlaybackPlan(
+    533535,
+    {
+      tmdb_id: 533535,
+      language: 'Hindi Dub',
+      direct_video_url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+      stream_url: 'https://custom.embed/movie/533535',
+      download_480p: 'https://cdn.example.com/movie-480p.mp4',
+      download_720p: 'https://cdn.example.com/movie-720p.mp4',
+    },
+    'movie'
+  );
+  assert.equal(hlsPlan.preferredMode, 'direct-hls');
+  assert.equal(hlsPlan.embedServers.length, 6);
+  assert.equal(hlsPlan.embedServers[0].isCustom, true);
+});
+
+test('Recent Searches: sanitizeSearchQuery, addRecentSearchQuery, and removeRecentSearchQuery handle XSS and deduplication', () => {
+  assert.equal(sanitizeSearchQuery('  <script>Avatar</script>  '), 'scriptAvatar/script');
+  let list = addRecentSearchQuery([], 'Avatar');
+  list = addRecentSearchQuery(list, 'Jawan');
+  list = addRecentSearchQuery(list, 'avatar'); // case-insensitive duplicate moves to front
+  assert.deepEqual(list, ['avatar', 'Jawan']);
+
+  list = removeRecentSearchQuery(list, 'AVATAR');
+  assert.deepEqual(list, ['Jawan']);
+});
+
+test('Utilities: formatPlayerTimecode and parseFileSizeMB handle edge cases', () => {
+  assert.equal(formatPlayerTimecode(1228), '20:28');
+  assert.equal(formatPlayerTimecode(7781), '2:09:41');
+  assert.equal(formatPlayerTimecode(-10), '00:00');
+  assert.equal(parseFileSizeMB('1020.6MB'), 1020.6);
+  assert.equal(parseFileSizeMB('1.5GB'), 1536);
+  assert.equal(parseFileSizeMB(null, 500), 500);
+});
+
+test('Video Hoster: parseMovieFileName and parseHosterFilesList handle scene releases and API responses', () => {
+  const parsed1 = parseMovieFileName('Deadpool.and.Wolverine.2024.1080p.WEBRip.Hindi.x264.mp4');
+  assert.equal(parsed1.cleanTitle, 'Deadpool and Wolverine');
+  assert.equal(parsed1.year, '2024');
+
+  const parsed2 = parseMovieFileName('Jawan_2023_720p_Hindi_Dubbed.mkv');
+  assert.equal(parsed2.cleanTitle, 'Jawan');
+  assert.equal(parsed2.year, '2023');
+
+  const rawList = `
+# Sample Host List
+Inception | https://streamwish.com/e/incp123 | https://streamwish.com/d/incp123.mp4
+Interstellar | intst456
+`;
+  const items = parseHosterFilesList(rawList, 'streamwish');
+  assert.equal(items.length, 2);
+  assert.equal(items[0].title, 'Inception');
+  assert.equal(items[0].fileCode, 'incp123');
+  assert.equal(items[0].embedUrl, 'https://streamwish.com/e/incp123');
+  assert.equal(items[1].title, 'Interstellar');
+  assert.equal(items[1].fileCode, 'intst456');
+  assert.equal(items[1].embedUrl, 'https://streamwish.com/e/intst456');
+});
+
+test('Blob Stream Fetcher: buildCustomFetchHeaders sets User-Agent & Referer and strips CRLF injection', () => {
+  const clean = sanitizeHeaderValue('Mozilla/5.0\r\nX-Injected: hacked');
+  assert.equal(clean, 'Mozilla/5.0X-Injected: hacked');
+
+  const headers = buildCustomFetchHeaders({
+    userAgent: 'CustomPlayer/1.0 (Android 14)',
+    referer: 'https://streamwish.com/e/abc123',
+  });
+  assert.equal(headers['User-Agent'], 'CustomPlayer/1.0 (Android 14)');
+  assert.equal(headers['Referer'], 'https://streamwish.com/e/abc123');
+});
+
+test('MovieBox Direct Proxy API: builds proxy URLs, headers, and parses search & stream responses', () => {
+  const target = 'https://h5.aoneroom.com/wefeed-h5api-bff/subject/search?keyword=Avatar';
+  assert.equal(
+    buildProxiedUrl(target, 'https://corsproxy.io/?'),
+    'https://corsproxy.io/?https%3A%2F%2Fh5.aoneroom.com%2Fwefeed-h5api-bff%2Fsubject%2Fsearch%3Fkeyword%3DAvatar'
+  );
+  assert.equal(
+    MOVIEBOX_REQUIRED_HEADERS['User-Agent'],
+    'com.community.mbox.in/50020130 (Linux; U; Android 14; en_IN; Pixel 8; Build/UD1A.230803.041; Cronet/145.0.7582.0)'
+  );
+  assert.equal(MOVIEBOX_REQUIRED_HEADERS['Referer'], 'https://api3.aoneroom.com/');
+
+  const mockSearchJson = {
+    data: {
+      items: [
+        {
+          subjectId: '987654',
+          title: 'Avatar: Fire and Ash',
+          cover: { url: 'https://image.tmdb.org/t/p/w500/avatar.jpg' },
+          releaseDate: '2025-12-19',
+          imdbRatingValue: '8.7',
+        },
+      ],
+    },
+  };
+  const parsedItems = parseMovieBoxSearchResponse(mockSearchJson);
+  assert.equal(parsedItems.length, 1);
+  assert.equal(parsedItems[0].id, 987654);
+  assert.equal(parsedItems[0].originalTitle, '987654');
+  assert.equal(parsedItems[0].title, 'Avatar: Fire and Ash');
+  assert.equal(parsedItems[0].posterUrl, 'https://image.tmdb.org/t/p/w500/avatar.jpg');
+
+  const mockPlayJson = {
+    data: {
+      streams: [
+        {
+          url: 'https://cdn.aoneroom.com/streams/avatar-720p.mp4',
+          resolutions: '720P',
+        },
+      ],
+    },
+  };
+  const streamUrl = parseMovieBoxStreamResponse(mockPlayJson);
+  assert.equal(streamUrl, 'https://cdn.aoneroom.com/streams/avatar-720p.mp4');
+});
+
+test('Embed Stream Extractor (2Embed & VidSrc): extracts .m3u8 and .mp4 URLs and nested RCP iframe sources', async () => {
+  const {
+    extractStreamUrlsFromHtml,
+    extractNestedEmbedSourcesFromHtml,
+    EXTRACTION_UNAVAILABLE_MESSAGE,
+  } = await import('../services/embedStreamExtractor');
+
+  assert.equal(
+    EXTRACTION_UNAVAILABLE_MESSAGE,
+    'Download not available for this server, try another'
+  );
+
+  // 1. Escaped JSON/JS payload containing .m3u8 and .mp4 streams (Streambert pattern)
+  const sampleEmbedHtml = `
+    <script>
+      const playerSources = {
+        hls: "https:\\/\\/cdn.vidsrc-stream.net\\/hls\\/550\\/master.m3u8?token=abc123",
+        backupMp4: "https://cdn.2embed-storage.com/movies/550-720p.mp4"
+      };
+    </script>
+  `;
+  const extracted = extractStreamUrlsFromHtml(sampleEmbedHtml, 'server-3-2embed');
+  assert.equal(extracted.length, 2);
+  // Prioritizes .mp4 first, then .m3u8
+  assert.equal(extracted[0].format, 'mp4');
+  assert.equal(extracted[0].url, 'https://cdn.2embed-storage.com/movies/550-720p.mp4');
+  assert.equal(extracted[1].format, 'm3u8');
+  assert.equal(
+    extracted[1].url,
+    'https://cdn.vidsrc-stream.net/hls/550/master.m3u8?token=abc123'
+  );
+
+  // 2. Nested VidSrc RCP data-hash and iframe src extraction
+  const wrapperHtml = `
+    <div class="server" data-hash="a1b2c3d4e5f6g7h8i9j0k1l2">VidSrc PRO</div>
+    <iframe src="//cloudnestra.com/rcp/xyz987654321"></iframe>
+  `;
+  const nested = extractNestedEmbedSourcesFromHtml(wrapperHtml, 'https://vidsrc.sh');
+  assert.equal(nested.includes('https://cloudnestra.com/rcp/xyz987654321'), true);
+  assert.equal(nested.includes('https://cloudnestra.com/rcp/a1b2c3d4e5f6g7h8i9j0k1l2'), true);
+});
+
+test('Iframe Player: getCleanIframeAttributes returns src and allowFullScreen with zero sandbox attributes', () => {
+  const attrs = getCleanIframeAttributes(
+    'https://vidsrc.sh/embed/movie/550?ds_lang=en',
+    'Fight Club - Server 1 (VidSrc.sh)'
+  );
+  assert.equal(attrs.src, 'https://vidsrc.sh/embed/movie/550?ds_lang=en');
+  assert.equal(attrs.allowFullScreen, true);
+  assert.equal('sandbox' in attrs, false);
+  assert.equal(attrs.sandbox, undefined);
+
+  const maliciousAttrs = getCleanIframeAttributes('javascript:alert(1)', 'Malicious');
+  assert.equal(maliciousAttrs.src, '');
+});
+
+test('Global Admin Bulk Upload: parseDirectBulkMovieLinksInput parses CSV/Pipe and JSON while blocking XSS URLs', () => {
+  const pipeData = `
+# tmdb_id | title | language | direct_video_url | stream_url | download_480p | download_720p
+533535 | Deadpool & Wolverine | Hindi Dub | https://cdn.example.com/dp3.mp4 | https://www.2embed.cc/embed/533535 | https://cdn.example.com/dp3-480p.mp4 | https://cdn.example.com/dp3-720p.mp4
+872585 | Oppenheimer | Dual Audio | https://cdn.example.com/opp.m3u8
+999999 | Bad Movie | Hindi | javascript:alert(1)
+-15 | Invalid ID | Hindi | https://cdn.example.com/bad.mp4
+`;
+  const parsedPipe = parseDirectBulkMovieLinksInput(pipeData);
+  assert.equal(parsedPipe.validRecords.length, 2);
+  assert.equal(parsedPipe.validRecords[0].tmdb_id, 533535);
+  assert.equal(parsedPipe.validRecords[0].title, 'Deadpool & Wolverine');
+  assert.equal(parsedPipe.validRecords[1].tmdb_id, 872585);
+  assert.equal(parsedPipe.errors.length, 2);
+
+  const jsonData = JSON.stringify([
+    {
+      tmdb_id: 693134,
+      title: 'Dune: Part Two',
+      language: 'Hindi Dubbed',
+      direct_video_url: 'https://cdn.example.com/dune2.mp4',
+    },
+  ]);
+  const parsedJson = parseDirectBulkMovieLinksInput(jsonData);
+  assert.equal(parsedJson.validRecords.length, 1);
+  assert.equal(parsedJson.validRecords[0].tmdb_id, 693134);
+  assert.equal(parsedJson.errors.length, 0);
+});
+
+test('Global Users Control: validateAppUserInput sanitizes XSS and enforces valid roles and account statuses', () => {
+  const badEmail = validateAppUserInput({
+    username: 'Ali Khan',
+    email: 'not-an-email',
+  });
+  assert.equal(badEmail.valid, false);
+
+  const validUser = validateAppUserInput({
+    id: 'usr_test_1',
+    username: '<script>Bilal Ahmed</script>',
+    email: 'Bilal@CineBox.app',
+    role: 'vip',
+    status: 'active',
+    platform: 'Android APK',
+    downloads_count: 15,
+    notes: '<b>Trusted VIP subscriber</b>',
+  });
+  assert.equal(validUser.valid, true);
+  assert.equal(validUser.sanitized?.username, 'scriptBilal Ahmed/script');
+  assert.equal(validUser.sanitized?.email, 'bilal@cinebox.app');
+  assert.equal(validUser.sanitized?.role, 'vip');
+  assert.equal(validUser.sanitized?.status, 'active');
+  assert.equal(validUser.sanitized?.platform, 'Android APK');
+  assert.equal(validUser.sanitized?.notes, 'bTrusted VIP subscriber/b');
+});
+
+test('Global Decentralized Access Control: evaluateGlobalUserAccess enforces ban, suspension, and maintenance mode', () => {
+  const activeConfig = {
+    id: 1,
+    maintenance_mode: false,
+    allow_guest_downloads: true,
+  };
+  const bannedUser = {
+    id: 'usr_banned',
+    username: 'Spammer',
+    email: 'spam@example.org',
+    role: 'user' as const,
+    status: 'banned' as const,
+    platform: 'Android APK' as const,
+    downloads_count: 0,
+  };
+
+  // Banned user is blocked when not admin
+  const bannedCheck = evaluateGlobalUserAccess(bannedUser, activeConfig, false);
+  assert.equal(bannedCheck.allowed, false);
+  assert.equal(bannedCheck.reason?.includes('banned'), true);
+
+  // Admin unlock overrides lockouts so Admin can always manage the console
+  const adminOverride = evaluateGlobalUserAccess(bannedUser, activeConfig, true);
+  assert.equal(adminOverride.allowed, true);
+
+  // Maintenance mode locks out regular active users but allows unlocked Admin
+  const maintenanceConfig = {
+    id: 1,
+    maintenance_mode: true,
+    allow_guest_downloads: false,
+  };
+  const activeUser = {
+    ...bannedUser,
+    id: 'usr_active',
+    status: 'active' as const,
+  };
+  const maintenanceCheck = evaluateGlobalUserAccess(activeUser, maintenanceConfig, false);
+  assert.equal(maintenanceCheck.allowed, false);
+  assert.equal(maintenanceCheck.reason?.includes('maintenance'), true);
+});
+
+test('Real Login & Forgot Admin PIN: generateAllottedUserId and verifyAdminPinRecovery work deterministically and securely', () => {
+  const id1 = generateAllottedUserId('ZulqarnainShah25@gmail.com');
+  const id2 = generateAllottedUserId('zulqarnainshah25@gmail.com  ');
+  assert.equal(id1.startsWith('USR-'), true);
+  assert.equal(id1, id2);
+
+  // Wrong Admin email rejected
+  const wrongEmail = verifyAdminPinRecovery(
+    'hacker@evil.com',
+    'ZulqarnainShah25@gmail.com',
+    '9999'
+  );
+  assert.equal(wrongEmail.valid, false);
+
+  // Short PIN rejected
+  const shortPin = verifyAdminPinRecovery(
+    'ZulqarnainShah25@gmail.com',
+    'ZulqarnainShah25@gmail.com',
+    '12'
+  );
+  assert.equal(shortPin.valid, false);
+
+  // Valid Admin email + valid new PIN accepted
+  const validRecovery = verifyAdminPinRecovery(
+    'zulqarnainshah25@gmail.com',
+    'ZulqarnainShah25@gmail.com',
+    '7860'
+  );
+  assert.equal(validRecovery.valid, true);
+  assert.equal(validRecovery.sanitizedPin, '7860');
+});
+
+test('Adsterra Banner & Native Banner Snippet Parser: extracts scriptSrc, containerId, and zoneKey while blocking XSS', () => {
+  const userSnippet = `<script async="async" data-cfasync="false" src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e"></script>
+<div id="container-83b5d9d90d154535d150a2bd3cf1f04e"></div>`;
+
+  const parsed = parseAdsterraSnippet(userSnippet);
+  assert.equal(parsed.valid, true);
+  assert.equal(
+    parsed.scriptSrc,
+    'https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e'
+  );
+  assert.equal(parsed.containerId, 'container-83b5d9d90d154535d150a2bd3cf1f04e');
+  assert.equal(parsed.zoneKey, '83b5d9d90d154535d150a2bd3cf1f04e');
+
+  // Block XSS / malicious event handler
+  const malicious = parseAdsterraSnippet(
+    `<script src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e"></script><div id="container-1234" onload="alert(1)"></div>`
+  );
+  assert.equal(malicious.valid, false);
+
+  // Block non-HTTPS script
+  const insecure = parseAdsterraSnippet(
+    `<script src="http://insecure.example.com/ad.js"></script><div id="container-123456"></div>`
+  );
+  assert.equal(insecure.valid, false);
+});
+
+test('Pakistani Drama & Hindi Dubbed Resolver: detects Dar-E-Nijaat and ranks full episodes above short clips', async () => {
+  const {
+    isPakistaniOrUrduContent,
+    rankAndFilterDramaOrHindiStreams,
+    buildDramaOrHindiSearchQuery,
+  } = await import('../services/hindiAndPakDramaService');
+
+  assert.equal(
+    isPakistaniOrUrduContent({
+      title: 'Dar-E-Nijaat',
+      originalTitle: 'در نجات',
+      language: 'Urdu / Pak Drama',
+    }),
+    true
+  );
+
+  assert.equal(
+    buildDramaOrHindiSearchQuery({
+      title: 'Dar-E-Nijaat',
+      mediaType: 'tv',
+      episode: 1,
+      isPakDrama: true,
+    }),
+    'Dar E Nijaat Episode 1'
+  );
+
+  const rawApiItems = [
+    { id: 'xbdkoce', title: 'dar e nijaat promo clip', duration: 32 },
+    { id: 'xaz876a', title: 'Dar E Nijaat episode 4', duration: 2344 },
+    { id: 'xatzowq', title: 'Dar-e-Nijaat Episode 1', duration: 2273 },
+  ];
+
+  const ranked = rankAndFilterDramaOrHindiStreams(rawApiItems, 1, 'pak-drama');
+  // 32s clip is filtered out; Episode 1 (2273s) is ranked #1 ahead of Episode 4
+  assert.equal(ranked.length, 2);
+  assert.equal(ranked[0].id, 'xatzowq');
+  assert.equal(ranked[0].durationFormatted, '37m 53s');
+  assert.ok(ranked[0].embedUrl.includes('https://www.dailymotion.com/embed/video/xatzowq'));
+});
+
+test('Mobile Player Overlay Guard: getBlobStreamAlertState hides Server Busy & loading overlay on embed/pak-drama modes', async () => {
+  const { getBlobStreamAlertState } = await import('./streamResolver');
+
+  // Playing on Server 3 (embed) or Pak Drama while MovieBox proxy returns "Server Busy, Try Again"
+  const embedState = getBlobStreamAlertState('embed', true, 'Server Busy, Try Again', false);
+  assert.equal(embedState.showLoadingOverlay, false);
+  assert.equal(embedState.showErrorBanner, false);
+
+  const dramaState = getBlobStreamAlertState('pak-drama', false, 'Server Busy, Try Again', false);
+  assert.equal(dramaState.showLoadingOverlay, false);
+  assert.equal(dramaState.showErrorBanner, false);
+
+  // Only when explicitly on 'blob' mode should loading or error states appear
+  const blobActive = getBlobStreamAlertState('blob', false, 'Server Busy, Try Again', false);
+  assert.equal(blobActive.showLoadingOverlay, false);
+  assert.equal(blobActive.showErrorBanner, true);
+
+  // Dismissing the error hides it even in blob mode
+  const blobDismissed = getBlobStreamAlertState('blob', false, 'Server Busy, Try Again', true);
+  assert.equal(blobDismissed.showErrorBanner, false);
+});
+
+test('Audio System 2.0 (Scenarios 1-5): detectVerifiedAudioTracks & normalizeDetectedAudioTracks strictly inspect real HLS/HTML5 tracks and NEVER fabricate fake tracks from metadata', async () => {
+  const { normalizeDetectedAudioTracks, shouldShowAudioTrackButton } = await import(
+    './streamResolver'
+  );
+  const { detectVerifiedAudioTracks } = await import('../services/streamSourceManager');
+
+  // Scenario 1: HLS stream with English only -> 1 track ('English — Original'), switcher hidden
+  const englishOnly = detectVerifiedAudioTracks([
+    { id: 0, name: 'Main Audio', lang: 'en', default: true },
+  ]);
+  assert.equal(englishOnly.length, 1);
+  assert.equal(englishOnly[0].displayLabel, 'English — Original');
+  assert.equal(englishOnly[0].lang, 'en');
+  assert.equal(englishOnly[0].audioRole, 'Original');
+  assert.equal(shouldShowAudioTrackButton(englishOnly), false);
+
+  // Scenario 2: HLS stream with English and Hindi -> 2 tracks ('English — Original', 'Hindi — Dubbed'), switcher shown
+  const englishAndHindi = detectVerifiedAudioTracks(
+    [
+      { id: 0, name: 'Original 5.1', lang: 'en', default: true, groupId: 'audio-aac' },
+      { id: 1, name: 'Hindi Dubbed', lang: 'hi', default: false, groupId: 'audio-aac' },
+    ],
+    null,
+    'en'
+  );
+  assert.equal(englishAndHindi.length, 2);
+  assert.equal(englishAndHindi[0].displayLabel, 'English — Original');
+  assert.equal(englishAndHindi[1].displayLabel, 'Hindi — Dubbed');
+  assert.equal(englishAndHindi[1].groupId, 'audio-aac');
+  assert.equal(shouldShowAudioTrackButton(englishAndHindi), true);
+
+  // Scenario 3: HLS stream with English, Hindi, and Urdu (+ duplicate Hindi track) -> deduplicated to 3 verified tracks
+  const multiWithDup = detectVerifiedAudioTracks(
+    [
+      { id: 0, name: 'English', lang: 'en', default: true },
+      { id: 1, name: 'Hindi', lang: 'hi', default: false },
+      { id: 2, name: 'Hindi', lang: 'hi', default: false }, // Duplicate track should be removed
+      { id: 3, name: 'Urdu', lang: 'ur', default: false },
+    ],
+    null,
+    'en'
+  );
+  assert.equal(multiWithDup.length, 3);
+  assert.equal(multiWithDup[0].displayLabel, 'English — Original');
+  assert.equal(multiWithDup[1].displayLabel, 'Hindi — Dubbed');
+  assert.equal(multiWithDup[2].displayLabel, 'Urdu — Dubbed');
+
+  // Scenario 4: Stream without language metadata -> honest fallback 'Track 1 — Default'
+  const unlabeledTracks = detectVerifiedAudioTracks([
+    { id: 0, default: true },
+    { id: 1, default: false },
+  ]);
+  assert.equal(unlabeledTracks.length, 2);
+  assert.equal(unlabeledTracks[0].displayLabel, 'Track 1 — Default');
+  assert.equal(unlabeledTracks[1].displayLabel, 'Track 2 — Audio');
+
+  // Scenario 5: Stream with misleading TMDB/movie metadata ('Dual Audio', 'Hindi + English') -> NEVER creates fake tracks
+  const misleadingMeta = normalizeDetectedAudioTracks(null, null, 'Dual Audio (Hindi + English)');
+  assert.equal(misleadingMeta.length, 0);
+  assert.equal(shouldShowAudioTrackButton(misleadingMeta), false);
+});
+
+test('Audio System 2.0 (Scenarios 6-9): safe audio switching with automatic fallback, separate authorized language streams, and honest cross-origin iframe capability', async () => {
+  const {
+    detectVerifiedAudioTracks,
+    switchEmbeddedAudioTrackSafely,
+    resolveAlternateLanguageStreams,
+    evaluatePlayerAudioCapability,
+  } = await import('../services/streamSourceManager');
+
+  // Scenario 6: Failed alternate audio track automatically falls back to previous working track while preserving playback position
+  let currentHlsTrack = 0;
+  const mockHls = {
+    audioTracks: [{ id: 0 }, { id: 1 }, { id: 99 }],
+    get audioTrack() {
+      return currentHlsTrack;
+    },
+    set audioTrack(val: number) {
+      if (val === 99) {
+        throw new Error('Demuxer audio switch error');
+      }
+      currentHlsTrack = val;
+    },
+  };
+  let videoCurrentTime = 412.5;
+  const mockVideo = {
+    get currentTime() {
+      return videoCurrentTime;
+    },
+    set currentTime(val: number) {
+      videoCurrentTime = val;
+    },
+    paused: false,
+    play: async () => {},
+  };
+
+  const verifiedTracks = detectVerifiedAudioTracks(
+    [
+      { id: 0, name: 'English', lang: 'en', default: true },
+      { id: 1, name: 'Hindi', lang: 'hi', default: false },
+      { id: 99, name: 'Corrupted Track', lang: 'ur', default: false },
+    ],
+    null,
+    'en'
+  );
+
+  // Successful switch to Hindi (track 1) preserves currentTime (412.5s) and playback state
+  const okSwitch = switchEmbeddedAudioTrackSafely({
+    targetTrackId: 1,
+    previousTrackId: 0,
+    availableTracks: verifiedTracks,
+    hlsInstance: mockHls,
+    videoElement: mockVideo,
+  });
+  assert.equal(okSwitch.ok, true);
+  assert.equal(okSwitch.activeTrackId, 1);
+  assert.equal(okSwitch.preservedTimeSeconds, 412.5);
+  assert.equal(okSwitch.wasPlaying, true);
+  assert.equal(okSwitch.fellBack, false);
+
+  // Failed switch to track 99 automatically falls back to track 1
+  const failedSwitch = switchEmbeddedAudioTrackSafely({
+    targetTrackId: 99,
+    previousTrackId: 1,
+    availableTracks: verifiedTracks,
+    hlsInstance: mockHls,
+    videoElement: mockVideo,
+  });
+  assert.equal(failedSwitch.ok, false);
+  assert.equal(failedSwitch.fellBack, true);
+  assert.equal(failedSwitch.activeTrackId, 1);
+  assert.equal(currentHlsTrack, 1);
+
+  // Scenarios 7 & 8: Separate authorized English, Hindi Dubbed, and Urdu Dubbed streams
+  const separateStreams = resolveAlternateLanguageStreams(
+    {
+      tmdb_id: 533535,
+      language: 'English',
+      direct_video_url: 'https://cdn.example.com/dp3-english.m3u8',
+      hindi_dubbed_video_url: 'https://cdn.example.com/dp3-hindi.m3u8',
+      urdu_dubbed_video_url: 'https://cdn.example.com/dp3-urdu.mp4',
+      stream_url: 'https://www.2embed.cc/embed/533535',
+      download_480p: '',
+      download_720p: '',
+    },
+    'en'
+  );
+  assert.equal(separateStreams.length, 3);
+  assert.equal(separateStreams[0].label, 'Original (English)');
+  assert.equal(separateStreams[1].label, 'Hindi Dubbed');
+  assert.equal(separateStreams[2].label, 'Urdu Dubbed');
+
+  // Scenario 9: Cross-origin iframe provider reports honest limitation (canSwitchEmbeddedAudio: false)
+  const iframeCapability = evaluatePlayerAudioCapability({
+    playerMode: 'embed',
+    verifiedTracks,
+    alternateStreams: separateStreams,
+  });
+  assert.equal(iframeCapability.mode, 'cross-origin-iframe');
+  assert.equal(iframeCapability.canSwitchEmbeddedAudio, false);
+  assert.equal(iframeCapability.hasAlternateLanguageStreams, true);
+  assert.ok(iframeCapability.honestStatusMessage.includes('Cross-origin iframe'));
+});
+
+test('Phase 4 & 6: Stream Source Manager deduplicates sources, selects healthy fallbacks, and parses TMDB Watch Providers', async () => {
+  const {
+    resolveAlternateLanguageStreams,
+    buildCentralizedManagedSources,
+    deduplicateManagedSources,
+    selectNextFallbackSource,
+  } = await import('../services/streamSourceManager');
+  const { parseTmdbWatchProviders } = await import('../services/tmdbService');
+
+  const linkRecord = {
+    tmdb_id: 533535,
+    language: 'English',
+    direct_video_url: 'https://cdn.example.com/dp3-en.m3u8',
+    hindi_dubbed_video_url: 'https://cdn.example.com/dp3-hi.m3u8',
+    stream_url: 'https://www.2embed.cc/embed/533535',
+    download_480p: '',
+    download_720p: '',
+  };
+  const alternateStreams = resolveAlternateLanguageStreams(linkRecord, 'en');
+
+  const managed = buildCentralizedManagedSources({
+    tmdbId: 533535,
+    mediaType: 'movie',
+    linkRecord,
+    embedServers: [
+      { id: 'auto-server-3', label: 'Server 3 (2Embed)', url: 'https://www.2embed.cc/embed/533535', isCustom: false },
+      { id: 'dup-server-3', label: 'Duplicate 2Embed', url: 'https://www.2embed.cc/embed/533535', isCustom: false },
+    ],
+    alternateStreams,
+  });
+
+  // Duplicate 2Embed URL should be removed automatically
+  const matching2Embed = managed.filter((s) => s.streamUrl === 'https://www.2embed.cc/embed/533535');
+  assert.equal(matching2Embed.length, 1);
+
+  const dupList = deduplicateManagedSources([
+    ...managed,
+    { ...managed[0], id: 'extra-dup' },
+  ]);
+  assert.equal(dupList.length, managed.length);
+
+  // Fallback selection skips failed source and picks next available source
+  const nextSource = selectNextFallbackSource(managed, managed[0].id);
+  assert.ok(nextSource !== null);
+  assert.notEqual(nextSource?.id, managed[0].id);
+
+  // Official TMDB Watch Providers parser
+  const parsedWatch = parseTmdbWatchProviders({
+    results: {
+      IN: {
+        link: 'https://www.themoviedb.org/movie/533535/watch?locale=IN',
+        flatrate: [{ provider_id: 8, provider_name: 'Netflix', logo_path: '/netflix.jpg' }],
+        rent: [{ provider_id: 2, provider_name: 'Apple TV', logo_path: '/apple.jpg' }],
+      },
+    },
+  });
+  assert.equal(parsedWatch.providers.length, 2);
+  assert.equal(parsedWatch.providers[0].providerName, 'Netflix');
+  assert.equal(parsedWatch.providers[0].type, 'flatrate');
+  assert.equal(parsedWatch.providers[1].providerName, 'Apple TV');
+  assert.equal(parsedWatch.providers[1].type, 'rent');
+});
+
+test('Strict Banner-Only Ad Sanitizer: strips redirect/popunder scripts and neutralizes clickable ad links', async () => {
+  const { sanitizeStaticBannerAdCode, parseAdsterraSnippet } = await import(
+    './securityValidator'
+  );
+
+  const rawAdWithPopunderAndLink = `
+    <script>window.open('https://evil-popunder.com');</script>
+    <a href="https://redirect-ad.com" target="_blank" onclick="window.open('https://hijack.com')">
+      <img src="https://cdn.example.com/banner.jpg" alt="Static Banner" />
+    </a>
+  `;
+
+  const sanitized = sanitizeStaticBannerAdCode(rawAdWithPopunderAndLink);
+  assert.equal(sanitized.includes('<script'), false);
+  assert.equal(sanitized.includes('window.open'), false);
+  assert.equal(sanitized.includes('onclick'), false);
+  assert.equal(sanitized.includes('<a '), false);
+  assert.equal(sanitized.includes('pointer-events-none'), true);
+
+  // Reject Adsterra snippets that attempt popunders or top.location redirects
+  const popunderSnippet = parseAdsterraSnippet(
+    `<script src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e">window.open("https://popunder.com")</script><div id="container-83b5d9d90d154535d150a2bd3cf1f04e"></div>`
+  );
+  assert.equal(popunderSnippet.valid, false);
+});
+
+test('Stage 2 Deep Verification: checkStreamSourceHealth (HEAD->GET fallback, #EXTM3U manifest check, soft-404 rejection, iframe protection) & alternate_streams XSS sanitization', async () => {
+  const { checkStreamSourceHealth, detectVerifiedAudioTracks } = await import(
+    '../services/streamSourceManager'
+  );
+  const { validateMovieLinkInput } = await import('./securityValidator');
+
+  // 1. Disambiguate multiple tracks of the same language (e.g., Angel One HLS 'en' stream_5 and 'en' stream_6)
+  const angelOneTracks = detectVerifiedAudioTracks(
+    [
+      { id: 0, name: 'stream_5', lang: 'en', default: true },
+      { id: 1, name: 'stream_4', lang: 'de', default: false },
+      { id: 2, name: 'stream_6', lang: 'en', default: false },
+    ],
+    null,
+    'en'
+  );
+  assert.equal(angelOneTracks.length, 3);
+  assert.equal(angelOneTracks[0].displayLabel, 'English — Original');
+  assert.equal(angelOneTracks[1].displayLabel, 'German — Dubbed');
+  assert.equal(angelOneTracks[2].displayLabel, 'English — Alternate (stream_6)');
+
+  // 2. Cross-origin iframe is never classified as broken because of HEAD/CORS blocking
+  const iframeCheck = await checkStreamSourceHealth({
+    id: 'auto-server-3',
+    providerName: '2Embed',
+    movieIdentifier: '533535',
+    label: 'Server 3 (2Embed)',
+    streamUrl: 'https://www.2embed.cc/embed/533535',
+    format: 'iframe',
+    language: 'Provider Default',
+    languageCode: 'und',
+    audioType: 'provider-controlled',
+    availabilityStatus: 'available',
+    validationStatus: 'unverified-external',
+    isCrossOriginIframe: true,
+    supportsInternalAudioSwitch: false,
+  });
+  assert.equal(iframeCheck.availabilityStatus, 'available');
+  assert.equal(iframeCheck.validationStatus, 'unverified-external');
+
+  // 3. HLS manifest validation: valid #EXTM3U passes, HTML soft-404 fails
+  const validHlsFetch = (async () => ({
+    ok: true,
+    status: 200,
+    redirected: true,
+    url: 'https://cdn.example.com/edge/master.m3u8',
+    headers: new Map([['content-type', 'application/vnd.apple.mpegurl']]),
+    text: async () => '#EXTM3U\n#EXT-X-VERSION:3\n',
+  })) as unknown as typeof fetch;
+
+  const hlsOk = await checkStreamSourceHealth(
+    {
+      id: 'hls-1',
+      providerName: 'Direct HLS',
+      movieIdentifier: '533535',
+      label: 'HLS Stream',
+      streamUrl: 'https://cdn.example.com/master.m3u8',
+      format: 'hls',
+      language: 'English',
+      languageCode: 'en',
+      audioType: 'original',
+      availabilityStatus: 'available',
+      validationStatus: 'verified',
+      isCrossOriginIframe: false,
+      supportsInternalAudioSwitch: true,
+    },
+    3000,
+    validHlsFetch
+  );
+  assert.equal(hlsOk.availabilityStatus, 'available');
+  assert.equal(hlsOk.hlsManifestValid, true);
+  assert.equal(hlsOk.redirected, true);
+  assert.equal(hlsOk.finalUrl, 'https://cdn.example.com/edge/master.m3u8');
+
+  const htmlSoft404Fetch = (async () => ({
+    ok: true,
+    status: 200,
+    redirected: false,
+    url: 'https://cdn.example.com/broken.m3u8',
+    headers: new Map([['content-type', 'text/html']]),
+    text: async () => '<html><body>404 Not Found</body></html>',
+  })) as unknown as typeof fetch;
+
+  const hlsBad = await checkStreamSourceHealth(
+    {
+      id: 'hls-bad',
+      providerName: 'Direct HLS',
+      movieIdentifier: '533535',
+      label: 'Broken HLS',
+      streamUrl: 'https://cdn.example.com/broken.m3u8',
+      format: 'hls',
+      language: 'English',
+      languageCode: 'en',
+      audioType: 'original',
+      availabilityStatus: 'available',
+      validationStatus: 'verified',
+      isCrossOriginIframe: false,
+      supportsInternalAudioSwitch: true,
+    },
+    3000,
+    htmlSoft404Fetch
+  );
+  assert.equal(hlsBad.availabilityStatus, 'unavailable');
+  assert.equal(hlsBad.hlsManifestValid, false);
+
+  // 4. MP4 HEAD -> GET fallback when server rejects HEAD with 405 Method Not Allowed
+  let headCalled = false;
+  let getCalled = false;
+  const head405ThenGet206Fetch = (async (_url: any, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      headCalled = true;
+      return {
+        ok: false,
+        status: 405,
+        redirected: false,
+        url: 'https://cdn.example.com/movie.mp4',
+        headers: new Map([['content-type', 'video/mp4']]),
+      };
+    }
+    getCalled = true;
+    return {
+      ok: true,
+      status: 206,
+      redirected: false,
+      url: 'https://cdn.example.com/movie.mp4',
+      headers: new Map([['content-type', 'video/mp4']]),
+      body: { cancel: async () => {} },
+    };
+  }) as unknown as typeof fetch;
+
+  const mp4FallbackCheck = await checkStreamSourceHealth(
+    {
+      id: 'mp4-1',
+      providerName: 'Direct MP4',
+      movieIdentifier: '533535',
+      label: 'MP4 Stream',
+      streamUrl: 'https://cdn.example.com/movie.mp4',
+      format: 'mp4',
+      language: 'Hindi',
+      languageCode: 'hi',
+      audioType: 'dubbed',
+      availabilityStatus: 'available',
+      validationStatus: 'verified',
+      isCrossOriginIframe: false,
+      supportsInternalAudioSwitch: false,
+    },
+    3000,
+    head405ThenGet206Fetch
+  );
+  assert.equal(headCalled, true);
+  assert.equal(getCalled, true);
+  assert.equal(mp4FallbackCheck.availabilityStatus, 'available');
+  assert.equal(mp4FallbackCheck.validationStatus, 'verified');
+
+  // 5. validateMovieLinkInput sanitizes alternate_streams labels (stripping <script> blocks and HTML tags) and rejects unsafe URLs
+  const validated = validateMovieLinkInput({
+    tmdb_id: 533535,
+    title: 'Deadpool & Wolverine',
+    language: 'English',
+    hindi_dubbed_video_url: 'https://cdn.example.com/dp3-hindi.m3u8',
+    urdu_dubbed_video_url: 'https://cdn.example.com/dp3-urdu.mp4',
+    alternate_streams: [
+      {
+        id: 'alt-1',
+        label: '<b>Tamil Dubbed</b> <script>alert(1)</script>',
+        languageCode: 'ta',
+        languageName: '<b>Tamil</b>',
+        audioType: 'dubbed',
+        url: 'https://cdn.example.com/dp3-tamil.m3u8',
+        format: 'hls',
+        verified: true,
+      },
+      {
+        id: 'evil',
+        label: 'XSS Stream',
+        languageCode: 'en',
+        languageName: 'English',
+        audioType: 'original',
+        url: 'javascript:alert(1)',
+        format: 'mp4',
+        verified: true,
+      },
+    ],
+  });
+  assert.equal(validated.valid, true);
+  assert.equal(validated.sanitized?.alternate_streams?.length, 1);
+  assert.equal(validated.sanitized?.alternate_streams?.[0].label, 'Tamil Dubbed');
+  assert.equal(validated.sanitized?.alternate_streams?.[0].languageName, 'Tamil');
+});
+
+test('Stage 3 Task 1: checkStreamSourceHealth (HEAD first, ranged GET fallback on 400/403/404/405/501 & network error, Range header & body.cancel, #EXTM3U check, HTML soft-404 on 200, timeout, format-based iframe)', async () => {
+  const { checkStreamSourceHealth } = await import('../services/streamSourceManager');
+
+  // 1. Format-based iframe detection even if isCrossOriginIframe is false
+  const formatIframeRes = await checkStreamSourceHealth({
+    id: 'iframe-fmt',
+    providerName: 'EmbedProvider',
+    movieIdentifier: '533535',
+    label: 'Embed',
+    streamUrl: 'https://www.2embed.cc/embed/533535',
+    format: 'iframe',
+    language: 'Provider Default',
+    languageCode: 'und',
+    audioType: 'provider-controlled',
+    availabilityStatus: 'available',
+    validationStatus: 'unverified-external',
+    isCrossOriginIframe: false,
+    supportsInternalAudioSwitch: false,
+  });
+  assert.equal(formatIframeRes.availabilityStatus, 'available');
+  assert.equal(formatIframeRes.validationStatus, 'unverified-external');
+
+  // 2. All fallback status codes (400, 403, 404, 405, 501) and non-timeout network error trigger ranged GET with Range header and body.cancel()
+  for (const statusOrErr of [400, 403, 404, 405, 501, 'NETWORK_ERR'] as const) {
+    const methodsCalled: string[] = [];
+    let rangeHeaderSent = '';
+    let bodyCancelled = false;
+
+    const mockFetch = (async (_url: any, init?: RequestInit) => {
+      const m = init?.method || 'GET';
+      methodsCalled.push(m);
+      if (m === 'HEAD') {
+        if (statusOrErr === 'NETWORK_ERR') {
+          throw new TypeError('Failed to fetch HEAD');
+        }
+        return {
+          ok: false,
+          status: statusOrErr,
+          redirected: false,
+          url: 'https://cdn.example.com/video.mp4',
+          headers: new Map([['content-type', 'video/mp4']]),
+        };
+      }
+      rangeHeaderSent = (init?.headers as Record<string, string>)?.Range || '';
+      return {
+        ok: true,
+        status: 206,
+        redirected: true,
+        url: 'https://edge.example.com/video.mp4',
+        headers: new Map([['content-type', 'video/mp4']]),
+        body: {
+          cancel: async () => {
+            bodyCancelled = true;
+          },
+        },
+      };
+    }) as unknown as typeof fetch;
+
+    const res = await checkStreamSourceHealth(
+      {
+        id: `mp4-${statusOrErr}`,
+        providerName: 'CDN',
+        movieIdentifier: '1',
+        label: 'Direct MP4',
+        streamUrl: 'https://cdn.example.com/video.mp4',
+        format: 'mp4',
+        language: 'English',
+        languageCode: 'en',
+        audioType: 'original',
+        availabilityStatus: 'available',
+        validationStatus: 'verified',
+        isCrossOriginIframe: false,
+        supportsInternalAudioSwitch: false,
+      },
+      2000,
+      mockFetch
+    );
+
+    assert.deepEqual(methodsCalled, ['HEAD', 'GET']);
+    assert.equal(rangeHeaderSent, 'bytes=0-1023');
+    assert.equal(bodyCancelled, true);
+    assert.equal(res.availabilityStatus, 'available');
+    assert.equal(res.validationStatus, 'verified');
+    assert.equal(res.contentType, 'video/mp4');
+    assert.equal(res.redirected, true);
+    assert.equal(res.finalUrl, 'https://edge.example.com/video.mp4');
+  }
+
+  // 3. HLS (.m3u8) calls HEAD first, then ranged GET (Range: bytes=0-4095) and rejects HTML soft-404 even when status is 200 with video/mp2t header
+  const hlsMethods: string[] = [];
+  const hlsHtmlBodyFetch = (async (_url: any, init?: RequestInit) => {
+    hlsMethods.push(init?.method || 'GET');
+    return {
+      ok: true,
+      status: 200,
+      redirected: false,
+      url: 'https://cdn.example.com/soft404.m3u8',
+      headers: new Map([['content-type', 'application/octet-stream']]),
+      text: async () => '<!DOCTYPE html><html><body>Not Found</body></html>',
+      body: { cancel: async () => {} },
+    };
+  }) as unknown as typeof fetch;
+
+  const soft404Res = await checkStreamSourceHealth(
+    {
+      id: 'hls-soft404',
+      providerName: 'CDN',
+      movieIdentifier: '1',
+      label: 'Soft 404 HLS',
+      streamUrl: 'https://cdn.example.com/soft404.m3u8',
+      format: 'hls',
+      language: 'English',
+      languageCode: 'en',
+      audioType: 'original',
+      availabilityStatus: 'available',
+      validationStatus: 'verified',
+      isCrossOriginIframe: false,
+      supportsInternalAudioSwitch: true,
+    },
+    2000,
+    hlsHtmlBodyFetch
+  );
+  assert.deepEqual(hlsMethods, ['HEAD', 'GET']);
+  assert.equal(soft404Res.availabilityStatus, 'unavailable');
+  assert.equal(soft404Res.validationStatus, 'failed-validation');
+  assert.equal(soft404Res.hlsManifestValid, false);
+
+  // 4. Timeout and AbortController cleanup
+  const slowFetch = ((_url: any, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const abortErr = new Error('The operation was aborted');
+        abortErr.name = 'AbortError';
+        reject(abortErr);
+      });
+    })) as unknown as typeof fetch;
+
+  const timeoutRes = await checkStreamSourceHealth(
+    {
+      id: 'slow-mp4',
+      providerName: 'Slow CDN',
+      movieIdentifier: '1',
+      label: 'Slow MP4',
+      streamUrl: 'https://cdn.example.com/slow.mp4',
+      format: 'mp4',
+      language: 'English',
+      languageCode: 'en',
+      audioType: 'original',
+      availabilityStatus: 'available',
+      validationStatus: 'verified',
+      isCrossOriginIframe: false,
+      supportsInternalAudioSwitch: false,
+    },
+    40,
+    slowFetch
+  );
+  assert.equal(timeoutRes.availabilityStatus, 'timeout');
+  assert.equal(timeoutRes.validationStatus, 'failed-validation');
+});
+
+test('Stage 3 Task 2: sanitizeAlternateStreamsList strictly rejects malicious HTML/JS, invalid ISO codes, malformed objects, oversized fields, and duplicate IDs', async () => {
+  const { sanitizeAlternateStreamsList } = await import('./securityValidator');
+  const { resolveAlternateLanguageStreams } = await import('../services/streamSourceManager');
+
+  const rawUntrusted: unknown[] = [
+    null,
+    'not-an-object',
+    // 1. Malicious script-only label -> rejected
+    {
+      id: 'xss-only',
+      label: '<script>alert(document.cookie)</script>',
+      languageCode: 'hi',
+      languageName: 'Hindi',
+      url: 'https://cdn.example.com/xss.mp4',
+    },
+    // 2. Invalid language code -> rejected
+    {
+      id: 'bad-lang',
+      label: 'Unknown Language Track',
+      languageCode: 'xx-invalid',
+      languageName: 'Invalid',
+      url: 'https://cdn.example.com/badlang.mp4',
+    },
+    // 3. Valid entry with HTML tags & oversized fields -> stripped and truncated to limits
+    {
+      id: 'valid-hi-' + 'x'.repeat(60),
+      label: '<img src=x onerror=alert(1)>Hindi Dubbed Official ' + 'A'.repeat(80),
+      languageCode: 'hi-IN',
+      languageName: '<div>Hindi ' + 'B'.repeat(40) + '</div>',
+      audioType: 'dubbed',
+      url: 'https://cdn.example.com/valid-hindi.m3u8',
+      format: 'hls',
+      verified: true,
+    },
+    // 4. Duplicate ID -> rejected
+    {
+      id: ('valid-hi-' + 'x'.repeat(60)).slice(0, 48),
+      label: 'Duplicate ID Stream',
+      languageCode: 'ur',
+      languageName: 'Urdu',
+      audioType: 'dubbed',
+      url: 'https://cdn.example.com/dup-id.m3u8',
+      format: 'hls',
+      verified: true,
+    },
+  ];
+
+  const cleaned = sanitizeAlternateStreamsList(rawUntrusted);
+  assert.equal(cleaned.length, 1);
+  assert.ok(cleaned[0].id.length <= 48);
+  assert.ok(cleaned[0].label.length <= 64);
+  assert.ok(cleaned[0].languageName.length <= 32);
+  assert.ok(cleaned[0].languageCode.length <= 12);
+  assert.equal(cleaned[0].label.includes('<'), false);
+  assert.equal(cleaned[0].label.includes('onerror'), false);
+  assert.equal(cleaned[0].languageCode, 'hi-in');
+
+  // Verify resolveAlternateLanguageStreams applies the same strict sanitization directly
+  const resolved = resolveAlternateLanguageStreams(
+    {
+      tmdb_id: 533535,
+      language: 'English',
+      direct_video_url: 'https://cdn.example.com/main.m3u8',
+      stream_url: '',
+      download_480p: '',
+      download_720p: '',
+      alternate_streams: rawUntrusted as any,
+    },
+    'en'
+  );
+  assert.equal(resolved.length, 2); // primary + 1 valid alternate
+});
+
+test('Stage 3 Task 3: attachSafariNativeAudioTrackListeners registers change/addtrack/removetrack, prevents duplicates, and removes all listeners on cleanup', async () => {
+  const { attachSafariNativeAudioTrackListeners } = await import(
+    '../services/streamSourceManager'
+  );
+
+  const listeners: Record<string, Set<() => void>> = {
+    change: new Set(),
+    addtrack: new Set(),
+    removetrack: new Set(),
+  };
+
+  const mockAudioTracks: any = {
+    length: 2,
+    0: { id: '0', label: 'English', language: 'en', enabled: true },
+    1: { id: '1', label: 'German', language: 'de', enabled: false },
+    addEventListener(evt: string, fn: () => void) {
+      listeners[evt]?.add(fn);
+    },
+    removeEventListener(evt: string, fn: () => void) {
+      listeners[evt]?.delete(fn);
+    },
+  };
+
+  const mockVideoEl = { audioTracks: mockAudioTracks };
+  let latestTracksCount = 0;
+  let latestEnabledId = -1;
+
+  // Attach first time
+  const cleanup1 = attachSafariNativeAudioTrackListeners(
+    mockVideoEl,
+    'en',
+    (tracks, enabledId) => {
+      latestTracksCount = tracks.length;
+      latestEnabledId = enabledId;
+    }
+  );
+  assert.equal(listeners.change.size, 1);
+  assert.equal(listeners.addtrack.size, 1);
+  assert.equal(listeners.removetrack.size, 1);
+  assert.equal(latestTracksCount, 2);
+  assert.equal(latestEnabledId, 0);
+
+  // Attach second time on same AudioTrackList -> prevents duplicate listeners
+  const cleanup2 = attachSafariNativeAudioTrackListeners(
+    mockVideoEl,
+    'en',
+    (tracks, enabledId) => {
+      latestTracksCount = tracks.length;
+      latestEnabledId = enabledId;
+    }
+  );
+  assert.equal(listeners.change.size, 1);
+  assert.equal(listeners.addtrack.size, 1);
+  assert.equal(listeners.removetrack.size, 1);
+
+  // Simulate Safari native track switch event ('change')
+  mockAudioTracks[0].enabled = false;
+  mockAudioTracks[1].enabled = true;
+  for (const fn of listeners.change) fn();
+  assert.equal(latestEnabledId, 1);
+
+  // Simulate 'addtrack' event
+  mockAudioTracks[2] = { id: '2', label: 'Spanish', language: 'es', enabled: false };
+  mockAudioTracks.length = 3;
+  for (const fn of listeners.addtrack) fn();
+  assert.equal(latestTracksCount, 3);
+
+  // Cleanup removes all listeners
+  cleanup1();
+  cleanup2();
+  assert.equal(listeners.change.size, 0);
+  assert.equal(listeners.addtrack.size, 0);
+  assert.equal(listeners.removetrack.size, 0);
+});
+
+test('Stage 3 Task 4: Supabase Least-Privilege Security rejects service_role keys, excludes admin_pin_hash from public config reads, and removes anon write grants', async () => {
+  const { isForbiddenServiceRoleKey } = await import('./securityValidator');
+  const {
+    PUBLIC_APP_CONFIG_COLUMNS,
+    SUPABASE_RLS_FIX_SQL,
+    setSupabaseCredentials,
+  } = await import('../services/supabaseClient');
+
+  // 1. Construct a fake JWT with {"role":"service_role"} payload
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const servicePayload = Buffer.from(JSON.stringify({ role: 'service_role', iss: 'supabase' })).toString('base64url');
+  const anonPayload = Buffer.from(JSON.stringify({ role: 'anon', iss: 'supabase' })).toString('base64url');
+  const fakeServiceRoleJwt = `${header}.${servicePayload}.signature`;
+  const fakeAnonJwt = `${header}.${anonPayload}.signature`;
+
+  assert.equal(isForbiddenServiceRoleKey(fakeServiceRoleJwt), true);
+  assert.equal(isForbiddenServiceRoleKey('sb_secret_1234567890abcdef'), true);
+  assert.equal(isForbiddenServiceRoleKey(fakeAnonJwt), false);
+
+  const rejectedSave = setSupabaseCredentials('https://example.supabase.co', fakeServiceRoleJwt);
+  assert.equal(rejectedSave.ok, false);
+
+  // 2. Public app_config columns never include admin_pin_hash or admin_email
+  assert.equal(PUBLIC_APP_CONFIG_COLUMNS.includes('admin_pin_hash'), false);
+  assert.equal(PUBLIC_APP_CONFIG_COLUMNS.includes('admin_email'), false);
+
+  // 3. SUPABASE_RLS_FIX_SQL enforces least-privilege (no FOR ALL TO anon, no GRANT ALL ... TO anon)
+  assert.equal(/FOR\s+ALL\s+TO\s+anon/i.test(SUPABASE_RLS_FIX_SQL), false);
+  assert.equal(/GRANT\s+ALL\s+ON\s+TABLE\s+public\.\w+\s+TO\s+anon/i.test(SUPABASE_RLS_FIX_SQL), false);
+  assert.equal(SUPABASE_RLS_FIX_SQL.includes('REVOKE ALL ON TABLE public.movie_links FROM anon'), true);
+  assert.equal(SUPABASE_RLS_FIX_SQL.includes('REVOKE ALL ON TABLE public.app_users FROM anon'), true);
+  assert.equal(SUPABASE_RLS_FIX_SQL.includes('REVOKE ALL ON TABLE public.app_config FROM anon'), true);
+  assert.equal(SUPABASE_RLS_FIX_SQL.includes('public.is_cinebox_admin()'), true);
+});
+
+test('Part 1: VidSrc.sh API v2 Migration (Content Info 200/404/Error, Embed URLs with ds_lang=en, Latest Feeds, PLAYER_EVENT Watch History, 2Embed Fallback)', async () => {
+  const {
+    buildVidSrcInfoUrl,
+    buildVidSrcEmbedUrl,
+    build2EmbedFallbackUrl,
+    parseVidSrcContentInfo,
+    parseVidSrcLatestFeed,
+    parseVidSrcPlayerEventMessage,
+  } = await import('../services/vidsrcService');
+
+  // 1. Endpoint URL Builders
+  assert.equal(
+    buildVidSrcInfoUrl({ tmdbId: 550, mediaType: 'movie' }),
+    'https://vidsrc.sh/info/movie/550.json'
+  );
+  assert.equal(
+    buildVidSrcInfoUrl({ tmdbId: 1399, mediaType: 'tv', season: 2, episode: 4 }),
+    'https://vidsrc.sh/info/tv/1399/2/4.json'
+  );
+  assert.equal(
+    buildVidSrcEmbedUrl({ tmdbId: 550, mediaType: 'movie', dsLang: 'en' }),
+    'https://vidsrc.sh/embed/movie/550?ds_lang=en'
+  );
+  assert.equal(
+    buildVidSrcEmbedUrl({ tmdbId: 1399, mediaType: 'tv', season: 3, episode: 9, dsLang: 'en' }),
+    'https://vidsrc.sh/embed/tv/1399/3/9?ds_lang=en'
+  );
+  assert.equal(
+    build2EmbedFallbackUrl({ tmdbId: 550, mediaType: 'movie' }),
+    'https://www.2embed.cc/embed/550'
+  );
+  assert.equal(
+    build2EmbedFallbackUrl({ tmdbId: 1399, mediaType: 'tv', season: 3, episode: 9 }),
+    'https://www.2embed.cc/embedtv/1399&s=3&e=9'
+  );
+
+  // 2. Content Info Parsing: 200 OK extracts title, year, poster, quality
+  const info200 = parseVidSrcContentInfo(
+    {
+      status_code: 200,
+      result: {
+        title: 'Fight Club',
+        year: '1999',
+        poster: 'https://image.tmdb.org/t/p/w500/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg',
+        quality: '1080p BluRay',
+      },
+    },
+    200,
+    { tmdbId: 550, mediaType: 'movie' }
+  );
+  assert.equal(info200.ok, true);
+  assert.equal(info200.statusCode, 200);
+  assert.equal(info200.notAvailable, false);
+  assert.equal(info200.info?.title, 'Fight Club');
+  assert.equal(info200.info?.year, '1999');
+  assert.equal(info200.info?.quality, '1080P BLURAY');
+
+  // 3. Content Info Parsing: 404 returns "Movie Not Available"
+  const info404 = parseVidSrcContentInfo({ status_code: 404 }, 404, {
+    tmdbId: 999999,
+    mediaType: 'movie',
+  });
+  assert.equal(info404.ok, false);
+  assert.equal(info404.statusCode, 404);
+  assert.equal(info404.notAvailable, true);
+  assert.equal(info404.errorMessage, 'Movie Not Available');
+
+  // 4. Content Info Parsing: 500 or network error returns "Content Unavailable, Try Again"
+  const info500 = parseVidSrcContentInfo(null, 500, { tmdbId: 550, mediaType: 'movie' });
+  assert.equal(info500.ok, false);
+  assert.equal(info500.notAvailable, false);
+  assert.equal(info500.errorMessage, 'Content Unavailable, Try Again');
+
+  // 5. Latest Movies & Latest TV Shows Feed Parsing
+  const latestMovies = parseVidSrcLatestFeed(
+    {
+      result: [
+        {
+          tmdb_id: 693134,
+          title: 'Dune: Part Two 2024',
+          embed_url_tmdb: 'https://vidsrc.sh/embed/movie/693134?ds_lang=en',
+          quality: '4K HDR',
+        },
+      ],
+    },
+    'movie'
+  );
+  assert.equal(latestMovies.ok, true);
+  assert.equal(latestMovies.items.length, 1);
+  assert.equal(latestMovies.items[0].tmdbId, 693134);
+  assert.equal(latestMovies.items[0].title, 'Dune: Part Two 2024');
+  assert.equal(latestMovies.items[0].quality, '4K HDR');
+  assert.equal(
+    latestMovies.items[0].embedUrlTmdb,
+    'https://vidsrc.sh/embed/movie/693134?ds_lang=en'
+  );
+
+  // 6. PLAYER_EVENT postMessage Parsing for Watch History
+  const playerEvt = parseVidSrcPlayerEventMessage(
+    JSON.stringify({
+      type: 'PLAYER_EVENT',
+      data: {
+        event: 'timeupdate',
+        tmdb_id: 550,
+        media_type: 'movie',
+        currentTime: 360,
+        duration: 1800,
+      },
+    }),
+    'https://vidsrc.sh'
+  );
+  assert.ok(playerEvt);
+  assert.equal(playerEvt?.type, 'PLAYER_EVENT');
+  assert.equal(playerEvt?.tmdbId, 550);
+  assert.equal(playerEvt?.currentTime, 360);
+  assert.equal(playerEvt?.duration, 1800);
+});
+
+test('Part 2 & 3: YouTube Data API v3 Pakistani Dramas Integration (Official Channels, Search & Video Details Endpoints, Embed URLs, Quota & Error Messages)', async () => {
+  const {
+    OFFICIAL_PAK_DRAMA_CHANNELS,
+    buildYouTubeChannelSearchUrl,
+    buildYouTubeVideoDetailsUrl,
+    buildYouTubeDramaEmbedUrl,
+    parseYouTubeSearchItems,
+    mergeYouTubeVideoDetails,
+    isYouTubeQuotaExceededError,
+    fetchPakistaniDramasFromYouTube,
+  } = await import('../services/youtubeDramaService');
+
+  // 1. Official Drama Channels Registry
+  const humTv = OFFICIAL_PAK_DRAMA_CHANNELS.find((c) => c.key === 'HUM_TV');
+  const aryDigital = OFFICIAL_PAK_DRAMA_CHANNELS.find((c) => c.key === 'ARY_DIGITAL');
+  const harPalGeo = OFFICIAL_PAK_DRAMA_CHANNELS.find((c) => c.key === 'HAR_PAL_GEO');
+  const geoTv = OFFICIAL_PAK_DRAMA_CHANNELS.find((c) => c.key === 'GEO_TV');
+  assert.equal(humTv?.channelId, 'UC6-F5tO8uklgE9Zy8IvbdFw');
+  assert.equal(aryDigital?.channelId, 'UC4JCksJF76g_MdzPVBJoC3Q');
+  assert.equal(harPalGeo?.channelId, 'UCe9JSDmyqNgA_l2BzGHq1Ug');
+  assert.equal(geoTv?.channelId, 'UC_vt34wimdCzdkrzVejwX9g');
+
+  // 2. Endpoint URL Builders (Search & Video Details & Embed Player)
+  const searchUrl = buildYouTubeChannelSearchUrl({
+    apiKey: 'TEST_YT_KEY',
+    channelId: 'UC6-F5tO8uklgE9Zy8IvbdFw',
+    order: 'date',
+    maxResults: 20,
+  });
+  assert.equal(searchUrl.includes('https://www.googleapis.com/youtube/v3/search?'), true);
+  assert.equal(searchUrl.includes('key=TEST_YT_KEY'), true);
+  assert.equal(searchUrl.includes('channelId=UC6-F5tO8uklgE9Zy8IvbdFw'), true);
+  assert.equal(searchUrl.includes('part=snippet,id'), true);
+  assert.equal(searchUrl.includes('order=date'), true);
+  assert.equal(searchUrl.includes('maxResults=20'), true);
+
+  const detailsUrl = buildYouTubeVideoDetailsUrl({
+    apiKey: 'TEST_YT_KEY',
+    videoIds: ['9bZkp7q19f0', 'dQw4w9WgXcQ'],
+  });
+  assert.equal(detailsUrl.includes('https://www.googleapis.com/youtube/v3/videos?'), true);
+  assert.equal(detailsUrl.includes('part=snippet,contentDetails,statistics'), true);
+
+  assert.equal(
+    buildYouTubeDramaEmbedUrl('9bZkp7q19f0'),
+    'https://www.youtube.com/embed/9bZkp7q19f0?autoplay=1'
+  );
+
+  // 3. Response Parsing (snippet.title & snippet.thumbnails.high.url) + Video Details Enrichment
+  const rawSearchPayload = {
+    items: [
+      {
+        id: { kind: 'youtube#video', videoId: '9bZkp7q19f0' },
+        snippet: {
+          title: 'Ishq Murshid - Episode 28 [CC] - HUM TV',
+          description: 'Official HUM TV Drama Episode',
+          publishedAt: '2025-02-01T16:00:00Z',
+          channelId: 'UC6-F5tO8uklgE9Zy8IvbdFw',
+          channelTitle: 'HUM TV',
+          thumbnails: {
+            high: { url: 'https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg' },
+          },
+        },
+      },
+    ],
+  };
+
+  const parsedItems = parseYouTubeSearchItems(rawSearchPayload);
+  assert.equal(parsedItems.length, 1);
+  assert.equal(parsedItems[0].videoId, '9bZkp7q19f0');
+  assert.equal(parsedItems[0].title, 'Ishq Murshid - Episode 28 [CC] - HUM TV');
+  assert.equal(parsedItems[0].posterUrl, 'https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg');
+  assert.equal(parsedItems[0].embedUrl, 'https://www.youtube.com/embed/9bZkp7q19f0?autoplay=1');
+
+  const enriched = mergeYouTubeVideoDetails(parsedItems, {
+    items: [
+      {
+        id: '9bZkp7q19f0',
+        contentDetails: { duration: 'PT38M45S' },
+        statistics: { viewCount: '18400000' },
+      },
+    ],
+  });
+  assert.equal(enriched[0].durationFormatted, '38:45');
+  assert.equal(enriched[0].viewCountFormatted, '18.4M views');
+
+  // 4. Error Handling & Quota Exhaustion Security
+  assert.equal(
+    isYouTubeQuotaExceededError(403, {
+      error: {
+        code: 403,
+        message: 'The request cannot be completed because you have exceeded your quota.',
+        errors: [{ reason: 'quotaExceeded' }],
+      },
+    }),
+    true
+  );
+
+  // Verify quota exceeded returns "Please try again later"
+  const quotaFetch = (async () =>
+    new Response(
+      JSON.stringify({
+        error: { code: 403, errors: [{ reason: 'quotaExceeded' }] },
+      }),
+      { status: 403 }
+    )) as unknown as typeof fetch;
+
+  const quotaRes = await fetchPakistaniDramasFromYouTube(
+    { apiKeyOverride: 'TEST_KEY', channelKey: 'HUM_TV' },
+    quotaFetch
+  );
+  assert.equal(quotaRes.ok, false);
+  assert.equal(quotaRes.quotaExceeded, true);
+  assert.equal(quotaRes.errorMessage, 'Please try again later');
+
+  // Verify general API failure returns "Content Unavailable, Try Again"
+  const failFetch = (async () => new Response('Server error', { status: 500 })) as unknown as typeof fetch;
+  const failRes = await fetchPakistaniDramasFromYouTube(
+    { apiKeyOverride: 'TEST_KEY', channelKey: 'HUM_TV' },
+    failFetch
+  );
+  assert.equal(failRes.ok, false);
+  assert.equal(failRes.quotaExceeded, false);
+  assert.equal(failRes.errorMessage, 'Content Unavailable, Try Again');
+});
+
+test('Movie-Thumbnail Ad Banner Layout Fix: getResponsiveAdSlotDimensions enforces max-width: 100%, height: auto, movie-thumbnail row heights, and clickable movie-style card grid', async () => {
+  const { getResponsiveAdSlotDimensions } = await import('./securityValidator');
+
+  const topBanner = getResponsiveAdSlotDimensions('home-top');
+  assert.equal(topBanner.maxWidth, '100%');
+  assert.equal(topBanner.height, 'auto');
+  assert.equal(topBanner.objectFit, 'contain');
+  assert.equal(topBanner.mobileHeightPx, 196);
+  assert.equal(topBanner.desktopHeightPx, 268);
+  assert.equal(topBanner.isClickableCardGrid, true);
+  assert.equal(topBanner.slotLabel, 'Trending Spotlight · HD');
+  assert.equal(topBanner.containerClassName.includes('max-w-full'), true);
+  assert.equal(topBanner.containerClassName.includes('overflow-hidden'), true);
+  assert.equal(topBanner.iframeClassName.includes('pointer-events-auto'), true);
+
+  const nativeBanner = getResponsiveAdSlotDimensions('home-native');
+  assert.equal(nativeBanner.maxWidth, '100%');
+  assert.equal(nativeBanner.height, 'auto');
+  assert.equal(nativeBanner.objectFit, 'contain');
+  assert.equal(nativeBanner.mobileHeightPx, 196);
+  assert.equal(nativeBanner.desktopHeightPx, 268);
+  assert.equal(nativeBanner.isClickableCardGrid, true);
+  assert.equal(nativeBanner.slotLabel, 'Featured Picks · HD');
+  assert.equal(nativeBanner.iframeClassName.includes('pointer-events-auto'), true);
+});
+
+
+
+
+
+
+

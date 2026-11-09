@@ -1,0 +1,6 @@
+{
+  "name": "CineBox — Movie Streaming & Offline Downloader",
+  "description": "Custom Android & Web movie streaming and offline-capable downloading application built with React, Tailwind CSS, Supabase, HLS.js, and Capacitor.js.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

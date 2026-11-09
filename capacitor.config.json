@@ -1,0 +1,15 @@
+{
+  "appId": "com.cinebox.stream",
+  "appName": "CineBox",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "Filesystem": {
+      "iosIsDocumentPickerEnabled": true
+    }
+  }
+}
