@@ -502,8 +502,14 @@ export function validateAppUserInput(input: Partial<AppUserRecord>): {
     ? (input.status as UserAccountStatus)
     : 'active';
 
-  const platform: 'Android APK' | 'Web Browser' =
-    input.platform === 'Web Browser' ? 'Web Browser' : 'Android APK';
+  const rawPlatform = typeof input.platform === 'string' ? input.platform.trim() : '';
+  const platform: 'Android' | 'Web' | 'Android APK' | 'Web Browser' =
+    rawPlatform === 'Android' ||
+    rawPlatform === 'Web' ||
+    rawPlatform === 'Android APK' ||
+    rawPlatform === 'Web Browser'
+      ? rawPlatform
+      : 'Android';
 
   const cleanNotes =
     typeof input.notes === 'string'
@@ -514,6 +520,36 @@ export function validateAppUserInput(input: Partial<AppUserRecord>): {
     typeof input.vip_until === 'string' && input.vip_until.trim()
       ? input.vip_until.replace(/[^0-9-]/g, '').slice(0, 16)
       : '2027-12-30';
+
+  const cleanTrialStart =
+    typeof input.trial_start_date === 'string' && Number.isFinite(Date.parse(input.trial_start_date))
+      ? new Date(Date.parse(input.trial_start_date)).toISOString()
+      : undefined;
+
+  const cleanTrialEnd =
+    typeof input.trial_end_date === 'string' && Number.isFinite(Date.parse(input.trial_end_date))
+      ? new Date(Date.parse(input.trial_end_date)).toISOString()
+      : undefined;
+
+  const cleanAccessExpiry =
+    typeof input.access_expiry_date === 'string' && Number.isFinite(Date.parse(input.access_expiry_date))
+      ? new Date(Date.parse(input.access_expiry_date)).toISOString()
+      : null;
+
+  const cleanReferralCode =
+    typeof input.referral_code === 'string' && input.referral_code.trim()
+      ? input.referral_code.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 16)
+      : undefined;
+
+  const cleanReferredBy =
+    typeof input.referred_by === 'string' && input.referred_by.trim()
+      ? input.referred_by.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 16)
+      : null;
+
+  const cleanSuccessfulReferrals = Math.max(
+    0,
+    Math.floor(Number(input.successful_referrals) || 0)
+  );
 
   return {
     valid: true,
@@ -528,6 +564,12 @@ export function validateAppUserInput(input: Partial<AppUserRecord>): {
       vip_until: cleanVipUntil,
       downloads_count: Math.max(0, Math.floor(Number(input.downloads_count) || 0)),
       notes: cleanNotes,
+      trial_start_date: cleanTrialStart,
+      trial_end_date: cleanTrialEnd,
+      referral_code: cleanReferralCode,
+      referred_by: cleanReferredBy,
+      successful_referrals: cleanSuccessfulReferrals,
+      access_expiry_date: cleanAccessExpiry,
       updated_at: new Date().toISOString(),
     },
   };
@@ -719,100 +761,49 @@ export function verifyAdminPinRecovery(
   return { valid: true, sanitizedPin: cleanPin };
 }
 
-export const DEFAULT_ADSTERRA_ZONE_KEY = '83b5d9d90d154535d150a2bd3cf1f04e';
-export const DEFAULT_ADSTERRA_SCRIPT_SRC =
-  'https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e';
-export const DEFAULT_ADSTERRA_CONTAINER_ID =
-  'container-83b5d9d90d154535d150a2bd3cf1f04e';
-
 /**
- * Parses and validates an Adsterra Banner / Native Banner HTML snippet:
- * `<script async="async" data-cfasync="false" src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e"></script>`
- * `<div id="container-83b5d9d90d154535d150a2bd3cf1f04e"></div>`
- * Rejects `javascript:` URLs, inline XSS handlers (`onerror=`, `onload=`), and non-HTTPS script sources.
+ * Verifies that HTML or script snippets do not load external ad-network scripts,
+ * popunders, or inline XSS handlers while the app operates in 100% Ad-Free mode.
  */
-export function parseAdsterraSnippet(rawSnippet: string | null | undefined): {
-  valid: boolean;
-  scriptSrc: string;
-  containerId: string;
-  zoneKey: string;
-  error?: string;
+export function verifyAdFreeHtmlGuard(rawMarkup: string | null | undefined): {
+  isAdFree: boolean;
+  sanitizedHtml: string;
+  blockedReason?: string;
 } {
-  if (!rawSnippet || typeof rawSnippet !== 'string' || !rawSnippet.trim()) {
+  if (!rawMarkup || typeof rawMarkup !== 'string' || !rawMarkup.trim()) {
     return {
-      valid: false,
-      scriptSrc: '',
-      containerId: '',
-      zoneKey: '',
-      error: 'Adsterra snippet is empty.',
+      isAdFree: true,
+      sanitizedHtml: '',
     };
   }
 
-  const lower = rawSnippet.toLowerCase();
+  const lower = rawMarkup.toLowerCase();
   if (
+    lower.includes('<script') ||
     lower.includes('javascript:') ||
     lower.includes('onerror=') ||
     lower.includes('onload=') ||
     lower.includes('onclick=') ||
-    lower.includes('onmousedown=') ||
-    lower.includes('onmouseup=') ||
     lower.includes('window.open') ||
-    lower.includes('top.location') ||
-    lower.includes('parent.location') ||
-    lower.includes('location.href') ||
-    lower.includes('location.replace') ||
     lower.includes('popunder')
   ) {
     return {
-      valid: false,
-      scriptSrc: '',
-      containerId: '',
-      zoneKey: '',
-      error: 'Snippet contains unsafe inline event handlers, popunders, or redirect scripts.',
+      isAdFree: false,
+      sanitizedHtml: '',
+      blockedReason: 'External ad scripts, popunders, and inline event handlers are blocked in Ad-Free mode.',
     };
   }
-
-  const srcMatch = rawSnippet.match(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/i);
-  const divMatch = rawSnippet.match(/<div\b[^>]*\bid\s*=\s*["'](container-[a-zA-Z0-9_-]+)["'][^>]*>/i);
-
-  const rawSrc = srcMatch?.[1]?.trim() || '';
-  const safeSrc = sanitizeSafeUrl(rawSrc);
-  if (!safeSrc || !safeSrc.startsWith('https://')) {
-    return {
-      valid: false,
-      scriptSrc: '',
-      containerId: '',
-      zoneKey: '',
-      error: 'A valid HTTPS Adsterra script src URL is required.',
-    };
-  }
-
-  const rawContainerId = divMatch?.[1]?.trim() || '';
-  if (!rawContainerId || !/^container-[a-zA-Z0-9_-]{4,64}$/.test(rawContainerId)) {
-    return {
-      valid: false,
-      scriptSrc: '',
-      containerId: '',
-      zoneKey: '',
-      error: 'A valid <div id="container-..."></div> element is required.',
-    };
-  }
-
-  const zoneKey = rawContainerId.replace(/^container-/, '');
 
   return {
-    valid: true,
-    scriptSrc: safeSrc,
-    containerId: rawContainerId,
-    zoneKey,
+    isAdFree: true,
+    sanitizedHtml: sanitizeStaticBannerAdCode(rawMarkup),
   };
 }
 
 /**
- * Strictly sanitizes any Banner / Native Banner HTML code so that:
+ * Strictly sanitizes any static HTML markup so that:
  * 1. All `<script>` tags that trigger redirects, popups, popunders, or click hijacking are stripped.
- * 2. All clickable `<a href="..." target="_blank">` wrappers and inline mouse/click handlers are neutralized
- *    so banners are 100% visual-only and can never open a new tab or redirect the user.
+ * 2. All clickable `<a href="..." target="_blank">` wrappers and inline mouse/click handlers are neutralized.
  */
 export function sanitizeStaticBannerAdCode(rawHtml: string | null | undefined): string {
   if (!rawHtml || typeof rawHtml !== 'string') {
@@ -820,14 +811,14 @@ export function sanitizeStaticBannerAdCode(rawHtml: string | null | undefined): 
   }
 
   return rawHtml
-    // Strip all <script> blocks (external or inline) from static HTML banner markup
+    // Strip all <script> blocks (external or inline)
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
     // Strip <iframe ...>, <object>, <embed>, <meta http-equiv="refresh">, <form>, <base>
     .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
     .replace(/<(object|embed|form|meta|link|style|base)\b[^>]*>/gi, '')
     // Strip all inline event handlers (onclick, onmousedown, onmouseup, ontouchstart, onerror, onload, etc.)
     .replace(/\son[a-z]+\s*=\s*(['"][^'"]*['"]|[^\s>]+)/gi, '')
-    // Convert any <a ...> tags into non-interactive <span> elements so clicking on a banner never opens a tab
+    // Convert any <a ...> tags into non-interactive <span> elements
     .replace(/<a\b[^>]*>/gi, '<span class="pointer-events-none select-none">')
     .replace(/<\/a>/gi, '</span>')
     // Neutralize javascript: and data: URIs
@@ -835,56 +826,3 @@ export function sanitizeStaticBannerAdCode(rawHtml: string | null | undefined): 
     .replace(/data\s*:\s*text\/html/gi, 'blocked:')
     .trim();
 }
-
-export interface ResponsiveAdSlotDimensions {
-  placement: 'home-top' | 'home-native' | 'player-bottom';
-  slotLabel: string;
-  maxWidth: '100%';
-  height: 'auto';
-  objectFit: 'contain';
-  mobileHeightPx: number;
-  desktopHeightPx: number;
-  containerClassName: string;
-  iframeWrapperClassName: string;
-  iframeClassName: string;
-  isClickableCardGrid: boolean;
-}
-
-/**
- * Returns responsive layout dimensions and CSS rules for Adsterra Banner and Native Banner slots
- * styled as a CineBox Movie Thumbnail Grid so ads fit proportionally on mobile and desktop
- * and allow users to click the movie-style ad cards.
- */
-export function getResponsiveAdSlotDimensions(
-  placement: 'home-top' | 'home-native' | 'player-bottom' = 'home-top'
-): ResponsiveAdSlotDimensions {
-  const isNative = placement === 'home-native';
-  const slotLabel = isNative
-    ? 'Featured Picks · HD'
-    : placement === 'player-bottom'
-    ? 'Recommended For You · HD'
-    : 'Trending Spotlight · HD';
-
-  const mobileHeightPx = 196;
-  const desktopHeightPx = 268;
-
-  const heightClasses =
-    'h-[196px] sm:h-[268px] max-h-[196px] sm:max-h-[268px]';
-
-  return {
-    placement,
-    slotLabel,
-    maxWidth: '100%',
-    height: 'auto',
-    objectFit: 'contain',
-    mobileHeightPx,
-    desktopHeightPx,
-    containerClassName:
-      'relative w-full max-w-full box-border rounded-2xl bg-transparent overflow-hidden transition-all',
-    iframeWrapperClassName: `w-full max-w-full rounded-xl bg-transparent flex items-start justify-center overflow-hidden ${heightClasses}`,
-    iframeClassName: `w-full max-w-full ${heightClasses} border-0 overflow-hidden bg-transparent pointer-events-auto block`,
-    isClickableCardGrid: true,
-  };
-}
-
-

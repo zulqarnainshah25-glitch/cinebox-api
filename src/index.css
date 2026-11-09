@@ -10,16 +10,62 @@
     --brand-accent-secondary: #06b6d4;
   }
 
-  body {
+  html,
+  body,
+  #root {
     font-family: var(--font-sans);
-    background-color: #0b0d12;
+    background-color: #000000;
     color: #f1f5f9;
     overflow-x: hidden;
+    margin: 0;
+    padding: 0;
   }
 
   h1, h2, h3, .font-display {
     font-family: var(--font-display);
   }
+}
+
+/* Strictly eliminate white borders in Fullscreen on Android WebView, Mobile Chrome, and Safari */
+:fullscreen,
+:-webkit-full-screen,
+:-moz-full-screen,
+:-ms-fullscreen,
+.cinebox-player-fullscreen {
+  background-color: #000000 !important;
+  background: #000000 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  max-width: 100vw !important;
+  max-height: 100dvh !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+  inset: 0 !important;
+}
+
+:fullscreen::backdrop,
+:-webkit-full-screen::backdrop,
+video::backdrop,
+iframe::backdrop {
+  background-color: #000000 !important;
+  background: #000000 !important;
+}
+
+:fullscreen video,
+:-webkit-full-screen video,
+:fullscreen iframe,
+:-webkit-full-screen iframe,
+.cinebox-player-fullscreen video,
+.cinebox-player-fullscreen iframe {
+  background-color: #000000 !important;
+  border: 0 !important;
+  outline: none !important;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 /* Hide scrollbars on horizontal carousels while keeping smooth touch scroll */

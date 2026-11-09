@@ -487,3 +487,101 @@ export function shouldShowAudioTrackButton(
   const validTracks = tracks.filter((t) => !t.failed && (t.source === 'hls' || t.source === 'html5'));
   return validTracks.length > 1;
 }
+
+export interface FullscreenPlayerLayoutConfig {
+  isFullscreen: boolean;
+  backgroundColor: '#000000';
+  viewportWidth: '100vw';
+  viewportHeight: '100dvh';
+  objectFit: 'contain' | 'cover' | 'fill';
+  showAlwaysVisibleExitButton: boolean;
+  containerClassName: string;
+  videoObjectFitClass: string;
+  bottomControlsSafePaddingClass: string;
+  exitButtonClassName: string;
+}
+
+/**
+ * Computes fullscreen player container classes, pure #000000 borderless background,
+ * always-visible top-left Exit Fullscreen button state, and mobile navigation-bar safe-area padding.
+ */
+export function getFullscreenPlayerConfig(
+  isFullscreen: boolean,
+  fitMode: 'contain' | 'cover' | 'fill' = 'contain'
+): FullscreenPlayerLayoutConfig {
+  const videoObjectFitClass =
+    fitMode === 'cover'
+      ? 'object-cover'
+      : fitMode === 'fill'
+      ? 'object-fill'
+      : 'object-contain';
+
+  const containerClassName = isFullscreen
+    ? 'cinebox-player-fullscreen fixed inset-0 z-[9999] w-[100vw] h-[100vh] h-[100dvh] max-w-[100vw] max-h-[100dvh] bg-[#000000] overflow-hidden select-none border-0 m-0 p-0'
+    : 'relative w-full aspect-video min-h-[225px] sm:min-h-[360px] max-h-[68vh] bg-[#000000] overflow-hidden select-none shadow-2xl border-b border-slate-800/80';
+
+  const bottomControlsSafePaddingClass = isFullscreen
+    ? 'px-4 sm:px-6 pb-[max(1.25rem,calc(env(safe-area-inset-bottom,16px)+12px))] pt-3 bg-gradient-to-t from-black via-black/80 to-transparent'
+    : 'px-3 sm:px-4 pb-[max(0.875rem,calc(env(safe-area-inset-bottom,10px)+6px))] pt-2.5 bg-gradient-to-t from-black/95 via-black/75 to-transparent';
+
+  const exitButtonClassName =
+    'fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md transition-transform active:scale-95 min-h-[40px]';
+
+  return {
+    isFullscreen,
+    backgroundColor: '#000000',
+    viewportWidth: '100vw',
+    viewportHeight: '100dvh',
+    objectFit: fitMode,
+    showAlwaysVisibleExitButton: isFullscreen,
+    containerClassName,
+    videoObjectFitClass,
+    bottomControlsSafePaddingClass,
+    exitButtonClassName,
+  };
+}
+
+/**
+ * Safely locks or unlocks mobile screen orientation (Landscape during video fullscreen/play,
+ * Portrait when exiting fullscreen or closing the player) without throwing on desktop browsers.
+ */
+export async function lockScreenOrientationSafely(
+  mode: 'landscape' | 'portrait' | 'unlock',
+  screenObj?: {
+    orientation?: {
+      lock?: (orientation: string) => Promise<void>;
+      unlock?: () => void;
+    };
+  } | null
+): Promise<{ ok: boolean; mode: 'landscape' | 'portrait' | 'unlock' }> {
+  try {
+    const targetScreen =
+      screenObj !== undefined
+        ? screenObj
+        : typeof window !== 'undefined'
+        ? (window.screen as any)
+        : null;
+
+    const orientationApi = targetScreen?.orientation;
+    if (!orientationApi) {
+      return { ok: false, mode };
+    }
+
+    if (mode === 'unlock') {
+      if (typeof orientationApi.unlock === 'function') {
+        orientationApi.unlock();
+        return { ok: true, mode };
+      }
+      return { ok: false, mode };
+    }
+
+    if (typeof orientationApi.lock === 'function') {
+      await orientationApi.lock(mode);
+      return { ok: true, mode };
+    }
+    return { ok: false, mode };
+  } catch {
+    return { ok: false, mode };
+  }
+}
+

@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
+  ChevronLeft,
   ExternalLink,
   Flame,
+  Maximize2,
   Play,
   RefreshCw,
   Search,
@@ -17,6 +19,7 @@ import {
   PakDramaSortOrder,
   YouTubeDramaVideoItem,
 } from '../services/youtubeDramaService';
+import { lockScreenOrientationSafely } from '../utils/streamResolver';
 
 interface PakistaniDramasSectionProps {
   isFullTab?: boolean;
@@ -35,6 +38,7 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isQuotaError, setIsQuotaError] = useState<boolean>(false);
   const [activeVideo, setActiveVideo] = useState<YouTubeDramaVideoItem | null>(null);
+  const [isDramaFullscreen, setIsDramaFullscreen] = useState<boolean>(false);
 
   const loadDramas = async (forceRefresh: boolean = false) => {
     setIsLoading(true);
@@ -200,7 +204,7 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
       {activeVideo && (
         <div
           data-testid="pak-drama-youtube-player-panel"
-          className="rounded-2xl bg-[#0d111a] border border-[#10d97b]/50 overflow-hidden shadow-2xl space-y-3 p-3 sm:p-4"
+          className="rounded-2xl bg-[#000000] border border-[#10d97b]/50 overflow-hidden shadow-2xl space-y-3 p-3 sm:p-4"
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
@@ -221,6 +225,18 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="pak-drama-fullscreen-btn"
+                onClick={() => {
+                  setIsDramaFullscreen(true);
+                  lockScreenOrientationSafely('landscape').catch(() => {});
+                }}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-xs flex items-center gap-1.5"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
+                <span>Fullscreen</span>
+              </button>
               <a
                 href={activeVideo.watchUrl}
                 target="_blank"
@@ -234,7 +250,11 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
               <button
                 type="button"
                 data-testid="pak-drama-close-player-btn"
-                onClick={() => setActiveVideo(null)}
+                onClick={() => {
+                  setIsDramaFullscreen(false);
+                  lockScreenOrientationSafely('portrait').catch(() => {});
+                  setActiveVideo(null);
+                }}
                 aria-label="Close Drama Player"
                 className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200"
               >
@@ -243,14 +263,38 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
             </div>
           </div>
 
-          <div className="relative aspect-video w-full rounded-xl overflow-hidden bg-black">
+          <div
+            className={
+              isDramaFullscreen
+                ? 'cinebox-player-fullscreen fixed inset-0 z-[9999] w-[100vw] h-[100vh] h-[100dvh] bg-[#000000] overflow-hidden border-0 m-0 p-0'
+                : 'relative aspect-video w-full rounded-xl overflow-hidden bg-[#000000]'
+            }
+            style={{ backgroundColor: '#000000' }}
+          >
+            {isDramaFullscreen && (
+              <button
+                type="button"
+                data-testid="pak-drama-exit-fullscreen-btn"
+                onClick={() => {
+                  setIsDramaFullscreen(false);
+                  lockScreenOrientationSafely('portrait').catch(() => {});
+                }}
+                aria-label="Exit Fullscreen"
+                className="fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md min-h-[40px]"
+              >
+                <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />
+                <span>Back / Exit Fullscreen</span>
+                <X className="w-3.5 h-3.5 text-slate-300 ml-0.5" />
+              </button>
+            )}
             <iframe
               data-testid="pak-drama-youtube-iframe"
               src={activeVideo.embedUrl}
               title={activeVideo.title}
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
               allowFullScreen
-              className="w-full h-full border-0"
+              className="w-full h-full border-0 bg-[#000000]"
+              style={{ backgroundColor: '#000000' }}
             />
           </div>
         </div>

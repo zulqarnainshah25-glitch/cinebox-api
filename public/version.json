@@ -1,0 +1,5 @@
+{
+  "version": "1.0.1",
+  "apk_url": "https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.1/app-release.apk",
+  "release_notes": "Added Capacitor Platform Detection (APK vs Web), 3-Day APK Trial & 2-Referral 30-Day Unlock System, and Signature-Safe In-App Update Checker."
+}

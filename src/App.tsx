@@ -81,9 +81,24 @@ import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { DownloadsView } from './components/DownloadsView';
 import { ProfileMeView } from './components/ProfileMeView';
 import { AdminAndDeliverablesModal } from './components/AdminAndDeliverablesModal';
-import { NonIntrusiveBannerAd } from './components/NonIntrusiveBannerAd';
 import { PakistaniDramasSection } from './components/PakistaniDramasSection';
 import { VidSrcLatestFeedsSection } from './components/VidSrcLatestFeedsSection';
+import { CineBoxBrandLogo } from './components/CineBoxBrandLogo';
+import { InAppUpdateDialog } from './components/InAppUpdateDialog';
+import { PlatformAuthAndPaywallOverlay } from './components/PlatformAuthAndPaywallOverlay';
+import {
+  DetectedPlatform,
+  detectAppPlatform,
+  evaluatePlatformTrialAndReferralState,
+  extractReferralCodeFromLocation,
+  PENDING_REFERRAL_CODE_STORAGE_KEY,
+  shareReferralLink,
+  TRIAL_DURATION_MS,
+} from './services/platformTrialReferralService';
+import {
+  checkForInAppApkUpdate,
+  InAppUpdateCheckResult,
+} from './services/inAppUpdateService';
 
 type BottomNavTab = 'home' | 'search' | 'downloads' | 'watchlist' | 'me';
 
@@ -191,7 +206,63 @@ export default function App() {
 
   // Global Users, Real Logged-In User, App Settings & Admin Session State
   const [appUsers, setAppUsers] = useState<AppUserRecord[]>([]);
-  const [loggedInUser, setLoggedInUser] = useState<AppUserRecord | null>(() => getLoggedInUser());
+  const [detectedPlatform, setDetectedPlatform] = useState<DetectedPlatform>(() =>
+    detectAppPlatform()
+  );
+  const [initialReferralCode, setInitialReferralCode] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const code = extractReferralCodeFromLocation(
+      window.location.pathname,
+      window.location.search
+    );
+    if (code) {
+      try {
+        localStorage.setItem(PENDING_REFERRAL_CODE_STORAGE_KEY, code);
+      } catch {
+        // ignore
+      }
+    }
+    return code;
+  });
+
+  const [loggedInUser, setLoggedInUser] = useState<AppUserRecord | null>(() => {
+    const existing = getLoggedInUser();
+    if (existing) return existing;
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('autostart') === '1') {
+        const plat = detectAppPlatform();
+        const now = Date.now();
+        const isExpiredSim = params.get('trial') === 'expired';
+        const autoUser: AppUserRecord = {
+          id: 'USR-1097888621',
+          username: 'Zulqarnain Shah',
+          email: 'zulqarnainshah25@gmail.com',
+          role: plat === 'Web' ? 'vip' : 'user',
+          status: 'active',
+          platform: plat,
+          referral_code: 'CBX-ZULQ25',
+          successful_referrals: 0,
+          trial_start_date: isExpiredSim
+            ? new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString()
+            : new Date(now).toISOString(),
+          trial_end_date: isExpiredSim
+            ? new Date(now - 24 * 60 * 60 * 1000).toISOString()
+            : new Date(now + TRIAL_DURATION_MS).toISOString(),
+          access_expiry_date: null,
+        };
+        return autoUser;
+      }
+    }
+    return null;
+  });
+
+  // In-App Update Checker State (Reads /version.json & compares with App.getInfo().version)
+  const [updateCheckResult, setUpdateCheckResult] = useState<InAppUpdateCheckResult | null>(
+    null
+  );
+  const [isUpdateDialogDismissed, setIsUpdateDialogDismissed] = useState<boolean>(false);
+
   const [userSettings, setUserSettings] = useState<UserAppSettings>(() => getUserAppSettings());
   const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => {
     try {
@@ -269,10 +340,26 @@ export default function App() {
 
   useEffect(() => {
     refreshSupabaseData();
+    setDetectedPlatform(detectAppPlatform());
+
+    // 4. In-App Update Checker: Fetch /version.json on startup & compare with App.getInfo().version
+    checkForInAppApkUpdate().then((res) => {
+      if (res.checked && res.updateAvailable) {
+        setUpdateCheckResult(res);
+      }
+    });
+
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       if (params.get('admin') === '1' || window.location.hash === '#admin') {
         setAdminModalState({ open: true, tab: 'admin' });
+      }
+      const refFromUrl = extractReferralCodeFromLocation(
+        window.location.pathname,
+        window.location.search
+      );
+      if (refFromUrl) {
+        setInitialReferralCode(refFromUrl);
       }
     }
   }, []);
@@ -719,6 +806,16 @@ export default function App() {
 
   const activeDownloadsCount = downloads.filter((d) => d.status === 'downloading').length;
 
+  // Evaluate Platform-Specific Trial & Referral Status (Web Direct Login vs APK 3-Day Trial & Referral Paywall)
+  const platformEvaluation = useMemo(
+    () =>
+      evaluatePlatformTrialAndReferralState({
+        platform: detectedPlatform,
+        user: loggedInUser,
+      }),
+    [detectedPlatform, loggedInUser]
+  );
+
   return (
     <div className="min-h-screen bg-[#0b0d12] text-slate-100 flex flex-col">
       {/* =====================================================================
@@ -733,12 +830,11 @@ export default function App() {
             aria-label={`${appConfig.app_name} Logo — Tap 5 times for Secret Admin Panel`}
             className="flex items-center gap-2 shrink-0 group focus:outline-none min-h-[40px]"
           >
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#06b6d4] via-[#10d97b] to-[#22c55e] flex items-center justify-center shadow-md shadow-[#10d97b]/20 group-active:scale-95 transition-transform">
-              <Play className="w-5 h-5 text-slate-950 fill-slate-950 ml-0.5" />
-            </div>
-            <span className="hidden sm:inline font-display font-extrabold text-lg tracking-tight text-white">
-              {appConfig.app_name}
-            </span>
+            <CineBoxBrandLogo
+              appName={appConfig.app_name}
+              size="md"
+              showWordmarkOnMobile={true}
+            />
           </button>
 
           {/* Rounded Search Bar */}
@@ -825,13 +921,58 @@ export default function App() {
           MAIN VIEWPORT ROUTER
          ===================================================================== */}
       <main className="flex-1">
+        {/* APK-ONLY 3-DAY TRIAL COUNTDOWN BANNER ("Trial Ends in: X Days Y Hours") */}
+        {detectedPlatform === 'Android' &&
+          loggedInUser &&
+          platformEvaluation.showTrialBanner && (
+            <div
+              data-testid="apk-trial-timer-banner"
+              className="bg-gradient-to-r from-[#0d261c] via-[#132c23] to-[#0f222a] border-b border-[#10d97b]/35 px-3 sm:px-6 py-2"
+            >
+              <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-[#10d97b] shrink-0" />
+                  <span
+                    data-testid="apk-trial-timer-text"
+                    className="font-extrabold text-white"
+                  >
+                    {platformEvaluation.trialBannerText}
+                  </span>
+                  <span className="hidden sm:inline text-slate-300">
+                    · Referrals: {platformEvaluation.successfulReferrals}/2 (Share with 2 friends for +30 Days Free)
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-slate-950/90 border border-[#10d97b]/40 font-mono text-[11px] font-bold text-[#10d97b]">
+                    Code: {platformEvaluation.referralCode}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="banner-share-referral-btn"
+                    onClick={async () => {
+                      const res = await shareReferralLink(platformEvaluation.referralCode);
+                      showToast(
+                        res.shared
+                          ? 'Referral link shared!'
+                          : `Referral link copied: ${res.shareUrl}`
+                      );
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-[11px] transition-colors"
+                  >
+                    Share Link
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
         {activeTab === 'home' && (
           <div className="pb-24 max-w-7xl mx-auto space-y-6">
             {/* Dedicated Pakistani Dramas Tab View when 'Pakistani Dramas' Top Category is selected */}
             {selectedTopCategory === 'Pakistani Dramas' ? (
               <div className="px-3 sm:px-6 pt-4 space-y-6">
                 <PakistaniDramasSection isFullTab={true} />
-                <NonIntrusiveBannerAd config={appConfig} placement="home-top" />
               </div>
             ) : (
               <>
@@ -920,9 +1061,6 @@ export default function App() {
                 )}
 
                 <div className="px-3 sm:px-6 space-y-7">
-                  {/* Non-Intrusive Same-Tab Compact Banner Ad (Adsterra / Monetag / AdMob Ready) */}
-                  <NonIntrusiveBannerAd config={appConfig} placement="home-top" />
-
                   {/* PART 1 (3): VIDSRC.SH LATEST MOVIES & LATEST TV SHOWS FEEDS */}
                   <VidSrcLatestFeedsSection
                     fallbackMovies={trendingMoviesSection}
@@ -1037,9 +1175,6 @@ export default function App() {
                   ))}
                 </div>
               </section>
-
-              {/* Adsterra Native Banner Slot (`container-83b5d9d90d154535d150a2bd3cf1f04e`) */}
-              <NonIntrusiveBannerAd config={appConfig} placement="home-native" />
 
               {/* 4. TRENDING TV SERIES SECTION (100% Live TMDb `/trending/tv/week` Data) */}
               <section className="space-y-3.5">
@@ -1792,10 +1927,55 @@ export default function App() {
           onLinksUpdated={refreshSupabaseData}
           onUsersUpdated={(updatedUsers) => setAppUsers(updatedUsers)}
           onPreviewPopupAd={() => {
-            showToast('Popup & Popunder Ads are strictly disabled — Static Banner-Only mode is active.');
+            showToast('Popup & Popunder Ads are strictly disabled — 100% Ad-Free mode is active.');
           }}
         />
       )}
+
+      {/* =====================================================================
+          PLATFORM-SPECIFIC AUTH (WEB DIRECT LOGIN) & APK 3-DAY TRIAL / REFERRAL PAYWALL
+         ===================================================================== */}
+      {!adminModalState.open && (
+        <PlatformAuthAndPaywallOverlay
+          appName={appConfig.app_name}
+          platform={detectedPlatform}
+          loggedInUser={loggedInUser}
+          evaluation={platformEvaluation}
+          initialReferralCode={initialReferralCode}
+          onAuthSuccess={(user, rewardMsg) => {
+            setLoggedInUser(user);
+            fetchAllAppUsers().then(setAppUsers);
+            if (rewardMsg) {
+              showToast(rewardMsg);
+            } else {
+              showToast(
+                detectedPlatform === 'Web'
+                  ? `Welcome ${user.username}! Web Direct Access active.`
+                  : `Welcome ${user.username}! Your 3-Day Free APK Trial has started.`
+              );
+            }
+          }}
+          onReferralUnlocked={(updatedUser, rewardMsg) => {
+            setLoggedInUser(updatedUser);
+            fetchAllAppUsers().then(setAppUsers);
+            showToast(rewardMsg);
+          }}
+          onOpenAdminOverride={() => setAdminModalState({ open: true, tab: 'admin' })}
+        />
+      )}
+
+      {/* =====================================================================
+          IN-APP UPDATE CHECKER DIALOG (VERSION.JSON VS APP.GETINFO().VERSION)
+         ===================================================================== */}
+      {updateCheckResult &&
+        updateCheckResult.updateAvailable &&
+        !isUpdateDialogDismissed &&
+        !adminModalState.open && (
+          <InAppUpdateDialog
+            updateInfo={updateCheckResult}
+            onDismiss={() => setIsUpdateDialogDismissed(true)}
+          />
+        )}
     </div>
   );
 }

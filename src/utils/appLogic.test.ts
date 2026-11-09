@@ -12,7 +12,7 @@ import {
   evaluateGlobalUserAccess,
   generateAllottedUserId,
   verifyAdminPinRecovery,
-  parseAdsterraSnippet,
+  verifyAdFreeHtmlGuard,
 } from './securityValidator';
 import {
   buildEmbedServerList,
@@ -453,30 +453,23 @@ test('Real Login & Forgot Admin PIN: generateAllottedUserId and verifyAdminPinRe
   assert.equal(validRecovery.sanitizedPin, '7860');
 });
 
-test('Adsterra Banner & Native Banner Snippet Parser: extracts scriptSrc, containerId, and zoneKey while blocking XSS', () => {
-  const userSnippet = `<script async="async" data-cfasync="false" src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e"></script>
-<div id="container-83b5d9d90d154535d150a2bd3cf1f04e"></div>`;
+test('Ad-Free HTML Security Guard: verifyAdFreeHtmlGuard blocks external ad scripts, popunders, and inline XSS handlers', () => {
+  const emptyCheck = verifyAdFreeHtmlGuard('');
+  assert.equal(emptyCheck.isAdFree, true);
+  assert.equal(emptyCheck.sanitizedHtml, '');
 
-  const parsed = parseAdsterraSnippet(userSnippet);
-  assert.equal(parsed.valid, true);
-  assert.equal(
-    parsed.scriptSrc,
-    'https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e'
+  const scriptBlocked = verifyAdFreeHtmlGuard(
+    '<script async src="https://example-ad-server.com/invoke.js"></script><div id="ad-slot"></div>'
   );
-  assert.equal(parsed.containerId, 'container-83b5d9d90d154535d150a2bd3cf1f04e');
-  assert.equal(parsed.zoneKey, '83b5d9d90d154535d150a2bd3cf1f04e');
+  assert.equal(scriptBlocked.isAdFree, false);
+  assert.equal(scriptBlocked.sanitizedHtml, '');
 
-  // Block XSS / malicious event handler
-  const malicious = parseAdsterraSnippet(
-    `<script src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e"></script><div id="container-1234" onload="alert(1)"></div>`
-  );
-  assert.equal(malicious.valid, false);
+  const popunderBlocked = verifyAdFreeHtmlGuard('<div onclick="window.open(\'https://spam.example\')">Click</div>');
+  assert.equal(popunderBlocked.isAdFree, false);
 
-  // Block non-HTTPS script
-  const insecure = parseAdsterraSnippet(
-    `<script src="http://insecure.example.com/ad.js"></script><div id="container-123456"></div>`
-  );
-  assert.equal(insecure.valid, false);
+  const cleanStatic = verifyAdFreeHtmlGuard('<div>CineBox HD Streaming</div>');
+  assert.equal(cleanStatic.isAdFree, true);
+  assert.equal(cleanStatic.sanitizedHtml, '<div>CineBox HD Streaming</div>');
 });
 
 test('Pakistani Drama & Hindi Dubbed Resolver: detects Dar-E-Nijaat and ranks full episodes above short clips', async () => {
@@ -769,7 +762,7 @@ test('Phase 4 & 6: Stream Source Manager deduplicates sources, selects healthy f
 });
 
 test('Strict Banner-Only Ad Sanitizer: strips redirect/popunder scripts and neutralizes clickable ad links', async () => {
-  const { sanitizeStaticBannerAdCode, parseAdsterraSnippet } = await import(
+  const { sanitizeStaticBannerAdCode, verifyAdFreeHtmlGuard } = await import(
     './securityValidator'
   );
 
@@ -787,11 +780,11 @@ test('Strict Banner-Only Ad Sanitizer: strips redirect/popunder scripts and neut
   assert.equal(sanitized.includes('<a '), false);
   assert.equal(sanitized.includes('pointer-events-none'), true);
 
-  // Reject Adsterra snippets that attempt popunders or top.location redirects
-  const popunderSnippet = parseAdsterraSnippet(
-    `<script src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e">window.open("https://popunder.com")</script><div id="container-83b5d9d90d154535d150a2bd3cf1f04e"></div>`
+  // Reject any snippet that attempts popunders or external ad scripts
+  const popunderCheck = verifyAdFreeHtmlGuard(
+    `<script src="https://external-ad-server.example/ad.js">window.open("https://popunder.com")</script><div id="ad-slot"></div>`
   );
-  assert.equal(popunderSnippet.valid, false);
+  assert.equal(popunderCheck.isAdFree, false);
 });
 
 test('Stage 2 Deep Verification: checkStreamSourceHealth (HEAD->GET fallback, #EXTM3U manifest check, soft-404 rejection, iframe protection) & alternate_streams XSS sanitization', async () => {
@@ -1571,35 +1564,260 @@ test('Part 2 & 3: YouTube Data API v3 Pakistani Dramas Integration (Official Cha
   assert.equal(failRes.errorMessage, 'Content Unavailable, Try Again');
 });
 
-test('Movie-Thumbnail Ad Banner Layout Fix: getResponsiveAdSlotDimensions enforces max-width: 100%, height: auto, movie-thumbnail row heights, and clickable movie-style card grid', async () => {
-  const { getResponsiveAdSlotDimensions } = await import('./securityValidator');
+test('100% Ad-Free Enforcement: fetchAppConfig and DEFAULT_APP_CONFIG strictly disable all ads and strip banner HTML', async () => {
+  const { DEFAULT_APP_CONFIG, fetchAppConfig } = await import('../services/supabaseClient');
 
-  const topBanner = getResponsiveAdSlotDimensions('home-top');
-  assert.equal(topBanner.maxWidth, '100%');
-  assert.equal(topBanner.height, 'auto');
-  assert.equal(topBanner.objectFit, 'contain');
-  assert.equal(topBanner.mobileHeightPx, 196);
-  assert.equal(topBanner.desktopHeightPx, 268);
-  assert.equal(topBanner.isClickableCardGrid, true);
-  assert.equal(topBanner.slotLabel, 'Trending Spotlight · HD');
-  assert.equal(topBanner.containerClassName.includes('max-w-full'), true);
-  assert.equal(topBanner.containerClassName.includes('overflow-hidden'), true);
-  assert.equal(topBanner.iframeClassName.includes('pointer-events-auto'), true);
+  assert.equal(DEFAULT_APP_CONFIG.is_ads_enabled, false);
+  assert.equal(DEFAULT_APP_CONFIG.ad_network_provider, 'none');
+  assert.equal(DEFAULT_APP_CONFIG.banner_ad_html, '');
 
-  const nativeBanner = getResponsiveAdSlotDimensions('home-native');
-  assert.equal(nativeBanner.maxWidth, '100%');
-  assert.equal(nativeBanner.height, 'auto');
-  assert.equal(nativeBanner.objectFit, 'contain');
-  assert.equal(nativeBanner.mobileHeightPx, 196);
-  assert.equal(nativeBanner.desktopHeightPx, 268);
-  assert.equal(nativeBanner.isClickableCardGrid, true);
-  assert.equal(nativeBanner.slotLabel, 'Featured Picks · HD');
-  assert.equal(nativeBanner.iframeClassName.includes('pointer-events-auto'), true);
+  const liveConfig = await fetchAppConfig();
+  assert.equal(liveConfig.is_ads_enabled, false);
+  assert.equal(liveConfig.banner_ad_html, '');
 });
 
+test('Mobile Player Fullscreen, Exit Button, Safe-Area Controls & Orientation Lock', async () => {
+  const { getFullscreenPlayerConfig, lockScreenOrientationSafely } = await import('./streamResolver');
+  const { DEFAULT_APP_CONFIG } = await import('../services/supabaseClient');
 
+  // 1. Verify 100% Ad-Free configuration
+  assert.equal(DEFAULT_APP_CONFIG.is_ads_enabled, false);
+  assert.equal(DEFAULT_APP_CONFIG.ad_network_provider, 'none');
+  assert.equal(DEFAULT_APP_CONFIG.banner_ad_html, '');
 
+  // 2. Verify Fullscreen player config enforces #000000 black background, 100vw/100dvh, and top-left Exit button
+  const fsContain = getFullscreenPlayerConfig(true, 'contain');
+  assert.equal(fsContain.isFullscreen, true);
+  assert.equal(fsContain.backgroundColor, '#000000');
+  assert.equal(fsContain.viewportWidth, '100vw');
+  assert.equal(fsContain.viewportHeight, '100dvh');
+  assert.equal(fsContain.showAlwaysVisibleExitButton, true);
+  assert.equal(fsContain.videoObjectFitClass, 'object-contain');
+  assert.equal(fsContain.containerClassName.includes('w-[100vw]'), true);
+  assert.equal(fsContain.containerClassName.includes('h-[100dvh]'), true);
+  assert.equal(fsContain.containerClassName.includes('bg-[#000000]'), true);
+  assert.equal(fsContain.bottomControlsSafePaddingClass.includes('env(safe-area-inset-bottom'), true);
 
+  const fsCover = getFullscreenPlayerConfig(true, 'cover');
+  assert.equal(fsCover.videoObjectFitClass, 'object-cover');
 
+  const normalCfg = getFullscreenPlayerConfig(false, 'contain');
+  assert.equal(normalCfg.isFullscreen, false);
+  assert.equal(normalCfg.showAlwaysVisibleExitButton, false);
+  assert.equal(normalCfg.backgroundColor, '#000000');
 
+  // 3. Verify lockScreenOrientationSafely locks landscape/portrait and handles unsupported devices gracefully
+  const lockedModes: string[] = [];
+  let unlockedCount = 0;
+  const mockScreen = {
+    orientation: {
+      lock: async (m: string) => {
+        lockedModes.push(m);
+      },
+      unlock: () => {
+        unlockedCount += 1;
+      },
+    },
+  };
 
+  const landRes = await lockScreenOrientationSafely('landscape', mockScreen);
+  assert.equal(landRes.ok, true);
+  assert.equal(lockedModes[0], 'landscape');
+
+  const portRes = await lockScreenOrientationSafely('portrait', mockScreen);
+  assert.equal(portRes.ok, true);
+  assert.equal(lockedModes[1], 'portrait');
+
+  const unlockRes = await lockScreenOrientationSafely('unlock', mockScreen);
+  assert.equal(unlockRes.ok, true);
+  assert.equal(unlockedCount, 1);
+
+  const rejectScreen = {
+    orientation: {
+      lock: async () => {
+        throw new Error('Orientation lock not supported on desktop');
+      },
+    },
+  };
+  const failRes = await lockScreenOrientationSafely('landscape', rejectScreen);
+  assert.equal(failRes.ok, false);
+});
+
+test('System 1, 2 & 3: Platform Detection (Capacitor.isNativePlatform), Web Direct Login (No Trial/Paywall), and APK 3-Day Trial + 2-Referral 30-Day Unlock', async () => {
+  const {
+    detectAppPlatform,
+    generateUniqueReferralCode,
+    extractReferralCodeFromLocation,
+    buildReferralShareUrl,
+    evaluatePlatformTrialAndReferralState,
+    applyReferralRewardToReferrer,
+    TRIAL_DURATION_MS,
+    REFERRAL_REWARD_MS,
+  } = await import('../services/platformTrialReferralService');
+
+  // 1. Platform Detection
+  assert.equal(detectAppPlatform({ forceNativeOverride: true }), 'Android');
+  assert.equal(detectAppPlatform({ forceNativeOverride: false }), 'Web');
+
+  // 2. Referral Code & Share Link Generation / Extraction
+  const refCode = generateUniqueReferralCode('ali@cinebox.app');
+  assert.equal(refCode.startsWith('CBX-'), true);
+  assert.equal(
+    buildReferralShareUrl(refCode, 'https://aapki-site.com'),
+    `https://aapki-site.com/ref/${refCode}`
+  );
+  assert.equal(extractReferralCodeFromLocation(`/ref/${refCode}`, ''), refCode);
+  assert.equal(extractReferralCodeFromLocation('/', `?ref=${refCode}`), refCode);
+
+  const t0 = Date.parse('2026-11-08T12:00:00.000Z');
+
+  // 3. Web Users: Direct Login when logged out, NO trial banner or paywall when logged in
+  const webLoggedOut = evaluatePlatformTrialAndReferralState({
+    platform: 'Web',
+    user: null,
+    nowMs: t0,
+  });
+  assert.equal(webLoggedOut.requiresWebDirectLogin, true);
+  assert.equal(webLoggedOut.showTrialBanner, false);
+  assert.equal(webLoggedOut.isPaywallLocked, false);
+
+  const webLoggedIn = evaluatePlatformTrialAndReferralState({
+    platform: 'Web',
+    user: {
+      id: 'USR-WEB-1',
+      username: 'Web Viewer',
+      email: 'web@cinebox.app',
+      role: 'vip',
+      status: 'active',
+      platform: 'Web',
+    },
+    nowMs: t0 + 10 * 24 * 60 * 60 * 1000, // Even 10 days later, Web has NO trial expiry or paywall
+  });
+  assert.equal(webLoggedIn.requiresWebDirectLogin, false);
+  assert.equal(webLoggedIn.showTrialBanner, false);
+  assert.equal(webLoggedIn.isPaywallLocked, false);
+
+  // 4. APK Users: 3-Day Trial Timer ("Trial Ends in: X Days Y Hours") & Paywall after 3 Days
+  const apkUser = {
+    id: 'USR-APK-1',
+    username: 'APK Viewer',
+    email: 'apk@cinebox.app',
+    role: 'user' as const,
+    status: 'active' as const,
+    platform: 'Android' as const,
+    trial_start_date: new Date(t0).toISOString(),
+    trial_end_date: new Date(t0 + TRIAL_DURATION_MS).toISOString(),
+    referral_code: refCode,
+    successful_referrals: 0,
+    access_expiry_date: null,
+  };
+
+  // At t0 + 1 day + 6 hours -> 1 Day 18 Hours left
+  const activeTrial = evaluatePlatformTrialAndReferralState({
+    platform: 'Android',
+    user: apkUser,
+    nowMs: t0 + (24 + 6) * 60 * 60 * 1000,
+  });
+  assert.equal(activeTrial.showTrialBanner, true);
+  assert.equal(activeTrial.trialBannerText, 'Trial Ends in: 1 Days 18 Hours');
+  assert.equal(activeTrial.isTrialExpired, false);
+  assert.equal(activeTrial.isPaywallLocked, false);
+
+  // At t0 + 3 days + 1 hour -> Trial Expired -> Paywall Locks App!
+  const expiredMoment = t0 + TRIAL_DURATION_MS + 60 * 60 * 1000;
+  const expiredTrial = evaluatePlatformTrialAndReferralState({
+    platform: 'Android',
+    user: apkUser,
+    nowMs: expiredMoment,
+  });
+  assert.equal(expiredTrial.isTrialExpired, true);
+  assert.equal(expiredTrial.isPaywallLocked, true);
+
+  // 5. Referral System: Self-referral blocked; 1st referral -> count=1 (still locked); 2nd referral -> count=2 -> +30 days & unlocked!
+  const selfAttempt = applyReferralRewardToReferrer(apkUser, 'apk@cinebox.app', expiredMoment);
+  assert.equal(selfAttempt.unlockedThirtyDays, false);
+  assert.equal(selfAttempt.updatedReferrer.successful_referrals, 0);
+
+  const firstRef = applyReferralRewardToReferrer(apkUser, 'friend1@example.com', expiredMoment);
+  assert.equal(firstRef.updatedReferrer.successful_referrals, 1);
+  assert.equal(firstRef.unlockedThirtyDays, false);
+
+  const secondRef = applyReferralRewardToReferrer(
+    firstRef.updatedReferrer,
+    'friend2@example.com',
+    expiredMoment
+  );
+  assert.equal(secondRef.updatedReferrer.successful_referrals, 2);
+  assert.equal(secondRef.unlockedThirtyDays, true);
+  assert.equal(
+    secondRef.updatedReferrer.access_expiry_date,
+    new Date(expiredMoment + REFERRAL_REWARD_MS).toISOString()
+  );
+
+  // Evaluate expired APK user after 2 referrals -> Paywall is UNLOCKED for 30 days!
+  const unlockedState = evaluatePlatformTrialAndReferralState({
+    platform: 'Android',
+    user: secondRef.updatedReferrer,
+    nowMs: expiredMoment + 1000,
+  });
+  assert.equal(unlockedState.isPaywallLocked, false);
+  assert.equal(unlockedState.isReferralUnlocked, true);
+  assert.equal(unlockedState.daysRemaining, 29);
+});
+
+test('System 4: Signature-Safe In-App Update Checker (version.json vs App.getInfo().version, semver comparison, HTTPS validation, and build.gradle .jks signing config)', async () => {
+  const {
+    compareSemverVersions,
+    parseRemoteVersionManifest,
+    checkForInAppApkUpdate,
+    ANDROID_BUILD_GRADLE_SIGNING_CONFIG,
+    GITHUB_ACTIONS_JKS_WORKFLOW_YAML,
+  } = await import('../services/inAppUpdateService');
+
+  assert.equal(compareSemverVersions('1.0.1', '1.0.0'), 1);
+  assert.equal(compareSemverVersions('1.0.0', '1.0.0'), 0);
+  assert.equal(compareSemverVersions('1.0.0', '1.2.0'), -1);
+
+  // Reject unsafe non-HTTPS apk_url
+  const unsafeManifest = parseRemoteVersionManifest({
+    version: '1.0.1',
+    apk_url: 'http://insecure.example.com/app.apk',
+  });
+  assert.equal(unsafeManifest.valid, false);
+
+  // Accept valid version.json
+  const mockFetch = (async () =>
+    new Response(
+      JSON.stringify({
+        version: '1.0.1',
+        apk_url: 'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.1/app-release.apk',
+        release_notes: 'Signature-safe update v1.0.1',
+      }),
+      { status: 200 }
+    )) as unknown as typeof fetch;
+
+  const updateRes = await checkForInAppApkUpdate({
+    currentVersionOverride: '1.0.0',
+    fetchImpl: mockFetch,
+  });
+  assert.equal(updateRes.checked, true);
+  assert.equal(updateRes.updateAvailable, true);
+  assert.equal(updateRes.currentVersion, '1.0.0');
+  assert.equal(updateRes.remoteVersion, '1.0.1');
+  assert.equal(
+    updateRes.apkUrl,
+    'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.1/app-release.apk'
+  );
+
+  // When current version matches remote version, updateAvailable is false
+  const upToDateRes = await checkForInAppApkUpdate({
+    currentVersionOverride: '1.0.1',
+    fetchImpl: mockFetch,
+  });
+  assert.equal(upToDateRes.updateAvailable, false);
+
+  // Verify Signature-Safe build.gradle and GitHub Actions .jks workflow
+  assert.equal(ANDROID_BUILD_GRADLE_SIGNING_CONFIG.includes('signingConfigs'), true);
+  assert.equal(ANDROID_BUILD_GRADLE_SIGNING_CONFIG.includes('release-keystore.jks'), true);
+  assert.equal(GITHUB_ACTIONS_JKS_WORKFLOW_YAML.includes('CINEBOX_KEYSTORE_BASE64'), true);
+});

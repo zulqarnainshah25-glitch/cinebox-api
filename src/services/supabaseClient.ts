@@ -7,9 +7,6 @@ import {
   UserAppSettings,
 } from '../types/movie';
 import {
-  DEFAULT_ADSTERRA_CONTAINER_ID,
-  DEFAULT_ADSTERRA_SCRIPT_SRC,
-  DEFAULT_ADSTERRA_ZONE_KEY,
   generateAllottedUserId,
   isForbiddenServiceRoleKey,
   sanitizeBannerHtml,
@@ -17,6 +14,14 @@ import {
   validateAppUserInput,
   validateMovieLinkInput,
 } from '../utils/securityValidator';
+import {
+  applyReferralRewardToReferrer,
+  detectAppPlatform,
+  generateUniqueReferralCode,
+  PENDING_REFERRAL_CODE_STORAGE_KEY,
+  sanitizeReferralCode,
+  TRIAL_DURATION_MS,
+} from './platformTrialReferralService';
 
 /**
  * TASK 4: Least-Privilege Public Column Projections
@@ -31,7 +36,7 @@ export const PUBLIC_APP_CONFIG_COLUMNS =
   'id,app_name,primary_theme,is_ads_enabled,popup_ad_image,popup_ad_link,direct_ad_link,banner_ad_html,official_website,decentralized_manifest_url,maintenance_mode,allow_guest_downloads,updated_at';
 
 const STORAGE_KEYS = {
-  APP_CONFIG: 'cinebox_app_config_v3',
+  APP_CONFIG: 'cinebox_app_config_v4_adfree',
   MOVIE_LINKS: 'cinebox_movie_links_v2',
   APP_USERS: 'cinebox_app_users_v1',
   CURRENT_DEVICE_USER_ID: 'cinebox_current_user_id_v1',
@@ -53,12 +58,11 @@ export const DEFAULT_APP_CONFIG: AppConfigRecord = {
   id: 1,
   app_name: 'CineBox',
   primary_theme: 'neon-green',
-  is_ads_enabled: true,
+  is_ads_enabled: false,
   popup_ad_image: '',
   popup_ad_link: 'https://cinebox-movie-streaming-offline-downloader.ai.studio/',
   direct_ad_link: 'https://cinebox-movie-streaming-offline-downloader.ai.studio/',
-  banner_ad_html:
-    '<script async="async" data-cfasync="false" src="https://bancadeltempoidea.org/21/83b5d9d90d154535d150a2bd3cf1f04e"></script><div id="container-83b5d9d90d154535d150a2bd3cf1f04e"></div>',
+  banner_ad_html: '',
   admin_pin_hash: '1234',
   admin_email: 'ZulqarnainShah25@gmail.com',
   official_website: 'https://cinebox-movie-streaming-offline-downloader.ai.studio/',
@@ -69,16 +73,13 @@ export const DEFAULT_APP_CONFIG: AppConfigRecord = {
   ],
   maintenance_mode: false,
   allow_guest_downloads: true,
-  ad_network_provider: 'adsterra',
-  adsterra_banner_key: DEFAULT_ADSTERRA_ZONE_KEY,
-  adsterra_script_src: DEFAULT_ADSTERRA_SCRIPT_SRC,
-  adsterra_container_id: DEFAULT_ADSTERRA_CONTAINER_ID,
+  ad_network_provider: 'none',
   monetag_zone_id: '',
   admob_app_id: 'ca-app-pub-3940256099942544~3347511713',
   admob_banner_id: 'ca-app-pub-3940256099942544/6300978111',
   admob_app_open_id: 'ca-app-pub-3940256099942544/9257395921',
   open_ads_same_tab: true,
-  show_app_open_ad_once: true,
+  show_app_open_ad_once: false,
 };
 
 /**
@@ -94,11 +95,14 @@ export const INITIAL_APP_USERS: Record<string, AppUserRecord> = {
     email: 'zulqarnainshah25@gmail.com',
     role: 'vip',
     status: 'active',
-    platform: 'Web Browser',
+    platform: 'Web',
     device_id: 'DEV-PIXEL8-1097888621',
     vip_until: '2027-12-30',
     downloads_count: 14,
     notes: 'Primary App Owner / Current Device Profile',
+    referral_code: generateUniqueReferralCode('zulqarnainshah25@gmail.com'),
+    successful_referrals: 2,
+    access_expiry_date: '2027-12-30T00:00:00.000Z',
     updated_at: '2026-11-06T20:00:00.000Z',
   },
   'USR-8841209': {
@@ -107,11 +111,16 @@ export const INITIAL_APP_USERS: Record<string, AppUserRecord> = {
     email: 'aliraza.apk@example.com',
     role: 'vip',
     status: 'active',
-    platform: 'Android APK',
+    platform: 'Android',
     device_id: 'CAP-ANDROID-SMG998B',
     vip_until: '2027-06-15',
     downloads_count: 29,
     notes: 'Capacitor Android 14 APK Member',
+    trial_start_date: '2026-11-06T18:30:00.000Z',
+    trial_end_date: '2026-11-09T18:30:00.000Z',
+    referral_code: generateUniqueReferralCode('aliraza.apk@example.com'),
+    successful_referrals: 1,
+    access_expiry_date: null,
     updated_at: '2026-11-06T18:30:00.000Z',
   },
   'USR-5520194': {
@@ -120,11 +129,16 @@ export const INITIAL_APP_USERS: Record<string, AppUserRecord> = {
     email: 'hamza.khan@example.com',
     role: 'user',
     status: 'active',
-    platform: 'Android APK',
+    platform: 'Android',
     device_id: 'CAP-ANDROID-RMX3363',
     vip_until: '2026-12-31',
     downloads_count: 4,
     notes: 'Standard Free Tier User',
+    trial_start_date: '2026-11-01T15:10:00.000Z',
+    trial_end_date: '2026-11-04T15:10:00.000Z',
+    referral_code: generateUniqueReferralCode('hamza.khan@example.com'),
+    successful_referrals: 0,
+    access_expiry_date: null,
     updated_at: '2026-11-05T15:10:00.000Z',
   },
   'USR-3391042': {
@@ -133,11 +147,13 @@ export const INITIAL_APP_USERS: Record<string, AppUserRecord> = {
     email: 'bot99@scraper-net.org',
     role: 'user',
     status: 'suspended',
-    platform: 'Web Browser',
+    platform: 'Web',
     device_id: 'WEB-HEADLESS-99',
     vip_until: '2026-01-01',
     downloads_count: 142,
     notes: 'Auto-flagged for excessive concurrent requests',
+    referral_code: generateUniqueReferralCode('bot99@scraper-net.org'),
+    successful_referrals: 0,
     updated_at: '2026-11-04T11:20:00.000Z',
   },
 };
@@ -154,8 +170,8 @@ export function getSupabaseCredentials(): {
   isConfigured: boolean;
   securityWarning?: string;
 } {
-  const envUrl = import.meta.env.VITE_SUPABASE_URL || '';
-  const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  const envUrl = import.meta.env?.VITE_SUPABASE_URL || '';
+  const envKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || '';
   const storedUrl =
     typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEYS.CUSTOM_SUPABASE_URL) || '' : '';
   const storedKey =
@@ -309,7 +325,16 @@ export async function loginOrRegisterUser(params: {
   password: string;
   username?: string;
   mode: 'login' | 'register';
-}): Promise<{ ok: boolean; user?: AppUserRecord; error?: string }> {
+  referredByCode?: string | null;
+  platformOverride?: 'Android' | 'Web';
+  nowMs?: number;
+}): Promise<{
+  ok: boolean;
+  user?: AppUserRecord;
+  referrerUpdated?: AppUserRecord;
+  referralRewardMessage?: string;
+  error?: string;
+}> {
   const cleanEmail = (params.email || '').trim().toLowerCase();
   if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
     return { ok: false, error: 'Please enter a valid email address.' };
@@ -318,6 +343,9 @@ export async function loginOrRegisterUser(params: {
   if (cleanPass.length < 4) {
     return { ok: false, error: 'Password must be at least 4 characters long.' };
   }
+
+  const nowMs = params.nowMs ?? Date.now();
+  const detectedPlatform = params.platformOverride || detectAppPlatform();
 
   // 1. Check existing users in Supabase / local registry so returning users keep their allotted USR ID
   const allUsers = await fetchAllAppUsers();
@@ -331,8 +359,41 @@ export async function loginOrRegisterUser(params: {
     'CineBox Member';
 
   const isOwnerEmail = cleanEmail === 'zulqarnainshah25@gmail.com';
-  const role = existingUser?.role || (isOwnerEmail ? 'admin' : 'vip');
+  const role = existingUser?.role || (isOwnerEmail ? 'admin' : detectedPlatform === 'Web' ? 'vip' : 'user');
   const status = existingUser?.status || 'active';
+
+  // 2. Generate unique referral code for every user
+  const myReferralCode =
+    sanitizeReferralCode(existingUser?.referral_code) ||
+    generateUniqueReferralCode(cleanEmail);
+
+  // 3. Determine referred_by code (from params or pending storage on first signup)
+  let pendingRefCode = sanitizeReferralCode(params.referredByCode);
+  if (!pendingRefCode && typeof window !== 'undefined') {
+    try {
+      pendingRefCode = sanitizeReferralCode(
+        localStorage.getItem(PENDING_REFERRAL_CODE_STORAGE_KEY)
+      );
+    } catch {
+      // ignore
+    }
+  }
+  // Prevent self-referral
+  if (pendingRefCode === myReferralCode) {
+    pendingRefCode = null;
+  }
+
+  const finalReferredBy = existingUser?.referred_by || pendingRefCode || null;
+
+  // 4. APK Users: Set trial_start_date (now) and trial_end_date (now + 3 days) upon registration
+  const trialStartIso =
+    existingUser?.trial_start_date ||
+    (detectedPlatform === 'Android' ? new Date(nowMs).toISOString() : undefined);
+  const trialEndIso =
+    existingUser?.trial_end_date ||
+    (detectedPlatform === 'Android'
+      ? new Date(nowMs + TRIAL_DURATION_MS).toISOString()
+      : undefined);
 
   const upsertRes = await upsertAppUser({
     id: allottedId,
@@ -340,15 +401,44 @@ export async function loginOrRegisterUser(params: {
     email: cleanEmail,
     role,
     status,
-    platform: 'Web Browser',
+    platform: detectedPlatform,
     device_id: existingUser?.device_id || `DEV-${allottedId}`,
     vip_until: existingUser?.vip_until || '2027-12-30',
     downloads_count: existingUser?.downloads_count ?? 0,
-    notes: existingUser?.notes || 'Authenticated via CineBox Login System',
+    notes:
+      existingUser?.notes ||
+      `Authenticated on ${detectedPlatform} (${
+        detectedPlatform === 'Android' ? '3-Day APK Trial Active' : 'Web Direct Access'
+      })`,
+    trial_start_date: trialStartIso,
+    trial_end_date: trialEndIso,
+    referral_code: myReferralCode,
+    referred_by: finalReferredBy,
+    successful_referrals: existingUser?.successful_referrals ?? 0,
+    access_expiry_date: existingUser?.access_expiry_date ?? null,
   });
 
   if (!upsertRes.ok || !upsertRes.user) {
     return { ok: false, error: upsertRes.error || 'Authentication failed.' };
+  }
+
+  // 5. If this is a new referral (or newly attached referred_by), credit the referrer (+1 successful_referrals)
+  let referrerUpdated: AppUserRecord | undefined;
+  let referralRewardMessage: string | undefined;
+
+  if (pendingRefCode && !existingUser?.referred_by) {
+    const creditRes = await creditReferralCodeOwner(pendingRefCode, cleanEmail, nowMs);
+    if (creditRes.ok && creditRes.referrer) {
+      referrerUpdated = creditRes.referrer;
+      referralRewardMessage = creditRes.message;
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem(PENDING_REFERRAL_CODE_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   if (typeof window !== 'undefined') {
@@ -360,7 +450,63 @@ export async function loginOrRegisterUser(params: {
     }
   }
 
-  return { ok: true, user: upsertRes.user };
+  return {
+    ok: true,
+    user: upsertRes.user,
+    referrerUpdated,
+    referralRewardMessage,
+  };
+}
+
+/**
+ * Finds the base user who owns `referralCode`, increments `successful_referrals` by +1,
+ * and if `successful_referrals >= 2`, sets `access_expiry_date = current_date + 30 days` and unlocks the app.
+ */
+export async function creditReferralCodeOwner(
+  referralCode: string,
+  newUserEmail: string,
+  nowMs: number = Date.now()
+): Promise<{
+  ok: boolean;
+  referrer?: AppUserRecord;
+  unlockedThirtyDays?: boolean;
+  message?: string;
+}> {
+  const cleanCode = sanitizeReferralCode(referralCode);
+  if (!cleanCode) {
+    return { ok: false, message: 'Invalid referral code format.' };
+  }
+
+  const allUsers = await fetchAllAppUsers();
+  const baseUser = allUsers.find(
+    (u) =>
+      (u.referral_code && u.referral_code.toUpperCase() === cleanCode) ||
+      generateUniqueReferralCode(u.email) === cleanCode
+  );
+
+  if (!baseUser) {
+    return { ok: false, message: 'Referral code owner not found.' };
+  }
+
+  const reward = applyReferralRewardToReferrer(baseUser, newUserEmail, nowMs);
+  const saved = await upsertAppUser(reward.updatedReferrer);
+
+  // If the currently logged-in user on this device is the referrer, sync their session too
+  const currentLoggedIn = getLoggedInUser();
+  if (currentLoggedIn && currentLoggedIn.id === baseUser.id && saved.user && typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(STORAGE_KEYS.LOGGED_IN_USER, JSON.stringify(saved.user));
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    ok: saved.ok,
+    referrer: saved.user,
+    unlockedThirtyDays: reward.unlockedThirtyDays,
+    message: reward.rewardMessage,
+  };
 }
 
 export function logoutCurrentUser(): void {
@@ -708,7 +854,24 @@ export async function upsertAppUser(
   const client = getSupabaseClient();
   if (client && !remoteUsersSchemaUnavailable) {
     try {
-      await client.from('app_users').upsert(user, { onConflict: 'id' });
+      const { error } = await client.from('app_users').upsert(user, { onConflict: 'id' });
+      if (error) {
+        // Fallback to core columns if optional trial/referral columns haven't been migrated yet
+        const coreUser = {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+          status: user.status,
+          platform: user.platform,
+          device_id: user.device_id,
+          vip_until: user.vip_until,
+          downloads_count: user.downloads_count,
+          notes: user.notes,
+          updated_at: user.updated_at,
+        };
+        await client.from('app_users').upsert(coreUser, { onConflict: 'id' });
+      }
     } catch {
       // Saved locally
     }
@@ -766,12 +929,8 @@ export async function fetchAppConfig(): Promise<AppConfigRecord> {
         localConfig = {
           ...localConfig,
           ...safePublicData,
-          is_ads_enabled: hasLocalOverride
-            ? localConfig.is_ads_enabled
-            : true,
-          banner_ad_html: sanitizeBannerHtml(
-            safePublicData.banner_ad_html || localConfig.banner_ad_html
-          ),
+          is_ads_enabled: false,
+          banner_ad_html: '',
         };
         if (typeof window !== 'undefined') {
           localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(localConfig));
@@ -789,16 +948,9 @@ export async function fetchAppConfig(): Promise<AppConfigRecord> {
     localConfig.official_website =
       'https://cinebox-movie-streaming-offline-downloader.ai.studio/';
   }
-  if (!localConfig.adsterra_banner_key) {
-    localConfig.adsterra_banner_key = DEFAULT_ADSTERRA_ZONE_KEY;
-  }
-  if (!localConfig.adsterra_script_src) {
-    localConfig.adsterra_script_src = DEFAULT_ADSTERRA_SCRIPT_SRC;
-  }
-  if (!localConfig.adsterra_container_id) {
-    localConfig.adsterra_container_id = DEFAULT_ADSTERRA_CONTAINER_ID;
-  }
-  localConfig.banner_ad_html = sanitizeBannerHtml(localConfig.banner_ad_html);
+  // Strictly enforce 100% Ad-Free mode
+  localConfig.is_ads_enabled = false;
+  localConfig.banner_ad_html = '';
   return localConfig;
 }
 
@@ -859,8 +1011,17 @@ export async function updateAppConfig(
  * - All `INSERT`, `UPDATE`, and `DELETE` operations require an authenticated Supabase Auth JWT
  *   verified by `public.is_cinebox_admin()` (or a server-side Supabase Edge Function).
  */
-export const SUPABASE_RLS_FIX_SQL = `-- CINEBOX STAGE 3: LEAST-PRIVILEGE SUPABASE RLS MIGRATION
+export const SUPABASE_RLS_FIX_SQL = `-- CINEBOX STAGE 3 + PLATFORM TRIAL & REFERRAL: LEAST-PRIVILEGE SUPABASE MIGRATION
 -- Run this manually in your Supabase SQL Editor (Dashboard -> SQL Editor -> New Query)
+
+-- 0. Ensure app_users has Platform ('Android' | 'Web'), 3-Day Trial, and Referral columns
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'Web';
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS trial_start_date TIMESTAMPTZ;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS trial_end_date TIMESTAMPTZ;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS referred_by TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS successful_referrals INTEGER DEFAULT 0;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS access_expiry_date TIMESTAMPTZ;
 
 -- 1. Enable Row-Level Security on all tables
 ALTER TABLE public.movie_links ENABLE ROW LEVEL SECURITY;

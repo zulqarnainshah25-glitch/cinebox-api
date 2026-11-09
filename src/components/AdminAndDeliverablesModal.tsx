@@ -60,10 +60,6 @@ import {
 } from '../services/supabaseClient';
 import { getActiveTmdbApiKey, setCustomTmdbApiKey } from '../services/tmdbService';
 import {
-  DEFAULT_ADSTERRA_CONTAINER_ID,
-  DEFAULT_ADSTERRA_SCRIPT_SRC,
-  DEFAULT_ADSTERRA_ZONE_KEY,
-  parseAdsterraSnippet,
   parseDirectBulkMovieLinksInput,
   PinRateLimitState,
   verifyAdminPinRecovery,
@@ -362,7 +358,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
   const [manifestJsonPreview, setManifestJsonPreview] = useState<string>('');
   const [isSyncingNode, setIsSyncingNode] = useState<boolean>(false);
 
-  // 5. App Config, Non-Intrusive Ads (Adsterra / Monetag / AdMob) & Forgot PIN State
+  // 5. App Config, Ad-Free Mode & Forgot PIN State
   const [appName, setAppName] = useState<string>(appConfig.app_name);
   const [primaryTheme, setPrimaryTheme] = useState<ThemeColorId>(appConfig.primary_theme);
   const [isAdsEnabled, setIsAdsEnabled] = useState<boolean>(appConfig.is_ads_enabled);
@@ -378,23 +374,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
     appConfig.allow_guest_downloads !== false
   );
   const [adNetworkProvider, setAdNetworkProvider] = useState<AdNetworkProvider>(
-    appConfig.ad_network_provider || 'adsterra'
-  );
-  const [adsterraBannerKey, setAdsterraBannerKey] = useState<string>(
-    appConfig.adsterra_banner_key || DEFAULT_ADSTERRA_ZONE_KEY
-  );
-  const [adsterraScriptSrc, setAdsterraScriptSrc] = useState<string>(
-    appConfig.adsterra_script_src || DEFAULT_ADSTERRA_SCRIPT_SRC
-  );
-  const [adsterraContainerId, setAdsterraContainerId] = useState<string>(
-    appConfig.adsterra_container_id || DEFAULT_ADSTERRA_CONTAINER_ID
-  );
-  const [adsterraRawSnippet, setAdsterraRawSnippet] = useState<string>(
-    `<script async="async" data-cfasync="false" src="${
-      appConfig.adsterra_script_src || DEFAULT_ADSTERRA_SCRIPT_SRC
-    }"></script>\n<div id="${
-      appConfig.adsterra_container_id || DEFAULT_ADSTERRA_CONTAINER_ID
-    }"></div>`
+    appConfig.ad_network_provider || 'none'
   );
   const [monetagZoneId, setMonetagZoneId] = useState<string>(appConfig.monetag_zone_id || '');
   const [admobAppId, setAdmobAppId] = useState<string>(
@@ -804,9 +784,6 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       maintenance_mode: maintenanceMode,
       allow_guest_downloads: allowGuestDownloads,
       ad_network_provider: adNetworkProvider,
-      adsterra_banner_key: adsterraBannerKey.trim(),
-      adsterra_script_src: adsterraScriptSrc.trim(),
-      adsterra_container_id: adsterraContainerId.trim(),
       monetag_zone_id: monetagZoneId.trim(),
       admob_app_id: admobAppId.trim(),
       admob_banner_id: admobBannerId.trim(),
@@ -816,7 +793,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       ...partialOverride,
     });
     onConfigUpdated(res.config);
-    showTempBanner('Global App Config, Adsterra Banner/Native Ads & Security Policies saved!');
+    showTempBanner('Global App Config & Security Policies saved (Ad-Free Mode Active)!');
   };
 
   const handleSaveApiCredentials = (e: React.FormEvent) => {
@@ -1904,7 +1881,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
               </div>
             </div>
           ) : activeTab === 'ads' ? (
-            /* TAB 5: NON-INTRUSIVE ADSTERRA / MONETAG / ADMOB ADS, BRANDING & ADMIN PIN */
+            /* TAB 5: AD-FREE MODE, FUTURE ADMOB APK, BRANDING & ADMIN PIN */
             <form onSubmit={(e) => handleSaveAppConfig(e)} className="space-y-4 max-w-2xl">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
@@ -1948,187 +1925,22 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                 </div>
               </div>
 
-              {/* Ad Network Selector (Adsterra / Monetag / AdMob APK Ready) */}
+              {/* 100% Ad-Free Mode & Future Google AdMob APK Preparation */}
               <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="text-xs font-bold text-white">
-                      Non-Annoying Ad Network (`Adsterra` / `Monetag` / `AdMob APK`)
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-[#10d97b]" />
+                      <span>100% Ad-Free Experience Active (Ready for Future Google AdMob APK)</span>
                     </div>
                     <div className="text-[11px] text-slate-400">
-                      Browser shows compact same-tab banner ads; App shows 1 non-intrusive App-Open ad on startup.
+                      All external banner, native banner, and popunder ad scripts are completely removed for a smooth mobile &amp; web streaming experience.
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={onPreviewPopupAd}
-                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-[#10d97b] font-semibold"
-                    >
-                      Test App-Open Ad
-                    </button>
-                    <input
-                      type="checkbox"
-                      checked={isAdsEnabled}
-                      onChange={(e) => setIsAdsEnabled(e.target.checked)}
-                      className="w-5 h-5 accent-[#10d97b]"
-                    />
-                  </div>
+                  <span className="px-2.5 py-1 rounded-lg bg-[#10d97b]/15 border border-[#10d97b]/30 text-[11px] text-[#10d97b] font-bold">
+                    Ad-Free Active
+                  </span>
                 </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {(
-                    [
-                      { id: 'adsterra', label: 'Adsterra Banner' },
-                      { id: 'monetag', label: 'Monetag In-Page' },
-                      { id: 'admob', label: 'AdMob (APK Ready)' },
-                      { id: 'custom', label: 'Custom Banner' },
-                    ] as const
-                  ).map((net) => (
-                    <button
-                      key={net.id}
-                      type="button"
-                      data-testid={`ad-provider-${net.id}-btn`}
-                      onClick={() => setAdNetworkProvider(net.id)}
-                      className={`py-2 px-3 rounded-xl text-xs font-bold border ${
-                        adNetworkProvider === net.id
-                          ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
-                          : 'bg-slate-950 text-slate-300 border-slate-800'
-                      }`}
-                    >
-                      {net.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">
-                      Adsterra Zone Key (`83b5d9d90d154535d150a2bd3cf1f04e`)
-                    </label>
-                    <input
-                      type="text"
-                      data-testid="adsterra-zone-key-input"
-                      value={adsterraBannerKey}
-                      onChange={(e) => setAdsterraBannerKey(e.target.value)}
-                      placeholder="83b5d9d90d154535d150a2bd3cf1f04e"
-                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">
-                      Monetag In-Page Banner Zone ID
-                    </label>
-                    <input
-                      type="text"
-                      value={monetagZoneId}
-                      onChange={(e) => setMonetagZoneId(e.target.value)}
-                      placeholder="e.g., 7482910"
-                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
-                    />
-                  </div>
-                </div>
-
-                {/* Live Adsterra Banner & Native Banner <script> + <div> Embed Snippet */}
-                <div className="p-3 rounded-xl bg-slate-950 border border-emerald-500/30 space-y-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label className="text-[11px] font-bold text-[#10d97b]">
-                      Adsterra Banner &amp; Native Banner Code (`&lt;script&gt; + &lt;div id="container-..."&gt;`)
-                    </label>
-                    <button
-                      type="button"
-                      data-testid="parse-adsterra-snippet-btn"
-                      onClick={() => {
-                        const parsed = parseAdsterraSnippet(adsterraRawSnippet);
-                        if (parsed.valid) {
-                          setAdsterraScriptSrc(parsed.scriptSrc);
-                          setAdsterraContainerId(parsed.containerId);
-                          setAdsterraBannerKey(parsed.zoneKey);
-                          showTempBanner(
-                            `Adsterra Snippet Verified! Zone: ${parsed.zoneKey} · Container: #${parsed.containerId}`
-                          );
-                        } else {
-                          showTempBanner(`Adsterra Snippet Error: ${parsed.error}`);
-                        }
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-[#10d97b] text-slate-950 text-[11px] font-bold"
-                    >
-                      Verify &amp; Apply Snippet
-                    </button>
-                  </div>
-                  <textarea
-                    rows={3}
-                    data-testid="adsterra-raw-snippet-textarea"
-                    value={adsterraRawSnippet}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setAdsterraRawSnippet(val);
-                      const parsed = parseAdsterraSnippet(val);
-                      if (parsed.valid) {
-                        setAdsterraScriptSrc(parsed.scriptSrc);
-                        setAdsterraContainerId(parsed.containerId);
-                        setAdsterraBannerKey(parsed.zoneKey);
-                      }
-                    }}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-mono text-emerald-200"
-                  />
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-400">
-                    <span>Script: {adsterraScriptSrc}</span>
-                    <span className="text-[#10d97b]">Container: #{adsterraContainerId}</span>
-                  </div>
-                </div>
-
-                {/* Non-Annoying Behavior Checkboxes */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-                  <label className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 cursor-pointer">
-                    <span>Open Banner Links in Same Tab (No Popunders)</span>
-                    <input
-                      type="checkbox"
-                      checked={openAdsSameTab}
-                      onChange={(e) => setOpenAdsSameTab(e.target.checked)}
-                      className="w-4 h-4 accent-[#10d97b]"
-                    />
-                  </label>
-                  <label className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 cursor-pointer">
-                    <span>Show App-Open Ad Only Once Per Session</span>
-                    <input
-                      type="checkbox"
-                      checked={showAppOpenAdOnce}
-                      onChange={(e) => setShowAppOpenAdOnce(e.target.checked)}
-                      className="w-4 h-4 accent-[#10d97b]"
-                    />
-                  </label>
-                </div>
-              </div>
-
-              {/* Other Ad Systems Reference Guide (Adsterra, Monetag, AdMob, VAST Video, A-Ads) */}
-              <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-2 text-xs">
-                <div className="font-bold text-white flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-[#10d97b]" />
-                  <span>Best Non-Annoying Ad Systems for Movie Streaming Apps (Web + APK)</span>
-                </div>
-                <ul className="space-y-1.5 text-[11px] text-slate-300 leading-relaxed">
-                  <li>
-                    <strong className="text-[#10d97b]">1. Adsterra Native Banner &amp; Social Bar (Active Now):</strong>{' '}
-                    Uses your exact <code>container-83b5d9d90d154535d150a2bd3cf1f04e</code> code. High CPM, blends with movie cards, no forced popunders.
-                  </li>
-                  <li>
-                    <strong className="text-cyan-400">2. Monetag In-Page Push &amp; Vignette Banner:</strong>{' '}
-                    Shows a small notification-style toast or clean card banner inside the same tab without hijacking the screen.
-                  </li>
-                  <li>
-                    <strong className="text-amber-400">3. Google AdMob (`@capacitor-community/admob` for Android APK):</strong>{' '}
-                    Best for your Capacitor Android APK — supports <strong>App-Open Ad</strong> (1x on app launch), <strong>Rewarded Video Ad</strong> ("Watch 15s ad to unlock 1080p Download"), and bottom <strong>Adaptive Banner</strong>.
-                  </li>
-                  <li>
-                    <strong className="text-purple-400">4. VAST / IMA Pre-Roll Video Ads (ExoPlayer / HTML5):</strong>{' '}
-                    Plays a 5-second skippable video ad (like YouTube) inside the video player before the movie starts. Highest eCPM ($4–$12).
-                  </li>
-                  <li>
-                    <strong className="text-emerald-400">5. A-Ads (Anonymous Ads) / Coinzilla:</strong>{' '}
-                    Zero-JS iframe banner ads that never get blocked or banned on movie streaming domains and pay daily in USDT/BTC.
-                  </li>
-                </ul>
               </div>
 
               {/* Future AdMob Integration Fields for Capacitor Android APK */}

@@ -19,6 +19,7 @@ import {
   Loader2,
   Lock,
   Maximize2,
+  Minimize2,
   Pause,
   PictureInPicture2,
   Play,
@@ -37,6 +38,7 @@ import {
   Unlock,
   Volume2,
   VolumeX,
+  X,
   Youtube,
 } from 'lucide-react';
 import {
@@ -54,6 +56,8 @@ import {
   formatPlayerTimecode,
   getBlobStreamAlertState,
   getCleanIframeAttributes,
+  getFullscreenPlayerConfig,
+  lockScreenOrientationSafely,
   PLAYABLE_HD_STREAMS_POOL,
   resolvePlaybackPlan,
 } from '../utils/streamResolver';
@@ -67,7 +71,6 @@ import {
   VerifiedAudioTrack,
 } from '../services/streamSourceManager';
 import { CustomHeaderBlobPlayer } from './CustomHeaderBlobPlayer';
-import { NonIntrusiveBannerAd } from './NonIntrusiveBannerAd';
 import {
   EXTRACTION_UNAVAILABLE_MESSAGE,
   extractStreamFromEmbedServers,
@@ -271,6 +274,56 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [fitMode, setFitMode] = useState<'cover' | 'contain' | 'fill'>('contain');
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [isPipActive, setIsPipActive] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // Sync native browser/WebView fullscreen state & automatic Landscape/Portrait orientation
+  useEffect(() => {
+    // Attempt automatic landscape orientation on mobile when video player opens
+    if (typeof window !== 'undefined' && window.innerWidth <= 900) {
+      lockScreenOrientationSafely('landscape').catch(() => {});
+    }
+
+    const handleFullscreenChange = () => {
+      const docAny = document as any;
+      const activeFsEl = document.fullscreenElement || docAny.webkitFullscreenElement || null;
+      if (activeFsEl) {
+        setIsFullscreen(true);
+        lockScreenOrientationSafely('landscape').catch(() => {});
+      } else {
+        setIsFullscreen(false);
+      }
+    };
+
+    const handleKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setIsFullscreen(false);
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      window.removeEventListener('keydown', handleKeyDown);
+      // Restore Portrait orientation & exit fullscreen when VideoPlayerModal closes
+      lockScreenOrientationSafely('portrait').catch(() => {});
+      const docAny = document as any;
+      if (document.fullscreenElement || docAny.webkitFullscreenElement) {
+        try {
+          if (typeof document.exitFullscreen === 'function') {
+            document.exitFullscreen().catch(() => {});
+          } else if (typeof docAny.webkitExitFullscreen === 'function') {
+            docAny.webkitExitFullscreen();
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
 
   // PHASE 2A: Verified Embedded Audio Tracks (ONLY real HLS.js or HTML5 tracks — never fake metadata tracks)
   const [verifiedAudioTracks, setVerifiedAudioTracks] = useState<VerifiedAudioTrack[]>([]);
@@ -940,14 +993,40 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setFitMode((prev) => (prev === 'cover' ? 'contain' : prev === 'contain' ? 'fill' : 'cover'));
   };
 
+  const handleExitFullscreen = () => {
+    setIsFullscreen(false);
+    lockScreenOrientationSafely('portrait').catch(() => {});
+    const docAny = document as any;
+    try {
+      if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+        document.exitFullscreen().catch(() => {});
+      } else if (docAny.webkitFullscreenElement && typeof docAny.webkitExitFullscreen === 'function') {
+        docAny.webkitExitFullscreen();
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   const handleToggleFullscreen = () => {
     if (isLocked) return;
-    const el = playerContainerRef.current;
+    if (isFullscreen) {
+      handleExitFullscreen();
+      return;
+    }
+
+    setIsFullscreen(true);
+    lockScreenOrientationSafely('landscape').catch(() => {});
+    const el = playerContainerRef.current as any;
     if (!el) return;
-    if (!document.fullscreenElement) {
-      el.requestFullscreen?.().catch(() => {});
-    } else {
-      document.exitFullscreen?.().catch(() => {});
+    try {
+      if (typeof el.requestFullscreen === 'function') {
+        el.requestFullscreen().catch(() => {});
+      } else if (typeof el.webkitRequestFullscreen === 'function') {
+        el.webkitRequestFullscreen();
+      }
+    } catch {
+      // CSS fullscreen lock (`cinebox-player-fullscreen`) remains active even if native API is unsupported
     }
   };
 
@@ -1047,13 +1126,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     isStreamErrorDismissed
   );
 
+  const fsConfig = getFullscreenPlayerConfig(isFullscreen, fitMode);
+
   return (
     <div
-      className="fixed inset-0 z-50 bg-[#080a0f] text-slate-100 overflow-y-auto"
+      className="fixed inset-0 z-50 bg-[#000000] text-slate-100 overflow-y-auto"
+      style={{ backgroundColor: '#000000' }}
       role="dialog"
       aria-label={`Playing ${movie.title}`}
     >
-      <div className="max-w-6xl mx-auto min-h-screen flex flex-col">
+      <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#000000]">
         {/* ===================================================================
             MOBILE-FIRST TOP PLAYER BAR (OUTSIDE ASPECT-VIDEO CONTAINER)
             PHASE 3 RULE: Never display a fake embedded audio selector on cross-origin iframes.
@@ -1121,6 +1203,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     <span className="sm:hidden">Download</span>
                   </>
                 )}
+              </button>
+
+              <button
+                type="button"
+                data-testid="enter-fullscreen-btn"
+                onClick={handleToggleFullscreen}
+                aria-label="Enter Fullscreen"
+                className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] sm:text-xs font-extrabold flex items-center gap-1.5 min-h-[36px] transition-transform active:scale-95"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
+                <span>Fullscreen</span>
               </button>
 
               <a
@@ -1215,13 +1308,29 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         )}
 
         {/* ===================================================================
-            HYBRID VIDEO PLAYER SURFACE
+            HYBRID VIDEO PLAYER SURFACE (100% Pure #000000 Borderless Fullscreen)
            =================================================================== */}
         <div
           ref={playerContainerRef}
-          className="relative w-full aspect-video min-h-[225px] sm:min-h-[360px] max-h-[68vh] bg-black overflow-hidden select-none shadow-2xl border-b border-slate-800/80"
-          style={{ filter: `brightness(${brightness}%)` }}
+          data-testid="video-player-surface-container"
+          className={fsConfig.containerClassName}
+          style={{ filter: `brightness(${brightness}%)`, backgroundColor: '#000000' }}
         >
+          {/* ALWAYS-VISIBLE TOP-LEFT EXIT FULLSCREEN / BACK BUTTON */}
+          {fsConfig.showAlwaysVisibleExitButton && (
+            <button
+              type="button"
+              data-testid="fullscreen-exit-back-btn"
+              onClick={handleExitFullscreen}
+              aria-label="Exit Fullscreen"
+              className={fsConfig.exitButtonClassName}
+            >
+              <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />
+              <span>Back / Exit Fullscreen</span>
+              <X className="w-3.5 h-3.5 text-slate-300 ml-0.5" />
+            </button>
+          )}
+
           {blobAlertState.showLoadingOverlay && (
             <div
               data-testid="stream-loading-spinner"
@@ -1239,7 +1348,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           )}
 
           {playerMode === 'blob' ? (
-            <div className="relative w-full h-full flex flex-col bg-black">
+            <div className="relative w-full h-full flex flex-col bg-[#000000]">
               <CustomHeaderBlobPlayer
                 initialVideoUrl={
                   movieBoxDirectStreamUrl ||
@@ -1259,18 +1368,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               />
             </div>
           ) : playerMode === 'trailer' && movie.youtubeKey ? (
-            <div className="relative w-full h-full bg-black">
+            <div className="relative w-full h-full bg-[#000000]">
               <iframe
                 key={movie.youtubeKey}
                 src={`https://www.youtube.com/embed/${movie.youtubeKey}?autoplay=1&rel=0&modestbranding=1`}
                 title={`${movie.title} Official TMDb Video`}
-                className="w-full h-full border-0"
+                className="w-full h-full border-0 bg-[#000000]"
+                style={{ backgroundColor: '#000000' }}
                 allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                 allowFullScreen
               />
             </div>
           ) : playerMode === 'pak-drama' ? (
-            <div className="relative w-full h-full bg-black flex items-center justify-center">
+            <div className="relative w-full h-full bg-[#000000] flex items-center justify-center">
               {isLoadingPakDrama ? (
                 <div className="flex flex-col items-center gap-2 text-center p-4">
                   <Loader2 className="w-9 h-9 text-[#10d97b] animate-spin" />
@@ -1286,7 +1396,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   allow="autoplay; fullscreen; picture-in-picture"
                   allowFullScreen
                   title={pakDramaStreams[activePakStreamIdx].title}
-                  className="w-full h-full border-0"
+                  className="w-full h-full border-0 bg-[#000000]"
+                  style={{ backgroundColor: '#000000' }}
                 />
               ) : (
                 <div className="text-center p-6 space-y-2 max-w-md">
@@ -1300,14 +1411,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
             </div>
           ) : playerMode === 'embed' ? (
-            <div className="relative w-full h-full bg-black">
+            <div className="relative w-full h-full bg-[#000000]">
               <iframe
                 key={cleanIframeAttrs.src}
                 data-testid="embed-iframe-player"
                 src={cleanIframeAttrs.src}
                 allowFullScreen={cleanIframeAttrs.allowFullScreen}
                 title={cleanIframeAttrs.title}
-                className="w-full h-full border-0"
+                className="w-full h-full border-0 bg-[#000000]"
+                style={{ backgroundColor: '#000000' }}
               />
             </div>
           ) : (
@@ -1563,15 +1675,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 </div>
               )}
 
-              {/* BOTTOM PLAYER BAR (Phase 5: Audio & Language, Subtitles, Video Quality, Playback Speed, PiP, Fullscreen) */}
+              {/* BOTTOM PLAYER BAR (Mobile-Aligned Controls: Play/Pause, Seek Bar, Subtitles CC, Settings Gear, Quality, Speed, Fit/Cover, Fullscreen) */}
               {!isLocked && (
-                <div className="absolute bottom-0 left-0 right-0 z-30 px-3 sm:px-4 pb-2.5 pt-2 bg-gradient-to-t from-black/95 via-black/70 to-transparent">
-                  <div className="flex items-center gap-3 mb-1.5">
-                    <span className="text-xs font-mono tabular-nums text-slate-200">
+                <div
+                  data-testid="player-bottom-controls-bar"
+                  className={`absolute bottom-0 left-0 right-0 z-30 ${fsConfig.bottomControlsSafePaddingClass}`}
+                >
+                  {/* Row 1: Mobile-Friendly Seek Bar & Timecodes */}
+                  <div className="flex items-center gap-2.5 sm:gap-3 mb-2">
+                    <span className="text-[11px] sm:text-xs font-mono tabular-nums text-slate-200 shrink-0">
                       {formatPlayerTimecode(currentTime)}
                     </span>
-                    <div className="relative flex-1 flex items-center">
-                      <div className="w-full h-1.5 bg-white/30 rounded-full overflow-hidden">
+                    <div className="relative flex-1 flex items-center py-1">
+                      <div className="w-full h-1.5 sm:h-2 bg-white/30 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-[#10d97b]"
                           style={{ width: `${progressPercent}%` }}
@@ -1584,47 +1700,73 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         value={currentTime}
                         onChange={handleScrub}
                         aria-label="Seek video timeline"
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer touch-none"
                       />
                       <div
-                        className="pointer-events-none absolute w-3.5 h-3.5 rounded-full bg-white shadow-md -translate-x-1/2"
+                        className="pointer-events-none absolute w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-white ring-2 ring-[#10d97b] shadow-md -translate-x-1/2"
                         style={{ left: `${progressPercent}%` }}
                       />
                     </div>
-                    <span className="text-xs font-mono tabular-nums text-slate-200">
+                    <span className="text-[11px] sm:text-xs font-mono tabular-nums text-slate-200 shrink-0">
                       {formatPlayerTimecode(duration)}
                     </span>
                   </div>
 
+                  {/* Row 2: Bottom Controls Bar (Left: Play/Pause & Seek | Right: CC Subtitles, Gear Settings, Quality, Fit, Fullscreen) */}
                   <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-                    <button
-                      type="button"
-                      onClick={handleTogglePlay}
-                      aria-label={isPlaying ? 'Pause' : 'Play'}
-                      className="min-h-[36px] min-w-[36px] flex items-center justify-center text-white hover:text-[#10d97b] transition-colors shrink-0"
-                    >
-                      {isPlaying ? (
-                        <Pause className="w-5 h-5 fill-current" />
-                      ) : (
-                        <Play className="w-5 h-5 fill-current" />
-                      )}
-                    </button>
+                    <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleTogglePlay}
+                        aria-label={isPlaying ? 'Pause' : 'Play'}
+                        className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b] transition-colors shrink-0"
+                      >
+                        {isPlaying ? (
+                          <Pause className="w-5 h-5 fill-current" />
+                        ) : (
+                          <Play className="w-5 h-5 fill-current ml-0.5" />
+                        )}
+                      </button>
 
-                    <div className="flex items-center gap-3 sm:gap-5 text-[11px] sm:text-xs font-medium text-white shrink-0">
-                      {/* 1. Audio & Language + Subtitles Button */}
+                      <button
+                        type="button"
+                        onClick={() => handleSeekOffset(-10)}
+                        aria-label="Seek backward 10 seconds"
+                        className="min-h-[38px] px-2 rounded-lg bg-white/5 hover:bg-white/15 text-slate-200 hover:text-white text-[11px] font-bold flex items-center gap-1 transition-colors shrink-0"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>10s</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSeekOffset(10)}
+                        aria-label="Seek forward 10 seconds"
+                        className="min-h-[38px] px-2 rounded-lg bg-white/5 hover:bg-white/15 text-slate-200 hover:text-white text-[11px] font-bold flex items-center gap-1 transition-colors shrink-0"
+                      >
+                        <RotateCw className="w-3.5 h-3.5" />
+                        <span>10s</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2 sm:gap-3.5 text-[11px] sm:text-xs font-medium text-white shrink-0">
+                      {/* 1. Subtitles (CC) & Audio Language Button */}
                       <button
                         type="button"
                         data-testid="audio-language-drawer-btn"
                         onClick={() =>
                           setActiveDrawer(activeDrawer === 'language' ? 'none' : 'language')
                         }
-                        className={`flex items-center gap-1.5 min-h-[36px] transition-colors ${
-                          activeDrawer === 'language' ? 'text-[#10d97b] font-bold' : 'hover:text-[#10d97b]'
+                        aria-label="Subtitles and Audio"
+                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg min-h-[38px] transition-colors ${
+                          activeDrawer === 'language'
+                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
+                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
                         }`}
                       >
-                        <Subtitles className="w-4 h-4" />
+                        <Subtitles className="w-4 h-4 shrink-0" />
                         <span>
-                          Audio &amp; Subtitles
+                          CC / Audio
                           {audioCapability.canSwitchEmbeddedAudio && activeEmbeddedTrack
                             ? ` (${activeEmbeddedTrack.languageName})`
                             : activeAlternateStream
@@ -1633,63 +1775,94 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         </span>
                       </button>
 
-                      {/* 2. Video Quality Selector Button */}
+                      {/* 2. Settings (Gear) Button aligned in bottom bar */}
+                      <button
+                        type="button"
+                        data-testid="bottom-settings-gear-btn"
+                        onClick={() =>
+                          setActiveDrawer(activeDrawer === 'settings' ? 'none' : 'settings')
+                        }
+                        aria-label="Player Settings"
+                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg min-h-[38px] transition-colors ${
+                          activeDrawer === 'settings'
+                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
+                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
+                        }`}
+                      >
+                        <Settings className="w-4 h-4 shrink-0" />
+                        <span>Settings</span>
+                      </button>
+
+                      {/* 3. Video Quality Selector Button */}
                       <button
                         type="button"
                         data-testid="video-quality-drawer-btn"
                         onClick={() =>
                           setActiveDrawer(activeDrawer === 'quality' ? 'none' : 'quality')
                         }
-                        className={`flex items-center gap-1.5 min-h-[36px] transition-colors ${
-                          activeDrawer === 'quality' ? 'text-[#10d97b] font-bold' : 'hover:text-[#10d97b]'
+                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg min-h-[38px] transition-colors ${
+                          activeDrawer === 'quality'
+                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
+                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
                         }`}
                       >
-                        <Layers className="w-4 h-4" />
+                        <Layers className="w-4 h-4 shrink-0" />
                         <span>
-                          Quality (
                           {hlsQualityLevels.length > 0
                             ? selectedHlsLevel === -1
                               ? 'Auto'
                               : hlsQualityLevels.find((l) => l.index === selectedHlsLevel)?.label.split(' ')[0] || 'HD'
                             : activeQualityLabel}
-                          )
                         </span>
                       </button>
 
-                      {/* 3. Playback Speed Selector Button */}
+                      {/* 4. Playback Speed Selector Button */}
                       <button
                         type="button"
                         data-testid="playback-speed-drawer-btn"
                         onClick={() =>
                           setActiveDrawer(activeDrawer === 'speed' ? 'none' : 'speed')
                         }
-                        className={`flex items-center gap-1.5 min-h-[36px] transition-colors ${
-                          activeDrawer === 'speed' ? 'text-[#10d97b] font-bold' : 'hover:text-[#10d97b]'
+                        className={`flex items-center gap-1 px-2 py-1.5 rounded-lg min-h-[38px] transition-colors ${
+                          activeDrawer === 'speed'
+                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
+                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
                         }`}
                       >
-                        <Gauge className="w-4 h-4" />
+                        <Gauge className="w-4 h-4 shrink-0" />
                         <span>{playbackSpeed}x</span>
                       </button>
 
-                      {/* 4. Fit Mode */}
+                      {/* 5. Fit / Cover Mode (Available on both mobile & desktop to eliminate letterboxing if desired) */}
                       <button
                         type="button"
+                        data-testid="fit-mode-toggle-btn"
                         onClick={handleCycleFitMode}
-                        className="hidden sm:flex items-center gap-1.5 min-h-[36px] hover:text-[#10d97b] transition-colors"
+                        className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 min-h-[38px] hover:text-[#10d97b] transition-colors"
                       >
-                        <Smartphone className="w-4 h-4" />
-                        <span>Fit ({fitMode})</span>
+                        <Smartphone className="w-4 h-4 shrink-0" />
+                        <span className="capitalize">{fitMode}</span>
                       </button>
 
-                      {/* 5. Fullscreen */}
+                      {/* 6. Fullscreen / Exit Fullscreen */}
                       <button
                         type="button"
+                        data-testid="bottom-fullscreen-toggle-btn"
                         onClick={handleToggleFullscreen}
                         aria-label="Toggle Fullscreen"
-                        className="flex items-center gap-1.5 min-h-[36px] hover:text-[#10d97b] transition-colors"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#10d97b] text-slate-950 font-bold min-h-[38px] hover:bg-[#0fc36d] transition-colors"
                       >
-                        <Maximize2 className="w-4 h-4" />
-                        <span>Fullscreen</span>
+                        {isFullscreen ? (
+                          <>
+                            <Minimize2 className="w-4 h-4 shrink-0" />
+                            <span>Exit</span>
+                          </>
+                        ) : (
+                          <>
+                            <Maximize2 className="w-4 h-4 shrink-0" />
+                            <span>Fullscreen</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   </div>
@@ -2911,9 +3084,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
             )}
           </div>
-
-          {/* 2. Adsterra Banner / Native Ad Slot inside Player View */}
-          <NonIntrusiveBannerAd config={appConfig} placement="player-bottom" />
 
           {/* 3. Movie/Series Metadata, TMDB Watch Providers & Offline Download Manager */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

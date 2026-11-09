@@ -2,14 +2,21 @@
   "appId": "com.cinebox.stream",
   "appName": "CineBox",
   "webDir": "dist",
-  "bundledWebRuntime": false,
-  "server": {
-    "url": "https://cineboxmovies.ai.studio/",
-    "cleartext": true
+  "backgroundColor": "#000000",
+  "android": {
+    "backgroundColor": "#000000",
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
   },
   "plugins": {
-    "Filesystem": {
-      "iosDocumentPickerEnabled": true
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#000000",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false
     }
   }
 }

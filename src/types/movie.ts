@@ -91,21 +91,29 @@ export interface MovieLinkRecord {
 export type UserRole = 'user' | 'vip' | 'moderator' | 'admin';
 export type UserAccountStatus = 'active' | 'suspended' | 'banned';
 
+export type AppPlatformType = 'Android' | 'Web' | 'Android APK' | 'Web Browser';
+
 export interface AppUserRecord {
   id: string;
   username: string;
   email: string;
   role: UserRole;
   status: UserAccountStatus;
-  platform: 'Android APK' | 'Web Browser';
+  platform: AppPlatformType;
   device_id?: string;
   vip_until?: string;
   downloads_count?: number;
   notes?: string;
+  trial_start_date?: string;
+  trial_end_date?: string;
+  referral_code?: string;
+  referred_by?: string | null;
+  successful_referrals?: number;
+  access_expiry_date?: string | null;
   updated_at?: string;
 }
 
-export type AdNetworkProvider = 'adsterra' | 'monetag' | 'admob' | 'custom';
+export type AdNetworkProvider = 'none' | 'admob' | 'monetag' | 'custom';
 
 export interface UserAppSettings {
   defaultServer: 'auto-server-3' | 'auto-server-1';
@@ -132,9 +140,6 @@ export interface AppConfigRecord {
   maintenance_mode?: boolean;
   allow_guest_downloads?: boolean;
   ad_network_provider?: AdNetworkProvider;
-  adsterra_banner_key?: string;
-  adsterra_script_src?: string;
-  adsterra_container_id?: string;
   monetag_zone_id?: string;
   admob_app_id?: string;
   admob_banner_id?: string;

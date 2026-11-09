@@ -36,6 +36,11 @@ import {
   WatchHistoryItem,
 } from '../types/movie';
 import { loginOrRegisterUser, logoutCurrentUser } from '../services/supabaseClient';
+import {
+  buildReferralShareUrl,
+  generateUniqueReferralCode,
+  shareReferralLink,
+} from '../services/platformTrialReferralService';
 
 interface ProfileMeViewProps {
   appConfig: AppConfigRecord;
@@ -151,6 +156,12 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
               <span className="px-2 py-0.5 rounded bg-emerald-950/90 text-[#10d97b] text-[10px] font-extrabold uppercase">
                 {loggedInUser.role}
               </span>
+              <span
+                data-testid="profile-user-platform-badge"
+                className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 text-[10px] font-mono font-bold"
+              >
+                Platform: {loggedInUser.platform}
+              </span>
             </div>
           ) : (
             <p className="mt-1 text-xs text-slate-400">
@@ -228,25 +239,50 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
         </button>
       </div>
 
-      {/* Rewards Center Card (Premium TV Pro card removed per user request) */}
-      <button
-        type="button"
-        onClick={() =>
-          setActiveNoticeModal(
-            'Rewards Center: Share CineBox with friends to earn bonus cloud storage.'
-          )
-        }
-        className="w-full flex items-center justify-between p-4 rounded-2xl bg-gradient-to-r from-[#231d16] to-[#342616] border border-amber-500/20 text-left"
-      >
-        <div className="flex items-center gap-3">
-          <Star className="w-6 h-6 text-amber-400" />
-          <div>
-            <div className="text-sm font-bold text-amber-100">Rewards Center</div>
-            <div className="text-xs text-amber-300/75">Win big Prizes!</div>
+      {/* Referral & Rewards Center Card (Share https://site/ref/{code} via navigator.share) */}
+      {(() => {
+        const myRefCode =
+          loggedInUser?.referral_code ||
+          generateUniqueReferralCode(loggedInUser?.email || 'cinebox-user');
+        const myRefUrl = buildReferralShareUrl(myRefCode);
+        const refCount = loggedInUser?.successful_referrals ?? 0;
+
+        return (
+          <div
+            data-testid="profile-referral-card"
+            className="w-full p-4 rounded-2xl bg-gradient-to-r from-[#231d16] to-[#342616] border border-amber-500/25 space-y-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-3">
+                <Star className="w-6 h-6 text-amber-400 shrink-0" />
+                <div>
+                  <div className="text-sm font-bold text-amber-100">
+                    Referral &amp; Rewards Center ({refCount}/2 Referrals)
+                  </div>
+                  <div className="text-xs text-amber-300/80 font-mono">
+                    Code: {myRefCode} · Invite 2 friends for +30 Days APK Unlock
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="profile-share-referral-btn"
+                onClick={async () => {
+                  const res = await shareReferralLink(myRefCode);
+                  setActiveNoticeModal(
+                    res.shared
+                      ? `Shared referral link: ${res.shareUrl}`
+                      : `Referral link copied to clipboard: ${myRefUrl}`
+                  );
+                }}
+                className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs transition-colors"
+              >
+                Share Referral Link
+              </button>
+            </div>
           </div>
-        </div>
-        <ChevronRight className="w-5 h-5 text-amber-200/60" />
-      </button>
+        );
+      })()}
 
       {/* Watch History + My List + Messages + TV Download + My Activity Card */}
       <div className="rounded-2xl bg-[#141720] border border-slate-800/80 divide-y divide-slate-800/60 overflow-hidden">
