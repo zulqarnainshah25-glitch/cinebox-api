@@ -24,14 +24,18 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      # Yahan humne Capacitor CLI ko install karna shamil kiya hai
       - name: Install Dependencies
-        run: npm install --legacy-peer-deps
+        run: |
+          npm install --legacy-peer-deps
+          npm install @capacitor/cli --legacy-peer-deps
 
       - name: Build Web App
         run: npm run build
 
+      # Ab npx cap sync bina kisi masle ke chalega
       - name: Sync Capacitor
-        run: node ./node_modules/@capacitor/cli/bin/capacitor sync android # <-- YEH LINE BADLI HAI
+        run: npx cap sync android
 
       - name: Build Debug APK
         run: |
