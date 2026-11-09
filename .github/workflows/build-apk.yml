@@ -1,0 +1,46 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24 # Latest LTS version [citation:4]
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21' # Stable LTS version for Android [citation:2][citation:15]
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build Web App
+        run: npm run build # Standard Vite build command [citation:5][citation:11]
+
+      - name: Sync Capacitor
+        run: npx cap sync android # Standard Capacitor sync command [citation:6][citation:12]
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CineBox-Debug-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apks
