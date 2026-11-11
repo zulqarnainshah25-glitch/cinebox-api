@@ -53,6 +53,7 @@ public class MainActivity extends BridgeActivity {
         "doubleclick.net",
         "googlesyndication.com",
         "adsterra.com",
+        "adcash.com",
         "popads.net",
         "popcash.net",
         "propellerads.com",
@@ -64,6 +65,8 @@ public class MainActivity extends BridgeActivity {
         "tsyndicate.com",
         "rtmark.net",
         "histats.com",
+        "s10.histats.com",
+        "sstatic1.histats.com",
         "trafficjunky.net",
         "clickadu.com",
         "hilltopads.net",
@@ -85,7 +88,22 @@ public class MainActivity extends BridgeActivity {
                 return true;
             }
         }
-        return lower.contains("/popunder") || lower.contains("/pop.js") || lower.contains("/adserver");
+        // Block vidsrc.sh sandbox-detector (sbx.js), DGA popunder routes (/vgmoo, .u08, .olfm, .uqa9),
+        // and stellarconductornexus.com MD5-named aclib.runPop scripts (/embed/<32-hex>.js)
+        if (
+            lower.contains("/popunder") ||
+            lower.contains("/pop.js") ||
+            lower.contains("/adserver") ||
+            lower.contains("/assets/sbx.js") ||
+            lower.contains("/vgmoo") ||
+            lower.contains(".u08/") ||
+            lower.contains(".olfm/") ||
+            lower.contains(".uqa9/") ||
+            lower.matches(".*?/embed/[0-9a-f]{32}\\.js.*")
+        ) {
+            return true;
+        }
+        return false;
     }
 
     private boolean isCustomFullscreenActive = false;

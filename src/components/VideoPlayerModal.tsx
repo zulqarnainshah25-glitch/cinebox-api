@@ -1523,14 +1523,72 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   {adBlockToast}
                 </div>
               )}
+
+              {/* VidSrc.sh Smart Click-Shield Perimeter Layer:
+                  Intercepts clickjacking/popunder clicks (aclib.runPop & DGA mousedown listeners)
+                  across the video canvas dead-zones while keeping Center Play/Seek controls,
+                  Bottom Scrubber/Fullscreen bar, and Top-Right Episode selector 100% clickable. */}
+              {vidsrcIframeAttrs.isVidSrcAdBlockerActive && (
+                <div
+                  data-testid="vidsrc-click-shield-layer"
+                  className="absolute inset-0 z-30 pointer-events-none select-none"
+                  aria-hidden="true"
+                >
+                  {/* Top Canvas Ad-Shield Zone (leaves top-right 240px open for TV Season/Episode selector) */}
+                  <div
+                    data-testid="vidsrc-shield-zone-top"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setBlockedAdsCount((c) => c + 1);
+                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
+                    }}
+                    className="absolute top-0 left-0 right-[240px] h-[26%] pointer-events-auto cursor-default"
+                  />
+                  {/* Left Wing Ad-Shield Zone */}
+                  <div
+                    data-testid="vidsrc-shield-zone-left"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setBlockedAdsCount((c) => c + 1);
+                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
+                    }}
+                    className="absolute top-[26%] bottom-[60px] left-0 w-[22%] pointer-events-auto cursor-default"
+                  />
+                  {/* Right Wing Ad-Shield Zone */}
+                  <div
+                    data-testid="vidsrc-shield-zone-right"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setBlockedAdsCount((c) => c + 1);
+                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
+                    }}
+                    className="absolute top-[52px] bottom-[60px] right-0 w-[22%] pointer-events-auto cursor-default"
+                  />
+                  {/* Lower-Middle Canvas Ad-Shield Zone (above 60px bottom control bar, below center Play button) */}
+                  <div
+                    data-testid="vidsrc-shield-zone-lower"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setBlockedAdsCount((c) => c + 1);
+                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
+                    }}
+                    className="absolute top-[72%] bottom-[60px] left-[22%] right-[22%] pointer-events-auto cursor-default"
+                  />
+                </div>
+              )}
+
               <iframe
                 key={`${cleanIframeAttrs.src}::adblock-${vidsrcIframeAttrs.isVidSrcAdBlockerActive ? 'on' : 'off'}`}
                 data-testid="embed-iframe-player"
                 data-vidsrc-iframe={vidsrcIframeAttrs.isVidSrcTarget ? 'true' : 'false'}
+                data-adblock-policy={vidsrcIframeAttrs.sandbox || 'none'}
                 src={cleanIframeAttrs.src}
                 allowFullScreen={cleanIframeAttrs.allowFullScreen}
                 title={cleanIframeAttrs.title}
-                {...(vidsrcIframeAttrs.sandbox ? { sandbox: vidsrcIframeAttrs.sandbox } : {})}
                 className="w-full h-full border-0 bg-[#000000]"
                 style={{ backgroundColor: '#000000' }}
               />

@@ -2284,6 +2284,14 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
   assert.equal(VIDSRC_AD_BLOCKLIST_DOMAINS.length > 10, true);
   assert.equal(isVidSrcAdNetworkUrl('https://syndication.exoclick.com/ads.js'), true);
   assert.equal(isVidSrcAdNetworkUrl('https://cdn.popads.net/pop.js'), true);
+  assert.equal(
+    isVidSrcAdNetworkUrl(
+      'https://stellarconductornexus.com/embed/f59d610a61063c7ef3ccdc1fd40d2ae6.js?_=1794394509'
+    ),
+    true
+  );
+  assert.equal(isVidSrcAdNetworkUrl('https://abc123xyz.u08/s9x8/VgMoO'), true);
+  assert.equal(isVidSrcAdNetworkUrl('https://vidsrc.sh/assets/sbx.js?v=1786671805'), true);
   assert.equal(isVidSrcAdNetworkUrl('https://vidsrc.sh/embed/movie/533535'), false);
 
   // When VidSrc.sh is active and AdBlocker is ON -> strict sandbox without allow-popups or allow-top-navigation
@@ -2379,6 +2387,7 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
   assert.equal(modalSource.includes('vidsrc-adblocker-toggle-btn'), true);
   assert.equal(modalSource.includes('role="switch"'), true);
   assert.equal(modalSource.includes('vidsrc-adblocker-css-rules'), true);
+  assert.equal(modalSource.includes('vidsrc-click-shield-layer'), true);
   assert.equal(modalSource.includes('data-vidsrc-adblock='), true);
   const mainActivityJava = fs.readFileSync(
     path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
@@ -2387,6 +2396,7 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
   assert.equal(mainActivityJava.includes('VIDSRC_AD_DOMAINS'), true);
   assert.equal(mainActivityJava.includes('shouldInterceptRequest'), true);
   assert.equal(mainActivityJava.includes('shouldOverrideUrlLoading'), true);
+  assert.equal(mainActivityJava.includes('/assets/sbx.js'), true);
 });
 
 

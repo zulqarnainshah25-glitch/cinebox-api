@@ -237,12 +237,15 @@ export const VIDSRC_AD_BLOCKLIST_DOMAINS: readonly string[] = Object.freeze([
   'propellerads.com',
   'onclickads.net',
   'onclickperformance.com',
+  'adcash.com',
   'acscdn.com',
   'exoclick.com',
   'juicyads.com',
   'tsyndicate.com',
   'rtmark.net',
   'histats.com',
+  's10.histats.com',
+  'sstatic1.histats.com',
   'trafficjunky.net',
   'clickadu.com',
   'hilltopads.net',
@@ -278,6 +281,10 @@ export function isVidSrcProviderUrl(rawUrl?: string | null): boolean {
 
 /**
  * Returns `true` if a URL is a known VidSrc.sh popup/popunder ad network domain or ad script path.
+ * Includes reverse-engineered signatures for:
+ * - `stellarconductornexus.com/embed/<32-hex-md5>.js` (Adcash `aclib.runPop` loader)
+ * - `vidsrc.sh` SHA-256 DGA popunder TLDs (`.u08`, `.olfm`, `.uqa9`) & `/vgmoo` paths
+ * - `vidsrc.sh/assets/sbx.js` sandbox-detector script
  */
 export function isVidSrcAdNetworkUrl(rawUrl?: string | null): boolean {
   if (!rawUrl || typeof rawUrl !== 'string') return false;
@@ -292,13 +299,23 @@ export function isVidSrcAdNetworkUrl(rawUrl?: string | null): boolean {
         return true;
       }
     }
+    if (
+      host.endsWith('.u08') ||
+      host.endsWith('.olfm') ||
+      host.endsWith('.uqa9')
+    ) {
+      return true;
+    }
     const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase();
     if (
       pathAndQuery.includes('/popunder') ||
       pathAndQuery.includes('/pop.js') ||
       pathAndQuery.includes('/adserver') ||
+      pathAndQuery.includes('/assets/sbx.js') ||
+      pathAndQuery.includes('/vgmoo') ||
       pathAndQuery.includes('clickid=') ||
-      pathAndQuery.includes('zoneid=')
+      pathAndQuery.includes('zoneid=') ||
+      /\/embed\/[0-9a-f]{32}\.js/.test(pathAndQuery)
     ) {
       return true;
     }
@@ -331,13 +348,14 @@ export function getCleanIframeAttributes(
 
 /**
  * Returns iframe attributes with real VidSrc.sh AdBlocker enforcement:
- * - When `rawUrl` is `vidsrc.sh` and `isAdBlockerEnabled` is `true`, applies
- *   `sandbox="allow-scripts allow-same-origin allow-forms allow-presentation"`
- *   which strictly strips `allow-popups`, `allow-popups-to-escape-sandbox`, and
- *   `allow-top-navigation`, blocking 100% of click-triggered popup ads on `vidsrc.sh`
- *   while allowing video playback and fullscreen.
- * - For all other providers (e.g. `2embed.cc`) or when AdBlocker is toggled off,
- *   omits `sandbox` so non-VidSrc providers behave normally.
+ * - When `rawUrl` is `vidsrc.sh` and `isAdBlockerEnabled` is `true`, returns
+ *   `isVidSrcTarget: true`, `isVidSrcAdBlockerActive: true`, and `sandbox` metadata.
+ *   Note: On web browsers, `<iframe src="https://vidsrc.sh/embed/...">` must NOT
+ *   receive the raw HTML `sandbox` attribute directly because `vidsrc.sh/assets/sbx.js`
+ *   checks `document.domain` and redirects sandboxed frames to `/sandbox.php`
+ *   ("This content can't be embedded in a sandboxed frame"). Instead, web browsers
+ *   use the CSS Hiding Layer + Network Interceptor + Interactive Click-Shield Guard,
+ *   while Android APK intercepts `/assets/sbx.js` and ad scripts natively in `MainActivity.java`.
  */
 export function getVidSrcPlayerIframeAttributes(
   rawUrl?: string | null,
@@ -427,14 +445,20 @@ export function buildVidSrcAdBlockCssRules(
     pointer-events: auto !important;
   }
 
-  [data-vidsrc-adblock="active"] > :not(iframe[data-vidsrc-iframe="true"]):not([data-testid="vidsrc-adblock-toast"]) {
+  [data-vidsrc-adblock="active"] > :not(iframe[data-vidsrc-iframe="true"]):not([data-testid="vidsrc-adblock-toast"]):not([data-testid="vidsrc-click-shield-layer"]) {
     display: none !important;
     pointer-events: none !important;
   }
 `.trim();
 }
 
-export type VidSrcInterceptKind = 'fetch' | 'xhr' | 'popup' | 'dom-node' | 'focus-steal';
+export type VidSrcInterceptKind =
+  | 'fetch'
+  | 'xhr'
+  | 'popup'
+  | 'dom-node'
+  | 'focus-steal'
+  | 'clickjack-shield';
 
 /**
  * Installs a runtime ad-filtering logic layer specifically when a `vidsrc.sh` iframe is active
