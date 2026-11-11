@@ -1,10 +1,18 @@
-import { EmbedServerOption, MovieLinkRecord, ResolvedPlaybackPlan } from '../types/movie';
+import {
+  AlternateLanguageStream,
+  EmbedServerOption,
+  MovieLinkRecord,
+  ResolvedPlaybackPlan,
+} from '../types/movie';
 import { sanitizeSafeUrl } from './securityValidator';
 import {
   buildCentralizedManagedSources,
   detectVerifiedAudioTracks,
   resolveAlternateLanguageStreams,
+  VerifiedAudioTrack,
 } from '../services/streamSourceManager';
+
+export type { AlternateLanguageStream, EmbedServerOption, VerifiedAudioTrack };
 
 export const FALLBACK_TEST_MP4_720P =
   'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';

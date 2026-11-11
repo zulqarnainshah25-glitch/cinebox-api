@@ -2399,6 +2399,229 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
   assert.equal(mainActivityJava.includes('/assets/sbx.js'), true);
 });
 
+test('Phase 2 Player Refactor & Fixed Header Upgrade: Real Subtitles (.SRT/.VTT + Urdu RTL), Weak-Network HLS.js Tuning, Gestures/Shortcuts, Skip Intro, Watch History Sync, and Friendly Source Labels', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    convertSrtToVtt,
+    parseSubtitleCues,
+    findActiveSubtitleCue,
+    isRtlSubtitleLanguage,
+    sanitizeSubtitleTracksList,
+    saveSubtitlePreferences,
+    getSavedSubtitlePreferences,
+  } = await import('./subtitleParser');
+  const {
+    buildWeakNetworkHlsConfig,
+    pickInitial480pLevel,
+    computeExponentialBackoffMs,
+    evaluateHlsFatalErrorRecovery,
+  } = await import('../hooks/useHlsPlayer');
+  const {
+    shouldShowSkipIntro,
+    saveUserPlaybackPreferences,
+    getSavedUserPlaybackPreferences,
+  } = await import('../hooks/usePlaybackProgress');
+  const { resolvePlayerKeyboardShortcut } = await import('../components/player/PlayerGestures');
+  const {
+    formatUserFriendlySourceLabel,
+    resolveSourceHealthDotStatus,
+    findNextHealthyEmbedSource,
+  } = await import('../components/player/SourcePicker');
+  const { syncWatchHistoryEntry, getSavedWatchHistoryEntry } = await import(
+    '../services/supabaseClient'
+  );
+
+  // 1. Verify Fixed Header, Removed Language/APK Header Buttons, and Enlarged Search Bar in App.tsx
+  const appSource = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(appSource.includes('data-testid="main-fixed-header"'), true);
+  assert.equal(appSource.includes('fixed top-0 left-0 right-0 z-40'), true);
+  assert.equal(appSource.includes('data-testid="fixed-header-spacer"'), true);
+  assert.equal(appSource.includes('data-testid="header-language-toggle-btn"'), false);
+  assert.equal(appSource.includes('data-testid="header-download-apk-btn"'), false);
+  assert.equal(appSource.includes('max-w-4xl'), true);
+
+  // 2. Verify Modular Player Files Exist & Hardcoded SUBTITLE_CUES + Fake 596s Duration Are Removed
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('SUBTITLE_CUES'), false);
+  assert.equal(modalSource.includes('useState<number>(596)'), false);
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'src/components/player/PlayerControls.tsx')),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'src/components/player/PlayerGestures.tsx')),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'src/components/player/SubtitleLayer.tsx')),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'src/components/player/SourcePicker.tsx')),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'src/hooks/useHlsPlayer.ts')),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'src/hooks/usePlaybackProgress.ts')),
+    true
+  );
+
+  // 3. Real Subtitles: .srt to .vtt conversion, cue parsing, delay (+/- ms), RTL Urdu detection, and XSS sanitization
+  const sampleSrt = `1
+00:00:02,000 --> 00:00:06,500
+السلام علیکم، یہ اصلی اردو سب ٹائٹل ہے
+
+2
+00:00:08,000 --> 00:00:12,000
+<b>Welcome to CineBox</b> <script>alert(1)</script>
+`;
+  const vttOutput = convertSrtToVtt(sampleSrt);
+  assert.equal(vttOutput.startsWith('WEBVTT'), true);
+  assert.equal(vttOutput.includes('00:00:02.000 --> 00:00:06.500'), true);
+
+  const parsedCues = parseSubtitleCues(sampleSrt);
+  assert.equal(parsedCues.length, 2);
+  assert.equal(parsedCues[0].startTime, 2);
+  assert.equal(parsedCues[0].endTime, 6.5);
+  assert.equal(parsedCues[0].text, 'السلام علیکم، یہ اصلی اردو سب ٹائٹل ہے');
+  assert.equal(parsedCues[1].text.includes('<script'), false);
+  assert.equal(parsedCues[1].text, 'Welcome to CineBox');
+
+  // Delay (+/- ms) calculation
+  assert.equal(findActiveSubtitleCue(parsedCues, 3.0, 0)?.id, '1');
+  // With +2000ms delay, cue 1 (starts at 2s) appears at 4s, so at 3.0s it is not yet active
+  assert.equal(findActiveSubtitleCue(parsedCues, 3.0, 2000), null);
+  assert.equal(findActiveSubtitleCue(parsedCues, 4.5, 2000)?.id, '1');
+
+  // RTL Urdu detection & Subtitle Preferences persistence
+  assert.equal(isRtlSubtitleLanguage('ur', parsedCues[0].text), true);
+  assert.equal(isRtlSubtitleLanguage('en', 'السلام علیکم'), true);
+  assert.equal(isRtlSubtitleLanguage('hi', 'नमस्ते दुनिया'), false);
+  assert.equal(isRtlSubtitleLanguage('en', 'Hello world'), false);
+
+  const cleanSubTracks = sanitizeSubtitleTracksList([
+    { lang: 'ur', label: '<b>Urdu</b>', url: 'https://cdn.example.com/subs/ur.srt' },
+    { lang: 'en', label: 'XSS', url: 'javascript:alert(1)' },
+  ]);
+  assert.equal(cleanSubTracks.length, 1);
+  assert.equal(cleanSubTracks[0].lang, 'ur');
+  assert.equal(cleanSubTracks[0].label, 'Urdu');
+
+  saveSubtitlePreferences(
+    { enabled: true, preferredLang: 'ur', fontSize: 'large', bgOpacity: 50, delayMs: 250 },
+    'usr_test_sub'
+  );
+  const loadedSubPrefs = getSavedSubtitlePreferences('usr_test_sub');
+  assert.equal(loadedSubPrefs.enabled, true);
+  assert.equal(loadedSubPrefs.preferredLang, 'ur');
+  assert.equal(loadedSubPrefs.fontSize, 'large');
+  assert.equal(loadedSubPrefs.bgOpacity, 50);
+  assert.equal(loadedSubPrefs.delayMs, 250);
+
+  // 4. Weak Mobile Network hls.js Tuning & Fatal Error Recovery
+  const hlsCfg = buildWeakNetworkHlsConfig();
+  assert.equal(hlsCfg.maxBufferLength, 24);
+  assert.equal(hlsCfg.maxMaxBufferLength, 60);
+  assert.equal(hlsCfg.manifestLoadingMaxRetry >= 4, true);
+  assert.equal(hlsCfg.fragLoadingMaxRetry >= 6, true);
+
+  const initial480 = pickInitial480pLevel([
+    { height: 1080, bitrate: 4500000 },
+    { height: 720, bitrate: 2400000 },
+    { height: 480, bitrate: 1100000 },
+    { height: 360, bitrate: 650000 },
+  ]);
+  assert.equal(initial480, 2); // Selects 480p index
+
+  assert.equal(computeExponentialBackoffMs(0, 1000, 16000), 1000);
+  assert.equal(computeExponentialBackoffMs(2, 1000, 16000), 4000);
+
+  const netRec = evaluateHlsFatalErrorRecovery('networkError', 1);
+  assert.equal(netRec.action, 'startLoad');
+  assert.equal(netRec.statusText.includes('Reconnecting…'), true);
+
+  const mediaRec1 = evaluateHlsFatalErrorRecovery('mediaError', 1);
+  assert.equal(mediaRec1.action, 'recoverMediaError');
+  const mediaRec2 = evaluateHlsFatalErrorRecovery('mediaError', 2);
+  assert.equal(mediaRec2.action, 'swapAudioCodec');
+  const mediaFail = evaluateHlsFatalErrorRecovery('mediaError', 3);
+  assert.equal(mediaFail.action, 'failover');
+
+  // 5. Desktop Keyboard Shortcuts & Skip Intro
+  assert.equal(resolvePlayerKeyboardShortcut(' '), 'toggle-play');
+  assert.equal(resolvePlayerKeyboardShortcut('ArrowLeft'), 'seek-back-10');
+  assert.equal(resolvePlayerKeyboardShortcut('ArrowRight'), 'seek-forward-10');
+  assert.equal(resolvePlayerKeyboardShortcut('f'), 'toggle-fullscreen');
+  assert.equal(resolvePlayerKeyboardShortcut('m'), 'toggle-mute');
+  assert.equal(resolvePlayerKeyboardShortcut('c'), 'toggle-subtitles');
+  // Typing inside an <input> must not trigger player shortcuts
+  assert.equal(resolvePlayerKeyboardShortcut(' ', 'INPUT'), null);
+
+  assert.equal(shouldShowSkipIntro(25, 10, 60), true);
+  assert.equal(shouldShowSkipIntro(5, 10, 60), false);
+  assert.equal(shouldShowSkipIntro(65, 10, 60), false);
+  assert.equal(shouldShowSkipIntro(25, null, null), false);
+
+  saveUserPlaybackPreferences(
+    { playbackSpeed: 1.5, preferredAudioLang: 'hi', preferredSubtitleLang: 'ur' },
+    'usr_prefs_1'
+  );
+  const userPrefs = getSavedUserPlaybackPreferences('usr_prefs_1');
+  assert.equal(userPrefs.playbackSpeed, 1.5);
+  assert.equal(userPrefs.preferredAudioLang, 'hi');
+  assert.equal(userPrefs.preferredSubtitleLang, 'ur');
+
+  // 6. Watch History & Resume Position Sync (Supabase + localStorage Fallback)
+  const syncRes = await syncWatchHistoryEntry({
+    user_id: 'USR-HIST-TEST',
+    tmdb_id: 533535,
+    media_type: 'movie',
+    position_seconds: 842,
+    duration_seconds: 7200,
+    title: 'Deadpool & Wolverine',
+  });
+  assert.equal(syncRes.ok, true);
+
+  const savedEntry = await getSavedWatchHistoryEntry({
+    user_id: 'USR-HIST-TEST',
+    tmdb_id: 533535,
+    media_type: 'movie',
+  });
+  assert.ok(savedEntry);
+  assert.equal(savedEntry?.position_seconds, 842);
+  assert.equal(savedEntry?.duration_seconds, 7200);
+
+  // 7. User-Friendly Source Labels ("Source 1", "Source 2", "Source 3"), Health Status Dots & Auto-Failover
+  assert.equal(formatUserFriendlySourceLabel(0), 'Source 1');
+  assert.equal(formatUserFriendlySourceLabel(1), 'Source 2');
+  assert.equal(formatUserFriendlySourceLabel(2), 'Source 3');
+
+  assert.equal(resolveSourceHealthDotStatus('available').label, 'OK');
+  assert.equal(resolveSourceHealthDotStatus('timeout').label, 'slow');
+  assert.equal(resolveSourceHealthDotStatus('unavailable').label, 'down');
+
+  const sampleServers = [
+    { id: 'auto-server-3', label: 'Server 3', url: 'https://www.2embed.cc/embed/550', isCustom: false },
+    { id: 'auto-server-1', label: 'Server 1', url: 'https://vidsrc.sh/embed/movie/550', isCustom: false },
+    { id: 'hindi-multiembed', label: 'MultiEmbed', url: 'https://multiembed.mov/?video_id=550', isCustom: false },
+  ];
+  // If auto-server-3 fails and auto-server-1 is marked 'down', auto-failover jumps directly to hindi-multiembed (Source 3)
+  const nextHealthy = findNextHealthyEmbedSource(
+    sampleServers,
+    'auto-server-3',
+    { 'auto-server-1': 'down', 'hindi-multiembed': 'ok' },
+    new Set(['auto-server-3'])
+  );
+  assert.equal(nextHealthy?.id, 'hindi-multiembed');
+});
+
 
 
 

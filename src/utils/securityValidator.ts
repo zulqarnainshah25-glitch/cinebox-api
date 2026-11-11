@@ -380,6 +380,24 @@ export function validateMovieLinkInput(input: Partial<MovieLinkRecord>): {
   if (!dl1080Check.ok) return { valid: false, error: dl1080Check.err!, sanitized: null };
 
   const sanitizedAlternateStreams = sanitizeAlternateStreamsList(input.alternate_streams, 12);
+  const sanitizedSubtitles = Array.isArray(input.subtitles)
+    ? input.subtitles
+        .filter((s) => s && typeof s === 'object' && !Array.isArray(s))
+        .map((s) => {
+          const safeSubUrl = sanitizeSafeUrl(typeof s.url === 'string' ? s.url : null);
+          if (!safeSubUrl) return null;
+          const lang =
+            typeof s.lang === 'string' && s.lang.trim()
+              ? s.lang.trim().toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 12)
+              : 'en';
+          const label =
+            stripHtmlAndScriptContent(s.label, 48) ||
+            (lang === 'ur' ? 'Urdu (اردو)' : lang === 'hi' ? 'Hindi (हिन्दी)' : 'English');
+          return { lang: lang || 'en', label, url: safeSubUrl };
+        })
+        .filter((s): s is NonNullable<typeof s> => Boolean(s))
+        .slice(0, 16)
+    : [];
 
   return {
     valid: true,
@@ -392,7 +410,7 @@ export function validateMovieLinkInput(input: Partial<MovieLinkRecord>): {
       hindi_dubbed_video_url: hindiCheck.clean,
       urdu_dubbed_video_url: urduCheck.clean,
       alternate_streams: sanitizedAlternateStreams.length > 0 ? sanitizedAlternateStreams : [],
-      subtitles: Array.isArray(input.subtitles) ? input.subtitles : [],
+      subtitles: sanitizedSubtitles,
       intro_start:
         typeof input.intro_start === 'number' && input.intro_start >= 0
           ? Math.floor(input.intro_start)

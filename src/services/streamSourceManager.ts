@@ -9,6 +9,8 @@ import {
 } from '../types/movie';
 import { sanitizeAlternateStreamsList, sanitizeSafeUrl } from '../utils/securityValidator';
 
+export type { SourceAvailabilityStatus };
+
 export interface VerifiedAudioTrack {
   id: number;
   name: string;

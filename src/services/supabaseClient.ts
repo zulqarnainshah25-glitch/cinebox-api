@@ -1791,3 +1791,188 @@ export async function importGlobalDatabaseSnapshot(rawJson: string): Promise<{
   }
 }
 
+const LOCAL_WATCH_HISTORY_ROWS_KEY = 'cinebox_watch_history_rows_v2';
+
+function getLocalWatchHistoryMap(): Record<string, any> {
+  try {
+    const raw = safeStorageGet(LOCAL_WATCH_HISTORY_ROWS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalWatchHistoryMap(map: Record<string, any>): void {
+  safeStorageSet(LOCAL_WATCH_HISTORY_ROWS_KEY, JSON.stringify(map));
+}
+
+/**
+ * Phase 2 (5): Syncs resume position & watch history to Supabase `watch_history` table for logged-in users,
+ * while always saving to `localStorage` as an offline/guest fallback.
+ */
+export async function syncWatchHistoryEntry(entry: {
+  user_id?: string | null;
+  tmdb_id: number;
+  media_type: 'movie' | 'tv';
+  season?: number | null;
+  episode?: number | null;
+  position_seconds: number;
+  duration_seconds: number;
+  title?: string;
+  poster_url?: string;
+}): Promise<{ ok: boolean; syncedToCloud: boolean }> {
+  const tmdbId = Number(entry.tmdb_id);
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+    return { ok: false, syncedToCloud: false };
+  }
+  const userId = (entry.user_id || getLoggedInUser()?.id || 'guest').trim();
+  const season = entry.media_type === 'tv' ? Math.max(1, Number(entry.season || 1)) : 1;
+  const episode = entry.media_type === 'tv' ? Math.max(1, Number(entry.episode || 1)) : 1;
+  const pos = Math.max(0, Math.round(Number(entry.position_seconds) || 0));
+  const dur = Math.max(0, Math.round(Number(entry.duration_seconds) || 0));
+  const compositeKey = `${userId}::${entry.media_type}::${tmdbId}::S${season}::E${episode}`;
+
+  const rowPayload = {
+    user_id: userId,
+    tmdb_id: tmdbId,
+    media_type: entry.media_type,
+    season,
+    episode,
+    position_seconds: pos,
+    duration_seconds: dur,
+    title: sanitizeDatabaseTextField(entry.title || '', 120),
+    poster_url: sanitizeSafeUrl(entry.poster_url) || '',
+    updated_at: new Date().toISOString(),
+  };
+
+  const localMap = getLocalWatchHistoryMap();
+  localMap[compositeKey] = rowPayload;
+  saveLocalWatchHistoryMap(localMap);
+
+  const client = getSupabaseClient();
+  if (!client || !entry.user_id || userId === 'guest') {
+    return { ok: true, syncedToCloud: false };
+  }
+
+  try {
+    const { error } = await client.from('watch_history').upsert(
+      {
+        user_id: userId,
+        tmdb_id: tmdbId,
+        media_type: entry.media_type,
+        season,
+        episode,
+        position_seconds: pos,
+        duration_seconds: dur,
+        title: rowPayload.title,
+        poster_url: rowPayload.poster_url,
+        updated_at: rowPayload.updated_at,
+      },
+      { onConflict: 'user_id,tmdb_id,media_type,season,episode' }
+    );
+    return { ok: true, syncedToCloud: !error };
+  } catch {
+    return { ok: true, syncedToCloud: false };
+  }
+}
+
+export async function getSavedWatchHistoryEntry(params: {
+  user_id?: string | null;
+  tmdb_id: number;
+  media_type: 'movie' | 'tv';
+  season?: number | null;
+  episode?: number | null;
+}): Promise<{
+  position_seconds: number;
+  duration_seconds: number;
+  updated_at: string;
+  source: 'supabase' | 'local';
+} | null> {
+  const tmdbId = Number(params.tmdb_id);
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+
+  const userId = (params.user_id || getLoggedInUser()?.id || 'guest').trim();
+  const season = params.media_type === 'tv' ? Math.max(1, Number(params.season || 1)) : 1;
+  const episode = params.media_type === 'tv' ? Math.max(1, Number(params.episode || 1)) : 1;
+  const compositeKey = `${userId}::${params.media_type}::${tmdbId}::S${season}::E${episode}`;
+  const guestKey = `guest::${params.media_type}::${tmdbId}::S${season}::E${episode}`;
+
+  const localMap = getLocalWatchHistoryMap();
+  const localEntry = localMap[compositeKey] || localMap[guestKey] || null;
+
+  const client = getSupabaseClient();
+  if (client && params.user_id && userId !== 'guest') {
+    try {
+      const { data, error } = await client
+        .from('watch_history')
+        .select('position_seconds,duration_seconds,updated_at')
+        .eq('user_id', userId)
+        .eq('tmdb_id', tmdbId)
+        .eq('media_type', params.media_type)
+        .eq('season', season)
+        .eq('episode', episode)
+        .maybeSingle();
+
+      if (!error && data && typeof data.position_seconds === 'number') {
+        const syncedRow = {
+          position_seconds: Math.max(0, Math.round(data.position_seconds)),
+          duration_seconds: Math.max(0, Math.round(Number(data.duration_seconds) || 0)),
+          updated_at: data.updated_at || new Date().toISOString(),
+          source: 'supabase' as const,
+        };
+        localMap[compositeKey] = {
+          ...localEntry,
+          ...syncedRow,
+          user_id: userId,
+          tmdb_id: tmdbId,
+          media_type: params.media_type,
+          season,
+          episode,
+        };
+        saveLocalWatchHistoryMap(localMap);
+        return syncedRow;
+      }
+    } catch {
+      // Fallback to local
+    }
+  }
+
+  if (localEntry && typeof localEntry.position_seconds === 'number') {
+    return {
+      position_seconds: Math.max(0, Math.round(localEntry.position_seconds)),
+      duration_seconds: Math.max(0, Math.round(Number(localEntry.duration_seconds) || 0)),
+      updated_at: localEntry.updated_at || new Date().toISOString(),
+      source: 'local',
+    };
+  }
+
+  return null;
+}
+
+export async function fetchLinkHealthRowsForTmdb(
+  tmdbId: number
+): Promise<Array<{ source_url: string; status: 'ok' | 'slow' | 'down' | 'unknown'; status_code?: number | null }>> {
+  const client = getSupabaseClient();
+  if (!client || !Number.isInteger(tmdbId) || tmdbId <= 0) return [];
+  try {
+    const { data, error } = await client
+      .from('link_health')
+      .select('source_url,status,status_code')
+      .eq('tmdb_id', tmdbId);
+    if (error || !Array.isArray(data)) return [];
+    return data.map((row: any) => ({
+      source_url: String(row.source_url || ''),
+      status:
+        row.status === 'ok' || row.status === 'slow' || row.status === 'down'
+          ? row.status
+          : 'unknown',
+      status_code: typeof row.status_code === 'number' ? row.status_code : null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+

@@ -1,59 +1,35 @@
 import React, { useEffect, useRef, useState } from 'react';
-import Hls from 'hls.js';
 import {
-  Activity,
   AlertTriangle,
   Bookmark,
   BookmarkCheck,
   Check,
   ChevronLeft,
-  Download,
   ExternalLink,
   Film,
-  FolderDown,
-  Gauge,
-  HelpCircle,
   Info,
-  Layers,
-  Link2,
   Loader2,
-  Lock,
   Maximize2,
-  Minimize2,
-  Pause,
-  PictureInPicture2,
-  Play,
   RefreshCw,
-  RotateCcw,
-  RotateCw,
   Save,
-  Server,
-  Settings,
   Shield,
   ShieldCheck,
   ShieldOff,
-  Smartphone,
   Sparkles,
-  Subtitles,
-  Sun,
   Tv,
-  Unlock,
   Volume2,
-  VolumeX,
   X,
-  Youtube,
 } from 'lucide-react';
 import {
-  AlternateLanguageStream,
   AppConfigRecord,
   DownloadItem,
   DownloadQuality,
-  ManagedStreamSource,
   MovieItem,
   MovieLinkRecord,
-  SourceAvailabilityStatus,
+  SubtitleTrackOption,
 } from '../types/movie';
 import {
+  AlternateLanguageStream,
   buildVidSrcAdBlockCssRules,
   formatPlayerTimecode,
   getCleanIframeAttributes,
@@ -64,23 +40,15 @@ import {
   lockScreenOrientationSafely,
   PLAYABLE_HD_STREAMS_POOL,
   resolvePlaybackPlan,
+  VerifiedAudioTrack,
 } from '../utils/streamResolver';
 import {
-  attachSafariNativeAudioTrackListeners,
   checkStreamSourceHealth,
-  detectVerifiedAudioTracks,
   evaluatePlayerAudioCapability,
-  selectNextFallbackSource,
+  SourceAvailabilityStatus,
   switchEmbeddedAudioTrackSafely,
-  VerifiedAudioTrack,
 } from '../services/streamSourceManager';
 import {
-  EXTRACTION_UNAVAILABLE_MESSAGE,
-  extractStreamFromEmbedServers,
-  StreamExtractionResult,
-} from '../services/embedStreamExtractor';
-import {
-  buildDramaOrHindiSearchQuery,
   DramaOrHindiStreamOption,
   isPakistaniOrUrduContent,
   searchPakDramaOrHindiStreams,
@@ -93,68 +61,109 @@ import {
   saveVidSrcPlayerProgress,
   VidSrcContentInfoResult,
 } from '../services/vidsrcService';
+import { fetchLinkHealthRowsForTmdb } from '../services/supabaseClient';
+import {
+  getSavedSubtitlePreferences,
+  sanitizeSubtitleTracksList,
+  saveSubtitlePreferences,
+  SubtitleBgOpacityOption,
+  SubtitleFontSizeOption,
+} from '../utils/subtitleParser';
+import { useHlsPlayer } from '../hooks/useHlsPlayer';
+import {
+  getSavedUserPlaybackPreferences,
+  saveUserPlaybackPreferences,
+  usePlaybackProgress,
+} from '../hooks/usePlaybackProgress';
+import { SubtitleLayer } from './player/SubtitleLayer';
+import { PlayerGestures } from './player/PlayerGestures';
+import {
+  findNextHealthyEmbedSource,
+  formatUserFriendlySourceLabel,
+  SourcePicker,
+} from './player/SourcePicker';
+import { PlayerControls } from './player/PlayerControls';
 
 interface VideoPlayerModalProps {
   movie: MovieItem;
   movieLink: MovieLinkRecord | null;
-  appConfig: AppConfigRecord;
+  appConfig?: AppConfigRecord;
   offlineDownload?: DownloadItem | null;
   isInWatchlist: boolean;
-  onClose: () => void;
-  onToggleWatchlist: (movie: MovieItem) => void;
-  onStartDownload: (movie: MovieItem, quality: DownloadQuality, url: string, sizeMB: number) => void;
-  onExportToDevice: (movie: MovieItem, quality: DownloadQuality, url: string, sizeMB: number) => void;
-  onProgressUpdate: (movie: MovieItem, currentSec: number, durationSec: number) => void;
-  onSaveCustomMovieLink?: (
-    input: Partial<MovieLinkRecord>
-  ) => Promise<{ ok: boolean; error?: string; record?: MovieLinkRecord }>;
   isAdminUnlocked?: boolean;
-}
-
-const SUBTITLE_LANGS = ['English', 'Hindi', 'Urdu', 'Spanish', 'Arabic'];
-const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
-
-const SUBTITLE_CUES: { start: number; end: number; en: string; hi: string; ur: string }[] = [
-  { start: 0, end: 15, en: '[cinematic audio]', hi: '[सिनेमैटिक ऑडियो]', ur: '[سنیما آڈیو]' },
-  {
-    start: 15,
-    end: 45,
-    en: 'Playing via CineBox Native HTML5 & HLS Audio Engine 2.0',
-    hi: 'सिनेबॉक्स नेटिव HTML5 और HLS ऑडियो इंजन 2.0 पर चल रहा है',
-    ur: 'سنے باکس نیٹو HTML5 اور HLS آڈیو انجن 2.0 پر چل رہا ہے',
-  },
-  { start: 45, end: 99999, en: '[ambient soundtrack]', hi: '[संगीत]', ur: '[موسیقی]' },
-];
-
-export interface HlsQualityLevelOption {
-  index: number; // -1 for Auto ABR
-  label: string;
-  height?: number;
-  bitrateKbps?: number;
-}
-
-export interface HlsSubtitleTrackOption {
-  id: number;
-  label: string;
-  lang: string;
+  onClose: () => void;
+  onStartDownload?: (
+    movie: MovieItem,
+    quality: DownloadQuality,
+    sourceUrl: string,
+    fileSizeMB: number
+  ) => void;
+  onExportToDevice?: (
+    movie: MovieItem,
+    quality: DownloadQuality,
+    sourceUrl: string,
+    fileSizeMB: number
+  ) => void | Promise<void>;
+  onToggleWatchlist: (movie: MovieItem) => void;
+  onProgressUpdate: (movie: MovieItem, currentSeconds: number, durationSeconds: number) => void;
+  onSaveCustomMovieLink?: (
+    linkInput: Partial<MovieLinkRecord>
+  ) => Promise<{ ok: boolean; error?: string | null; record?: MovieLinkRecord | null }>;
 }
 
 export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   movie,
   movieLink,
-  appConfig,
   offlineDownload,
   isInWatchlist,
+  isAdminUnlocked = false,
   onClose,
   onToggleWatchlist,
-  onStartDownload,
   onProgressUpdate,
   onSaveCustomMovieLink,
-  isAdminUnlocked = false,
 }) => {
-  // TV Series Season & Episode Selector State
   const [selectedSeason, setSelectedSeason] = useState<number>(1);
   const [selectedEpisode, setSelectedEpisode] = useState<number>(1);
+
+  const seasonsList =
+    movie.seasons && movie.seasons.length > 0
+      ? movie.seasons
+      : [
+          { seasonNumber: 1, name: 'Season 1', episodeCount: 12 },
+          { seasonNumber: 2, name: 'Season 2', episodeCount: 10 },
+          { seasonNumber: 3, name: 'Season 3', episodeCount: 10 },
+        ];
+
+  const currentSeasonInfo =
+    seasonsList.find((s) => s.seasonNumber === selectedSeason) || seasonsList[0];
+  const episodeCount = Math.min(36, Math.max(1, currentSeasonInfo?.episodeCount || 12));
+
+  // Playback progress, Supabase watch_history sync, Skip Intro & 5s Next Episode countdown
+  const {
+    activeUserId,
+    savedResumePosition,
+    savedDuration,
+    reportPlaybackProgress,
+    nextEpisodeCountdown,
+    startNextEpisodeCountdown,
+    cancelNextEpisodeCountdown,
+    playNextEpisodeImmediately,
+    canShowSkipIntro,
+  } = usePlaybackProgress({
+    movie,
+    season: selectedSeason,
+    episode: selectedEpisode,
+    totalEpisodesInSeason: episodeCount,
+    introStart: movieLink?.intro_start,
+    introEnd: movieLink?.intro_end,
+    onProgressUpdate,
+    onAdvanceEpisode: (nextEp) => {
+      setSelectedEpisode(nextEp);
+    },
+  });
+
+  const savedUserPlaybackPrefs = getSavedUserPlaybackPreferences(activeUserId);
+  const savedSubPrefs = getSavedSubtitlePreferences(activeUserId);
 
   const plan = resolvePlaybackPlan(
     movie.id,
@@ -168,20 +177,31 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   const isPakDrama = isPakistaniOrUrduContent(movie);
 
-  const [playerMode, setPlayerMode] = useState<
-    'direct' | 'trailer' | 'embed' | 'pak-drama'
-  >(
-    offlineDownload
-      ? 'direct'
-      : isPakDrama
-      ? 'pak-drama'
-      : 'embed'
+  const [playerMode, setPlayerMode] = useState<'direct' | 'embed' | 'pak-drama' | 'trailer'>(
+    offlineDownload ? 'direct' : isPakDrama ? 'pak-drama' : 'embed'
   );
   const [selectedEmbedId, setSelectedEmbedId] = useState<string>(
     movieLink?.stream_url ? 'custom-supabase' : 'auto-server-3'
   );
+  const [selectedAltStreamUrl, setSelectedAltStreamUrl] = useState<string | null>(
+    plan.directVideoUrl
+  );
+  const failedEmbedServerIdsRef = useRef<Set<string>>(new Set());
 
-  // VidSrc.sh Content Info Metadata & Watch Progress State
+  // Pakistani Drama & Hindi Dubbed Stream Resolver State
+  const [pakDramaStreams, setPakDramaStreams] = useState<DramaOrHindiStreamOption[]>([]);
+  const [activePakStreamIdx, setActivePakStreamIdx] = useState<number>(0);
+  const [isLoadingPakDrama, setIsLoadingPakDrama] = useState<boolean>(false);
+  const [pakDramaQueryInput, setPakDramaQueryInput] = useState<string>('');
+  const [pakDramaError, setPakDramaError] = useState<string | null>(null);
+
+  // Source Health Verification Map
+  const [sourceHealthMap, setSourceHealthMap] = useState<
+    Record<string, SourceAvailabilityStatus | 'ok' | 'slow' | 'down'>
+  >({});
+  const [isCheckingHealth, setIsCheckingHealth] = useState<boolean>(false);
+
+  // VidSrc.sh Content Info & Watch Progress
   const [vidsrcInfoState, setVidsrcInfoState] = useState<VidSrcContentInfoResult | null>(null);
   const [isLoadingVidsrcInfo, setIsLoadingVidsrcInfo] = useState<boolean>(false);
   const [vidsrcWatchProgress, setVidsrcWatchProgress] = useState<{
@@ -198,30 +218,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     })
   );
 
-  // Separate Alternate Language Stream Selection State (Phase 2C Scenario 2)
-  const [selectedAltStreamUrl, setSelectedAltStreamUrl] = useState<string | null>(
-    plan.directVideoUrl
-  );
-
-  // Centralized Source Health State (Phase 4)
-  const [sourceHealthMap, setSourceHealthMap] = useState<Record<string, SourceAvailabilityStatus>>({});
-  const [isCheckingHealth, setIsCheckingHealth] = useState<boolean>(false);
-
-  // Pakistani Drama & Hindi Dubbed Live Stream Finder State
-  const [pakDramaStreams, setPakDramaStreams] = useState<DramaOrHindiStreamOption[]>([]);
-  const [activePakStreamIdx, setActivePakStreamIdx] = useState<number>(0);
-  const [isLoadingPakDrama, setIsLoadingPakDrama] = useState<boolean>(false);
-  const [pakDramaError, setPakDramaError] = useState<string | null>(null);
-  const [pakDramaQueryInput, setPakDramaQueryInput] = useState<string>(() =>
-    buildDramaOrHindiSearchQuery({
-      title: movie.title,
-      mediaType: movie.mediaType,
-      episode: 1,
-      isPakDrama,
-    })
-  );
-
-  // Inline Quick-Link Editor State (Admin)
+  // Inline Admin Link Editor State
   const [showLinkEditor, setShowLinkEditor] = useState<boolean>(false);
   const [customDirectUrl, setCustomDirectUrl] = useState<string>(
     movieLink?.direct_video_url || ''
@@ -233,16 +230,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     movieLink?.urdu_dubbed_video_url || ''
   );
   const [customEmbedUrl, setCustomEmbedUrl] = useState<string>(movieLink?.stream_url || '');
-  const [customDl480, setCustomDl480] = useState<string>(movieLink?.download_480p || '');
-  const [customDl720, setCustomDl720] = useState<string>(movieLink?.download_720p || '');
-  const [customDl1080, setCustomDl1080] = useState<string>(movieLink?.download_1080p || '');
+  const [customSubtitlesJson, setCustomSubtitlesJson] = useState<string>(
+    movieLink?.subtitles && movieLink.subtitles.length > 0
+      ? JSON.stringify(movieLink.subtitles)
+      : ''
+  );
+  const [customIntroStart, setCustomIntroStart] = useState<string>(
+    typeof movieLink?.intro_start === 'number' ? String(movieLink.intro_start) : ''
+  );
+  const [customIntroEnd, setCustomIntroEnd] = useState<string>(
+    typeof movieLink?.intro_end === 'number' ? String(movieLink.intro_end) : ''
+  );
   const [customLang, setCustomLang] = useState<string>(
     movieLink?.language || movie.language || 'English'
   );
-  const [linkSaveMessage, setLinkSaveMessage] = useState<string | null>(null);
   const [isSavingLink, setIsSavingLink] = useState<boolean>(false);
+  const [linkSaveMessage, setLinkSaveMessage] = useState<string | null>(null);
 
-  // VidSrc.sh Real AdBlocker State (Strict Iframe Sandbox + Window Popup/Redirect Shield)
+  // Real VidSrc.sh AdBlocker State
   const [isVidSrcAdBlockerEnabled, setIsVidSrcAdBlockerEnabled] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('cinebox_vidsrc_adblocker_v1');
@@ -260,7 +265,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       try {
         localStorage.setItem('cinebox_vidsrc_adblocker_v1', String(next));
       } catch {
-        // ignore storage quota errors
+        // ignore
       }
       setAdBlockToast(
         next
@@ -277,26 +282,100 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return () => clearTimeout(timer);
   }, [adBlockToast]);
 
-  // Custom HTML5 & HLS.js Video Player State
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const hlsRef = useRef<Hls | null>(null);
+  // Direct HTML5 & HLS Player State (No fake 596s default duration!)
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
-  const pendingResumeTimeRef = useRef<number | null>(null);
-  const pendingResumePlayRef = useRef<boolean>(true);
-
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [currentTime, setCurrentTime] = useState<number>(0);
-  const [duration, setDuration] = useState<number>(596);
+  const [duration, setDuration] = useState<number>(0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [volume, setVolume] = useState<number>(90);
   const [brightness, setBrightness] = useState<number>(100);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [fitMode, setFitMode] = useState<'cover' | 'contain' | 'fill'>('contain');
-  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(savedUserPlaybackPrefs.playbackSpeed);
+  const savedNormalSpeedRef = useRef<number>(savedUserPlaybackPrefs.playbackSpeed);
   const [isPipActive, setIsPipActive] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [areControlsVisible, setAreControlsVisible] = useState<boolean>(true);
   const controlsHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Subtitle State (Real .VTT / .SRT / HLS)
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(savedSubPrefs.enabled);
+  const [selectedSubtitleLang, setSelectedSubtitleLang] = useState<string>(
+    savedSubPrefs.preferredLang || savedUserPlaybackPrefs.preferredSubtitleLang || 'en'
+  );
+  const [subtitleDelayMs, setSubtitleDelayMs] = useState<number>(savedSubPrefs.delayMs);
+  const [subtitleSize, setSubtitleSize] = useState<SubtitleFontSizeOption>(
+    savedSubPrefs.fontSize
+  );
+  const [subtitleBgOpacity, setSubtitleBgOpacity] = useState<SubtitleBgOpacityOption>(
+    savedSubPrefs.bgOpacity
+  );
+  const [customSubtitleText, setCustomSubtitleText] = useState<string | null>(null);
+
+  const [activeDrawer, setActiveDrawer] = useState<
+    'none' | 'language' | 'quality' | 'speed' | 'settings'
+  >('none');
+  const [activeQualityLabel, setActiveQualityLabel] = useState<DownloadQuality>(
+    offlineDownload?.quality || '720p'
+  );
+  const [audioSwitchNotice, setAudioSwitchNotice] = useState<string | null>(null);
+
+  const activeDirectSourceUrl =
+    offlineDownload?.sourceUrl ||
+    selectedAltStreamUrl ||
+    plan.directVideoUrl ||
+    plan.testFallbackMp4Url;
+
+  // Automatic failover to next healthy source
+  const handleTriggerAutoFailover = () => {
+    failedEmbedServerIdsRef.current.add(selectedEmbedId);
+    const nextHealthy = findNextHealthyEmbedSource(
+      plan.embedServers,
+      selectedEmbedId,
+      sourceHealthMap,
+      failedEmbedServerIdsRef.current
+    );
+    if (nextHealthy) {
+      setSelectedEmbedId(nextHealthy.id);
+      setPlayerMode('embed');
+      const idx = plan.embedServers.findIndex((s) => s.id === nextHealthy.id);
+      setAudioSwitchNotice(
+        `Source unavailable — automatically switched to ${formatUserFriendlySourceLabel(idx >= 0 ? idx : 0)}`
+      );
+      setTimeout(() => setAudioSwitchNotice(null), 3200);
+    }
+  };
+
+  // Weak mobile network HLS.js hook
+  const {
+    videoRef,
+    hlsRef,
+    pendingResumeTimeRef,
+    pendingResumePlayRef,
+    verifiedAudioTracks,
+    setVerifiedAudioTracks,
+    selectedAudioTrackId,
+    setSelectedAudioTrackId,
+    hlsQualityLevels,
+    selectedHlsLevel,
+    setSelectedHlsLevel,
+    hlsSubtitleTracks,
+    selectedHlsSubtitleId,
+    selectHlsSubtitleTrack,
+    isReconnecting,
+    reconnectMessage,
+  } = useHlsPlayer({
+    playerMode,
+    activeDirectSourceUrl,
+    originalLanguageCode: movie.originalLanguageCode,
+    preferredAudioLang: savedUserPlaybackPrefs.preferredAudioLang,
+    preferredSubtitleLang: selectedSubtitleLang,
+    playbackSpeed,
+    isMuted,
+    onFatalFailover: handleTriggerAutoFailover,
+    onAudioSwitchNotice: setAudioSwitchNotice,
+  });
 
   const scheduleControlsAutoHide = () => {
     if (controlsHideTimerRef.current) {
@@ -327,7 +406,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     });
   };
 
-  // Sync native browser/WebView fullscreen state & automatic Landscape/Portrait orientation
+  // Sync fullscreen & orientation
   useEffect(() => {
     const handleFullscreenChange = () => {
       const docAny = document as any;
@@ -338,8 +417,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         scheduleControlsAutoHide();
         lockScreenOrientationSafely('landscape').catch(() => {});
 
-        // If an internal <iframe> triggered fullscreen, promote playerContainerRef so our
-        // React Exit Fullscreen button remains visible on top of the iframe!
         const containerEl = playerContainerRef.current as any;
         if (
           containerEl &&
@@ -376,7 +453,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
       window.removeEventListener('keydown', handleKeyDown);
-      // Restore Portrait orientation & exit fullscreen when VideoPlayerModal closes
       lockScreenOrientationSafely('portrait').catch(() => {});
       const docAny = document as any;
       if (document.fullscreenElement || docAny.webkitFullscreenElement) {
@@ -393,38 +469,29 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, []);
 
-  // PHASE 2A: Verified Embedded Audio Tracks (ONLY real HLS.js or HTML5 tracks — never fake metadata tracks)
-  const [verifiedAudioTracks, setVerifiedAudioTracks] = useState<VerifiedAudioTrack[]>([]);
-  const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<number>(0);
-  const [audioSwitchNotice, setAudioSwitchNotice] = useState<string | null>(null);
+  // Load link_health rows from Supabase on mount
+  useEffect(() => {
+    let active = true;
+    fetchLinkHealthRowsForTmdb(movie.id)
+      .then((rows) => {
+        if (!active || rows.length === 0) return;
+        setSourceHealthMap((prev) => {
+          const next = { ...prev };
+          for (const srv of plan.embedServers) {
+            const match = rows.find((r) => r.source_url === srv.url);
+            if (match && match.status !== 'unknown') {
+              next[srv.id] = match.status;
+            }
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [movie.id]);
 
-  // HLS Quality Levels & Subtitle Tracks
-  const [hlsQualityLevels, setHlsQualityLevels] = useState<HlsQualityLevelOption[]>([]);
-  const [selectedHlsLevel, setSelectedHlsLevel] = useState<number>(-1); // -1 = Auto ABR
-  const [hlsSubtitleTracks, setHlsSubtitleTracks] = useState<HlsSubtitleTrackOption[]>([]);
-  const [selectedHlsSubtitleId, setSelectedHlsSubtitleId] = useState<number>(-1);
-
-  // Drawers (`audio-language`, `quality`, `speed`, `settings`)
-  const [activeDrawer, setActiveDrawer] = useState<
-    'none' | 'language' | 'quality' | 'speed' | 'settings'
-  >('none');
-  const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(false);
-  const [bilingualEnabled, setBilingualEnabled] = useState<boolean>(false);
-  const [selectedSubtitle, setSelectedSubtitle] = useState<string>('English');
-  const [subtitleDelayMs, setSubtitleDelayMs] = useState<number>(0);
-  const [subtitleSize, setSubtitleSize] = useState<'normal' | 'large'>('normal');
-  const [activeQualityLabel, setActiveQualityLabel] = useState<DownloadQuality>(
-    offlineDownload?.quality || '720p'
-  );
-
-  // Determine the active direct video URL (Offline item -> Selected Alternate Language Stream -> Plan direct -> Fallback test stream)
-  const activeDirectSourceUrl =
-    offlineDownload?.sourceUrl ||
-    selectedAltStreamUrl ||
-    plan.directVideoUrl ||
-    plan.testFallbackMp4Url;
-
-  // Evaluate honest audio capability for current playerMode and detected tracks
   const audioCapability = evaluatePlayerAudioCapability({
     playerMode,
     activeDirectUrl: activeDirectSourceUrl,
@@ -466,7 +533,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
   };
 
-  // Reset state cleanly when switching movies
   useEffect(() => {
     const pakDetected = isPakistaniOrUrduContent(movie);
     const nextPlan = resolvePlaybackPlan(
@@ -480,11 +546,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     );
 
     setPlayerMode(
-      offlineDownload
-        ? 'direct'
-        : pakDetected
-        ? 'pak-drama'
-        : 'embed'
+      offlineDownload ? 'direct' : pakDetected ? 'pak-drama' : 'embed'
     );
     setSelectedEmbedId(movieLink?.stream_url ? 'custom-supabase' : 'auto-server-3');
     setSelectedAltStreamUrl(nextPlan.directVideoUrl);
@@ -494,20 +556,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setCustomHindiDubbedUrl(movieLink?.hindi_dubbed_video_url || '');
     setCustomUrduDubbedUrl(movieLink?.urdu_dubbed_video_url || '');
     setCustomEmbedUrl(movieLink?.stream_url || '');
-    setCustomDl480(movieLink?.download_480p || '');
-    setCustomDl720(movieLink?.download_720p || '');
-    setCustomDl1080(movieLink?.download_1080p || '');
+    setCustomSubtitlesJson(
+      movieLink?.subtitles && movieLink.subtitles.length > 0
+        ? JSON.stringify(movieLink.subtitles)
+        : ''
+    );
+    setCustomIntroStart(
+      typeof movieLink?.intro_start === 'number' ? String(movieLink.intro_start) : ''
+    );
+    setCustomIntroEnd(
+      typeof movieLink?.intro_end === 'number' ? String(movieLink.intro_end) : ''
+    );
     setCustomLang(movieLink?.language || movie.language || 'English');
     setLinkSaveMessage(null);
-    setVerifiedAudioTracks([]);
-    setSelectedAudioTrackId(0);
-    setHlsQualityLevels([]);
-    setSelectedHlsLevel(-1);
-    setHlsSubtitleTracks([]);
-    setSelectedHlsSubtitleId(-1);
-    setAudioSwitchNotice(null);
     setActiveDrawer('none');
+    failedEmbedServerIdsRef.current.clear();
     pendingResumeTimeRef.current = null;
+    setCurrentTime(0);
+    setDuration(0);
     setVidsrcWatchProgress(
       getVidSrcSavedProgress({
         tmdbId: movie.id,
@@ -522,7 +588,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     loadPakDramaOrHindiStreams(undefined, selectedEpisode);
   }, [movie.id, selectedEpisode]);
 
-  // Part 1 (1 & 5): Fetch VidSrc.sh Content Info (Movie/TV Metadata) & Fallback to 2Embed on 404/Error
   const loadVidSrcContentInfo = async () => {
     setIsLoadingVidsrcInfo(true);
     const result = await fetchVidSrcContentInfo({
@@ -537,7 +602,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setVidsrcInfoState(result);
     setIsLoadingVidsrcInfo(false);
 
-    // Automatic Fallback to 2Embed (auto-server-3) if VidSrc.sh returns 404 or fails and user hasn't set custom stream
     if (!result.ok && !movieLink?.stream_url) {
       setSelectedEmbedId((prev) => (prev === 'auto-server-1' ? 'auto-server-3' : prev));
     }
@@ -580,7 +644,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [movie.id, movie.mediaType, selectedSeason, selectedEpisode, movieLink?.stream_url]);
 
-  // Part 1 (4): Listen for VidSrc.sh iframe postMessage (PLAYER_EVENT) to save Watch History progress
+  // Listen for VidSrc.sh iframe PLAYER_EVENT messages and sync to Watch History + Supabase
   useEffect(() => {
     const handlePostMessage = (event: MessageEvent) => {
       const parsed = parseVidSrcPlayerEventMessage(event.data, event.origin);
@@ -613,7 +677,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       });
 
       if (parsed.duration > 0) {
-        onProgressUpdate(movie, parsed.currentTime, parsed.duration);
+        reportPlaybackProgress(parsed.currentTime, parsed.duration);
       }
     };
 
@@ -621,9 +685,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return () => {
       window.removeEventListener('message', handlePostMessage);
     };
-  }, [movie, selectedSeason, selectedEpisode, onProgressUpdate]);
+  }, [movie, selectedSeason, selectedEpisode, reportPlaybackProgress]);
 
-  // Phase 4: Run source health checks on demand
   const handleRunSourceHealthChecks = async () => {
     setIsCheckingHealth(true);
     const nextMap: Record<string, SourceAvailabilityStatus> = {};
@@ -643,7 +706,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setIsCheckingHealth(false);
   };
 
-  // Phase 2B: Switch embedded HLS / HTML5 audio track safely without restarting playback
   const handleSelectVerifiedAudioTrack = (track: VerifiedAudioTrack) => {
     setAudioSwitchNotice(null);
     const switchResult = switchEmbeddedAudioTrackSafely({
@@ -655,43 +717,34 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     });
 
     setSelectedAudioTrackId(switchResult.activeTrackId);
+    saveUserPlaybackPreferences({ preferredAudioLang: track.lang }, activeUserId);
 
     if (!switchResult.ok) {
       setAudioSwitchNotice(
         switchResult.error || 'Audio track switch failed — reverted to previous track.'
       );
-      // Mark failed track so user isn't stuck
       setVerifiedAudioTracks((prev) =>
         prev.map((t) => (t.id === track.id ? { ...t, failed: true } : t))
       );
     } else {
       setAudioSwitchNotice(`Switched audio to ${track.displayLabel}`);
-      setTimeout(() => {
-        setAudioSwitchNotice((prev) =>
-          prev === `Switched audio to ${track.displayLabel}` ? null : prev
-        );
-      }, 2800);
+      setTimeout(() => setAudioSwitchNotice(null), 2800);
     }
   };
 
-  // Phase 2C: Switch between Separate Verified Alternate-Language Video Streams while preserving playback position
   const handleSelectAlternateLanguageStream = (altStream: AlternateLanguageStream) => {
     const v = videoRef.current;
     if (v && Number.isFinite(v.currentTime) && v.currentTime > 0) {
       pendingResumeTimeRef.current = v.currentTime;
       pendingResumePlayRef.current = !v.paused;
     }
+    saveUserPlaybackPreferences({ preferredAudioLang: altStream.languageCode }, activeUserId);
     setSelectedAltStreamUrl(altStream.url);
     setPlayerMode('direct');
     setAudioSwitchNotice(`Switched stream source to ${altStream.label}`);
-    setTimeout(() => {
-      setAudioSwitchNotice((prev) =>
-        prev === `Switched stream source to ${altStream.label}` ? null : prev
-      );
-    }, 2800);
+    setTimeout(() => setAudioSwitchNotice(null), 2800);
   };
 
-  // Switch HLS Quality Level or Direct MP4 Resolution while preserving playback position
   const handleSelectQualityOption = (levelIndex: number, directQuality?: DownloadQuality) => {
     if (hlsRef.current && hlsQualityLevels.length > 0) {
       hlsRef.current.currentLevel = levelIndex;
@@ -716,253 +769,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
   };
 
-  // Initialize HLS.js (with real manifest audioTracks, quality levels, subtitle tracks & error fallback) or MP4
-  useEffect(() => {
-    if (playerMode !== 'direct') return;
-    const videoEl = videoRef.current;
-    if (!videoEl) return;
-
-    let hls: Hls | null = null;
-    let isCancelled = false;
-    let cleanupSafariNativeTracks: (() => void) | null = null;
-
-    setVerifiedAudioTracks([]);
-    setHlsQualityLevels([]);
-    setHlsSubtitleTracks([]);
-
-    const restoreSavedPositionIfAny = () => {
-      if (
-        pendingResumeTimeRef.current !== null &&
-        Number.isFinite(pendingResumeTimeRef.current) &&
-        pendingResumeTimeRef.current > 0
-      ) {
-        try {
-          videoEl.currentTime = pendingResumeTimeRef.current;
-        } catch {
-          // ignore
-        }
-        const shouldPlay = pendingResumePlayRef.current;
-        pendingResumeTimeRef.current = null;
-        if (shouldPlay) {
-          videoEl.play().catch(() => {});
-        }
-      }
-    };
-
-    if (activeDirectSourceUrl.toLowerCase().includes('.m3u8')) {
-      if (Hls.isSupported()) {
-        hls = new Hls({
-          enableWorker: true,
-        });
-        hlsRef.current = hls;
-        hls.loadSource(activeDirectSourceUrl);
-        hls.attachMedia(videoEl);
-
-        const syncHlsTracksAndLevels = () => {
-          if (!hls || isCancelled) return;
-
-          // 1. Real HLS Audio Tracks
-          const rawAudio = hls.audioTracks || [];
-          const detected = detectVerifiedAudioTracks(
-            rawAudio.map((t, idx) => ({
-              id: typeof t.id === 'number' ? t.id : idx,
-              name: t.name,
-              lang: t.lang,
-              default: t.default,
-              type: (t as any).type,
-              groupId: t.groupId,
-            })),
-            null,
-            movie.originalLanguageCode
-          );
-          setVerifiedAudioTracks(detected);
-          if (typeof hls.audioTrack === 'number' && hls.audioTrack >= 0) {
-            setSelectedAudioTrackId(hls.audioTrack);
-          } else if (detected.length > 0) {
-            const def = detected.find((d) => d.isDefault) || detected[0];
-            setSelectedAudioTrackId(def.id);
-          }
-
-          // 2. Real HLS Quality Levels
-          if (Array.isArray(hls.levels) && hls.levels.length > 0) {
-            const levels: HlsQualityLevelOption[] = [
-              { index: -1, label: 'Auto (Adaptive)' },
-              ...hls.levels.map((lvl, idx) => ({
-                index: idx,
-                label: lvl.height
-                  ? `${lvl.height}p (${Math.round((lvl.bitrate || 1500000) / 1000)} kbps)`
-                  : `Level ${idx + 1}`,
-                height: lvl.height,
-                bitrateKbps: Math.round((lvl.bitrate || 0) / 1000),
-              })),
-            ];
-            setHlsQualityLevels(levels);
-          }
-
-          // 3. Real HLS Subtitle Tracks
-          if (Array.isArray(hls.subtitleTracks) && hls.subtitleTracks.length > 0) {
-            setHlsSubtitleTracks(
-              hls.subtitleTracks.map((st, idx) => ({
-                id: typeof st.id === 'number' ? st.id : idx,
-                label: st.name || st.lang || `Subtitle ${idx + 1}`,
-                lang: st.lang || 'und',
-              }))
-            );
-          }
-        };
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          syncHlsTracksAndLevels();
-          restoreSavedPositionIfAny();
-        });
-        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, syncHlsTracksAndLevels);
-        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, syncHlsTracksAndLevels);
-        hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
-          if (isCancelled) return;
-          if (typeof data?.id === 'number') {
-            setSelectedAudioTrackId(data.id);
-          }
-        });
-
-        // Automatic fallback if an alternate audio track fails or stream encounters fatal error
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!hls || isCancelled) return;
-          if (
-            data?.details === Hls.ErrorDetails.AUDIO_TRACK_LOAD_ERROR ||
-            data?.details === Hls.ErrorDetails.AUDIO_TRACK_LOAD_TIMEOUT
-          ) {
-            const failedId = hls.audioTrack;
-            setVerifiedAudioTracks((prev) => {
-              const updated = prev.map((t) =>
-                t.id === failedId ? { ...t, failed: true } : t
-              );
-              const fallbackTrack = updated.find((t) => !t.failed);
-              if (fallbackTrack && hls) {
-                hls.audioTrack = fallbackTrack.id;
-                setSelectedAudioTrackId(fallbackTrack.id);
-                setAudioSwitchNotice(
-                  `Alternate audio track failed to load — automatically reverted to ${fallbackTrack.displayLabel}.`
-                );
-              }
-              return updated;
-            });
-            return;
-          }
-
-          if (data?.fatal) {
-            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              hls.startLoad();
-            } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              hls.recoverMediaError();
-            } else {
-              // Automatic fallback to next healthy source in Stream Source Manager
-              const fallbackSrc = selectNextFallbackSource(
-                plan.managedSources,
-                `direct-alt-primary-${movie.originalLanguageCode || 'en'}`
-              );
-              if (fallbackSrc && fallbackSrc.isCrossOriginIframe) {
-                setSelectedEmbedId(fallbackSrc.id);
-                setPlayerMode('embed');
-              }
-            }
-          }
-        });
-      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari / iOS Native HLS Fallback with real native audioTracks synchronization & cleanup
-        videoEl.src = activeDirectSourceUrl;
-        const bindSafariTracks = () => {
-          if (isCancelled) return;
-          if (cleanupSafariNativeTracks) {
-            cleanupSafariNativeTracks();
-          }
-          cleanupSafariNativeTracks = attachSafariNativeAudioTrackListeners(
-            videoEl as any,
-            movie.originalLanguageCode,
-            (detected, enabledIdx) => {
-              if (isCancelled) return;
-              setVerifiedAudioTracks(detected);
-              setSelectedAudioTrackId(enabledIdx);
-            }
-          );
-        };
-        bindSafariTracks();
-      }
-    } else {
-      videoEl.src = activeDirectSourceUrl;
-      cleanupSafariNativeTracks = attachSafariNativeAudioTrackListeners(
-        videoEl as any,
-        movie.originalLanguageCode,
-        (detected, enabledIdx) => {
-          if (isCancelled) return;
-          setVerifiedAudioTracks(detected);
-          setSelectedAudioTrackId(enabledIdx);
-        }
-      );
-    }
-
-    const handleNativeLoadedMetadata = () => {
-      if (isCancelled) return;
-      restoreSavedPositionIfAny();
-      // Re-attach/sync Safari native audioTracks once metadata is loaded if not using HLS.js
-      if (!hls && (videoEl as any).audioTracks) {
-        if (cleanupSafariNativeTracks) {
-          cleanupSafariNativeTracks();
-        }
-        cleanupSafariNativeTracks = attachSafariNativeAudioTrackListeners(
-          videoEl as any,
-          movie.originalLanguageCode,
-          (detected, enabledIdx) => {
-            if (isCancelled) return;
-            setVerifiedAudioTracks(detected);
-            setSelectedAudioTrackId(enabledIdx);
-          }
-        );
-      }
-    };
-    videoEl.addEventListener('loadedmetadata', handleNativeLoadedMetadata);
-
-    videoEl.playbackRate = playbackSpeed;
-    videoEl.muted = isMuted;
-    const shouldAutoPlay =
-      pendingResumeTimeRef.current !== null ? pendingResumePlayRef.current : true;
-    if (shouldAutoPlay) {
-      videoEl
-        .play()
-        .then(() => {
-          if (!isCancelled) setIsPlaying(true);
-        })
-        .catch(() => {
-          if (isCancelled) return;
-          videoEl.muted = true;
-          setIsMuted(true);
-          videoEl.play().catch(() => {});
-        });
-    } else {
-      videoEl.pause();
-      setIsPlaying(false);
-    }
-
-    return () => {
-      isCancelled = true;
-      videoEl.removeEventListener('loadedmetadata', handleNativeLoadedMetadata);
-      if (cleanupSafariNativeTracks) {
-        cleanupSafariNativeTracks();
-        cleanupSafariNativeTracks = null;
-      }
-      if (hls) {
-        hls.destroy();
-      }
-      hlsRef.current = null;
-      try {
-        videoEl.pause();
-        videoEl.removeAttribute('src');
-        videoEl.load();
-      } catch {
-        // ignore cleanup errors
-      }
-    };
-  }, [activeDirectSourceUrl, playerMode, movie.originalLanguageCode]);
-
   const handleTogglePlay = () => {
     if (isLocked) return;
     const videoEl = videoRef.current;
@@ -986,18 +792,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       const nextTime = Math.max(0, Math.min(videoEl.duration, videoEl.currentTime + deltaSeconds));
       videoEl.currentTime = nextTime;
       setCurrentTime(nextTime);
-    } else {
+    } else if (duration > 0) {
       setCurrentTime((prev) => Math.max(0, Math.min(duration, prev + deltaSeconds)));
     }
   };
 
-  const handleScrub = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSeekTo = (targetSeconds: number) => {
     if (isLocked) return;
-    const nextVal = Number(e.target.value);
-    setCurrentTime(nextVal);
+    const clamped = Math.max(0, targetSeconds);
+    setCurrentTime(clamped);
     if (videoRef.current && Number.isFinite(videoRef.current.duration)) {
       try {
-        videoRef.current.currentTime = nextVal;
+        videoRef.current.currentTime = clamped;
       } catch {
         // ignore
       }
@@ -1006,10 +812,20 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   const handleSelectSpeed = (spd: number) => {
     setPlaybackSpeed(spd);
+    savedNormalSpeedRef.current = spd;
+    saveUserPlaybackPreferences({ playbackSpeed: spd }, activeUserId);
     if (videoRef.current) {
       videoRef.current.playbackRate = spd;
     }
     setActiveDrawer('none');
+  };
+
+  const handleTemporarySpeedBoost = (active: boolean) => {
+    const targetSpeed = active ? 2 : savedNormalSpeedRef.current || 1;
+    setPlaybackSpeed(targetSpeed);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = targetSpeed;
+    }
   };
 
   const handleCycleFitMode = () => {
@@ -1029,7 +845,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     try {
       if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
         document.exitFullscreen().catch(() => {});
-      } else if (docAny.webkitFullscreenElement && typeof docAny.webkitExitFullscreen === 'function') {
+      } else if (
+        docAny.webkitFullscreenElement &&
+        typeof docAny.webkitExitFullscreen === 'function'
+      ) {
         docAny.webkitExitFullscreen();
       }
     } catch {
@@ -1057,7 +876,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         el.webkitRequestFullscreen();
       }
     } catch {
-      // CSS fullscreen lock (`cinebox-player-fullscreen`) remains active even if native API is unsupported
+      // CSS fullscreen fallback active
     }
   };
 
@@ -1074,7 +893,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         setIsPipActive(true);
       }
     } catch {
-      // Picture-in-Picture not supported or blocked
+      // PiP not supported
     }
   };
 
@@ -1083,6 +902,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     if (!onSaveCustomMovieLink) return;
     setIsSavingLink(true);
     setLinkSaveMessage(null);
+
+    let parsedSubtitles: SubtitleTrackOption[] = movieLink?.subtitles || [];
+    if (customSubtitlesJson.trim()) {
+      try {
+        parsedSubtitles = sanitizeSubtitleTracksList(JSON.parse(customSubtitlesJson));
+      } catch {
+        setIsSavingLink(false);
+        setLinkSaveMessage('Invalid Subtitles JSON format. Expected [{"lang":"ur","label":"Urdu","url":"https://..."}]');
+        return;
+      }
+    }
+
+    const introStartVal = customIntroStart.trim() ? Number(customIntroStart.trim()) : null;
+    const introEndVal = customIntroEnd.trim() ? Number(customIntroEnd.trim()) : null;
+
     const res = await onSaveCustomMovieLink({
       tmdb_id: movie.id,
       title: movie.title,
@@ -1091,18 +925,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       hindi_dubbed_video_url: customHindiDubbedUrl.trim() || null,
       urdu_dubbed_video_url: customUrduDubbedUrl.trim() || null,
       stream_url: customEmbedUrl.trim() || null,
-      download_480p: customDl480.trim() || customDirectUrl.trim() || null,
-      download_720p: customDl720.trim() || customDirectUrl.trim() || null,
-      download_1080p: customDl1080.trim() || customDl720.trim() || customDirectUrl.trim() || null,
-      file_size_480p: '480.0MB',
-      file_size_720p: '1050.0MB',
-      file_size_1080p: '2150.0MB',
+      subtitles: parsedSubtitles,
+      intro_start: Number.isFinite(introStartVal) ? introStartVal : null,
+      intro_end: Number.isFinite(introEndVal) ? introEndVal : null,
     });
     setIsSavingLink(false);
     if (res.ok) {
-      setLinkSaveMessage(
-        'Saved! Custom stream, alternate language streams & download links are now active.'
-      );
+      setLinkSaveMessage('Saved! Stream, subtitle tracks & intro markers are now active.');
       if (customDirectUrl.trim()) {
         setSelectedAltStreamUrl(customDirectUrl.trim());
         setPlayerMode('direct');
@@ -1118,21 +947,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
   };
 
-  const activeCue =
-    SUBTITLE_CUES.find((c) => currentTime % 120 >= c.start && currentTime % 120 < c.end) ||
-    SUBTITLE_CUES[0];
-
-  const activeEmbedServer =
-    plan.embedServers.find((s) => s.id === selectedEmbedId) || plan.embedServers[0];
+  const activeEmbedServerIdx = Math.max(
+    0,
+    plan.embedServers.findIndex((s) => s.id === selectedEmbedId)
+  );
+  const activeEmbedServer = plan.embedServers[activeEmbedServerIdx] || plan.embedServers[0];
+  const activeFriendlySourceName = formatUserFriendlySourceLabel(activeEmbedServerIdx);
 
   const cleanIframeAttrs = getCleanIframeAttributes(
     activeEmbedServer?.url,
-    `${movie.title} - ${activeEmbedServer?.label || 'Stream Player'}`
+    `${movie.title} - ${activeFriendlySourceName}`
   );
 
   const vidsrcIframeAttrs = getVidSrcPlayerIframeAttributes(
     activeEmbedServer?.url,
-    `${movie.title} - ${activeEmbedServer?.label || 'Stream Player'}`,
+    `${movie.title} - ${activeFriendlySourceName}`,
     isVidSrcAdBlockerEnabled
   );
 
@@ -1143,7 +972,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     playerMode === 'embed' && isCurrentServerVidSrc
   );
 
-  // Real VidSrc.sh Ad-Filtering Logic Layer (Network Request Interception + Popup/DOM/Focus Shield)
   useEffect(() => {
     const cleanup = installVidSrcNetworkAdInterceptor({
       enabled: playerMode === 'embed' && isVidSrcAdBlockerEnabled,
@@ -1156,27 +984,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return cleanup;
   }, [playerMode, isCurrentServerVidSrc, isVidSrcAdBlockerEnabled]);
 
-  const progressPercent = Math.min(100, Math.max(0, (currentTime / Math.max(1, duration)) * 100));
-
-  const seasonsList =
-    movie.seasons && movie.seasons.length > 0
-      ? movie.seasons
-      : [
-          { seasonNumber: 1, name: 'Season 1', episodeCount: 12 },
-          { seasonNumber: 2, name: 'Season 2', episodeCount: 10 },
-          { seasonNumber: 3, name: 'Season 3', episodeCount: 10 },
-        ];
-
-  const currentSeasonInfo =
-    seasonsList.find((s) => s.seasonNumber === selectedSeason) || seasonsList[0];
-  const episodeCount = Math.min(36, Math.max(1, currentSeasonInfo?.episodeCount || 12));
-
   const displayPlayerTitle =
     movie.mediaType === 'tv'
       ? `${movie.title} — S${selectedSeason}:E${selectedEpisode}`
       : `${activeQualityLabel.toUpperCase()} ${movie.title}`;
 
   const fsConfig = getFullscreenPlayerConfig(isFullscreen, fitMode, areControlsVisible);
+  const subtitleTracksList = sanitizeSubtitleTracksList(movieLink?.subtitles || []);
+  const effectiveResumeSeconds =
+    savedResumePosition > 0
+      ? savedResumePosition
+      : vidsrcWatchProgress?.currentTime || 0;
+  const effectiveResumeDuration =
+    savedDuration > 0 ? savedDuration : vidsrcWatchProgress?.duration || 0;
 
   return (
     <div
@@ -1185,17 +1005,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       role="dialog"
       aria-label={`Playing ${movie.title}`}
     >
-      {/* Dynamic CSS Hiding Rules Layer (Injected only when VidSrc.sh is active & Adblocker Toggle Switch is ON) */}
+      {/* Dynamic CSS Hiding Rules Layer for VidSrc.sh Adblocker */}
       {vidsrcAdBlockCss && (
         <style id="cinebox-vidsrc-adblocker-css" data-testid="vidsrc-adblocker-css-rules">
           {vidsrcAdBlockCss}
         </style>
       )}
+
       <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#000000] border-0 outline-none">
-        {/* ===================================================================
-            MOBILE-FIRST TOP PLAYER BAR (OUTSIDE ASPECT-VIDEO CONTAINER)
-            PHASE 3 RULE: Never display a fake embedded audio selector on cross-origin iframes.
-           =================================================================== */}
+        {/* TOP PLAYER HEADER FOR EMBED / PAK-DRAMA / TRAILER MODES */}
         {!isFullscreen && playerMode === 'embed' && (
           <div
             data-testid="player-top-header-bar"
@@ -1216,13 +1034,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   {displayPlayerTitle}
                 </span>
                 <span className="text-[10px] sm:text-[11px] font-semibold text-[#10d97b] truncate block">
-                  Playing on {activeEmbedServer?.label || 'Server 3 (2Embed.cc)'} · Cross-Origin Provider Audio
+                  Playing on {activeFriendlySourceName} · Popup &amp; Ad Protection Active
                 </span>
               </div>
             </div>
 
             <div className="relative flex items-center gap-1.5 sm:gap-2 shrink-0">
-              {/* If verified Separate Alternate Language Video Streams exist for this movie, allow switching to them */}
               {plan.alternateLanguageStreams.length > 0 && (
                 <button
                   type="button"
@@ -1234,13 +1051,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-[#10d97b]/50 text-[#10d97b] text-[11px] sm:text-xs font-extrabold flex items-center gap-1.5 min-h-[36px] transition-colors"
                 >
                   <Volume2 className="w-3.5 h-3.5" />
-                  <span>
-                    Direct Stream ({plan.alternateLanguageStreams.length} Lang)
-                  </span>
+                  <span>Direct Stream ({plan.alternateLanguageStreams.length} Lang)</span>
                 </button>
               )}
 
-              {/* Interactive 'Adblocker' Toggle Switch targeting vidsrc.sh */}
               <button
                 type="button"
                 role="switch"
@@ -1248,7 +1062,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 aria-label="Adblocker toggle switch for VidSrc.sh"
                 data-testid="vidsrc-adblocker-toggle-btn"
                 onClick={handleToggleVidSrcAdBlocker}
-                title="Toggle Adblocker (Network Request Interceptor & CSS Hiding Layer for vidsrc.sh)"
                 className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold shadow-md flex items-center gap-2 min-h-[36px] transition-all active:scale-95 border ${
                   isVidSrcAdBlockerEnabled
                     ? 'bg-emerald-950/95 hover:bg-emerald-900 border-[#10d97b] text-[#10d97b]'
@@ -1261,7 +1074,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                 )}
                 <span>Adblocker</span>
-                {/* Visual Toggle Switch Track & Thumb */}
                 <span
                   aria-hidden="true"
                   className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
@@ -1329,7 +1141,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   {pakDramaStreams[activePakStreamIdx]?.title || displayPlayerTitle}
                 </span>
                 <span className="text-[10px] sm:text-[11px] font-semibold text-[#10d97b] truncate block">
-                  🇵🇰 Pak Drama &amp; Hindi Server ·{' '}
+                  Pak Drama &amp; Hindi Stream ·{' '}
                   {pakDramaStreams[activePakStreamIdx]
                     ? `Duration: ${pakDramaStreams[activePakStreamIdx].durationFormatted}`
                     : 'Searching Full Episode / Hindi Stream...'}
@@ -1348,19 +1160,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
                 <span>Fullscreen</span>
               </button>
-
-              {pakDramaStreams[activePakStreamIdx] && (
-                <a
-                  href={pakDramaStreams[activePakStreamIdx].watchUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  data-testid="open-in-new-tab-btn"
-                  className="hidden md:inline-flex px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-xs font-extrabold shadow-lg items-center gap-1.5 min-h-[36px] shrink-0"
-                >
-                  <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
-                  <span>Open in New Tab</span>
-                </a>
-              )}
             </div>
           </div>
         )}
@@ -1393,13 +1192,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               }}
               className="px-3 py-1.5 rounded-lg bg-[#10d97b] text-slate-950 text-xs font-bold transition-colors shrink-0"
             >
-              Back to Server 3
+              Back to Source 1
             </button>
           </div>
         )}
 
         {/* ===================================================================
-            HYBRID VIDEO PLAYER SURFACE (100% Pure #000000 Borderless Fullscreen)
+            HYBRID VIDEO PLAYER SURFACE
            =================================================================== */}
         <div
           ref={playerContainerRef}
@@ -1412,7 +1211,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           className={fsConfig.containerClassName}
           style={{ filter: `brightness(${brightness}%)`, backgroundColor: '#000000' }}
         >
-          {/* TOP-EDGE WAKE ZONE WHEN CONTROLS ARE HIDDEN IN FULLSCREEN (SO IFRAME VIEWERS CAN WAKE EXIT BUTTON) */}
           {isFullscreen && !areControlsVisible && (
             <div
               data-testid="fullscreen-top-wake-strip"
@@ -1429,7 +1227,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             />
           )}
 
-          {/* CONTROLS-SYNCED TOP-LEFT & TOP-RIGHT EXIT FULLSCREEN / BACK BUTTONS */}
           {fsConfig.showAlwaysVisibleExitButton && (
             <>
               <button
@@ -1503,7 +1300,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     {pakDramaError || 'No stream found for this query.'}
                   </div>
                   <p className="text-xs text-slate-400">
-                    Use the search bar below the player to search any Episode number or Hindi Dubbed title, or switch to Server 3.
+                    Use the search bar below the player to search any Episode number, or switch to Source 1.
                   </p>
                 </div>
               )}
@@ -1524,17 +1321,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 </div>
               )}
 
-              {/* VidSrc.sh Smart Click-Shield Perimeter Layer:
-                  Intercepts clickjacking/popunder clicks (aclib.runPop & DGA mousedown listeners)
-                  across the video canvas dead-zones while keeping Center Play/Seek controls,
-                  Bottom Scrubber/Fullscreen bar, and Top-Right Episode selector 100% clickable. */}
               {vidsrcIframeAttrs.isVidSrcAdBlockerActive && (
                 <div
                   data-testid="vidsrc-click-shield-layer"
                   className="absolute inset-0 z-30 pointer-events-none select-none"
                   aria-hidden="true"
                 >
-                  {/* Top Canvas Ad-Shield Zone (leaves top-right 240px open for TV Season/Episode selector) */}
                   <div
                     data-testid="vidsrc-shield-zone-top"
                     onClick={(e) => {
@@ -1545,7 +1337,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     }}
                     className="absolute top-0 left-0 right-[240px] h-[26%] pointer-events-auto cursor-default"
                   />
-                  {/* Left Wing Ad-Shield Zone */}
                   <div
                     data-testid="vidsrc-shield-zone-left"
                     onClick={(e) => {
@@ -1556,7 +1347,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     }}
                     className="absolute top-[26%] bottom-[60px] left-0 w-[22%] pointer-events-auto cursor-default"
                   />
-                  {/* Right Wing Ad-Shield Zone */}
                   <div
                     data-testid="vidsrc-shield-zone-right"
                     onClick={(e) => {
@@ -1567,7 +1357,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     }}
                     className="absolute top-[52px] bottom-[60px] right-0 w-[22%] pointer-events-auto cursor-default"
                   />
-                  {/* Lower-Middle Canvas Ad-Shield Zone (above 60px bottom control bar, below center Play button) */}
                   <div
                     data-testid="vidsrc-shield-zone-lower"
                     onClick={(e) => {
@@ -1588,15 +1377,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 data-adblock-policy={vidsrcIframeAttrs.sandbox || 'none'}
                 src={cleanIframeAttrs.src}
                 allowFullScreen={cleanIframeAttrs.allowFullScreen}
+                onError={handleTriggerAutoFailover}
                 title={cleanIframeAttrs.title}
                 className="w-full h-full border-0 bg-[#000000]"
                 style={{ backgroundColor: '#000000' }}
               />
             </div>
           ) : (
-            /* =================================================================
-               MODE 1: DIRECT NATIVE HTML5 + HLS AUDIO SYSTEM 2.0 PLAYER
-               ================================================================= */
+            /* DIRECT NATIVE HTML5 + HLS PLAYER MODULAR STACK */
             <>
               <video
                 ref={videoRef}
@@ -1608,7 +1396,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   setCurrentTime(v.currentTime);
                   if (Number.isFinite(v.duration) && v.duration > 0) {
                     setDuration(v.duration);
-                    onProgressUpdate(movie, v.currentTime, v.duration);
+                    reportPlaybackProgress(v.currentTime, v.duration);
+                  }
+                }}
+                onEnded={() => {
+                  setIsPlaying(false);
+                  if (movie.mediaType === 'tv' && selectedEpisode < episodeCount) {
+                    startNextEpisodeCountdown();
                   }
                 }}
                 onLoadedMetadata={(e) => {
@@ -1616,8 +1410,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   if (Number.isFinite(v.duration) && v.duration > 0) {
                     setDuration(v.duration);
                   }
-
-                  // Restore playback position & playback state if user switched Alternate Language Stream or Quality
                   if (
                     pendingResumeTimeRef.current !== null &&
                     Number.isFinite(pendingResumeTimeRef.current) &&
@@ -1639,31 +1431,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       setIsPlaying(false);
                     }
                   }
-
-                  // Inspect native HTML5 <video>.audioTracks if not already populated by HLS.js
-                  const nativeTracks = (
-                    v as unknown as {
-                      audioTracks?: ArrayLike<{
-                        id?: string;
-                        label?: string;
-                        language?: string;
-                        kind?: string;
-                        enabled?: boolean;
-                      }>;
-                    }
-                  ).audioTracks;
-                  if (
-                    nativeTracks &&
-                    nativeTracks.length > 0 &&
-                    (!hlsRef.current || !hlsRef.current.audioTracks?.length)
-                  ) {
-                    const detected = detectVerifiedAudioTracks(
-                      null,
-                      nativeTracks,
-                      movie.originalLanguageCode
-                    );
-                    setVerifiedAudioTracks(detected);
-                  }
                 }}
                 className={`relative z-10 w-full h-full bg-black ${
                   fitMode === 'cover'
@@ -1674,805 +1441,172 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 }`}
               />
 
-              {/* Subtle Top & Bottom Cinema Scrims */}
-              <div
-                className={`pointer-events-none absolute inset-0 z-20 bg-gradient-to-b from-black/75 via-transparent to-black/85 transition-opacity duration-200 ${
-                  areControlsVisible ? 'opacity-100' : 'opacity-0'
-                }`}
+              {/* Gesture Layer (Double-tap seek, Vertical swipe brightness/volume, Long-press 2x, Pinch fitMode, Keyboard shortcuts) */}
+              <PlayerGestures
+                enabled={playerMode === 'direct'}
+                isLocked={isLocked}
+                brightness={brightness}
+                volume={volume}
+                playbackSpeed={playbackSpeed}
+                onSeekOffset={handleSeekOffset}
+                onChangeBrightness={setBrightness}
+                onChangeVolume={(nextVol) => {
+                  setVolume(nextVol);
+                  setIsMuted(nextVol === 0);
+                  if (videoRef.current) {
+                    videoRef.current.volume = nextVol / 100;
+                    videoRef.current.muted = nextVol === 0;
+                  }
+                }}
+                onTemporarySpeedBoost={handleTemporarySpeedBoost}
+                onCycleFitMode={handleCycleFitMode}
+                onTogglePlay={handleTogglePlay}
+                onToggleFullscreen={handleToggleFullscreen}
+                onToggleMute={() =>
+                  setIsMuted((m) => {
+                    const next = !m;
+                    if (videoRef.current) videoRef.current.muted = next;
+                    return next;
+                  })
+                }
+                onToggleSubtitles={() => {
+                  const next = !subtitlesEnabled;
+                  setSubtitlesEnabled(next);
+                  saveSubtitlePreferences({ enabled: next }, activeUserId);
+                }}
+                onWakeControls={() => handleWakeOrToggleControls(true)}
               />
 
-              {/* Audio Switch / Fallback Toast Notification inside Player */}
-              {audioSwitchNotice && (
-                <div
-                  data-testid="audio-switch-notice"
-                  className="absolute top-14 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-black/85 border border-[#10d97b]/50 text-xs font-semibold text-[#10d97b] shadow-lg"
-                >
-                  {audioSwitchNotice}
-                </div>
-              )}
+              {/* Real .VTT / .SRT Subtitle Layer with RTL Urdu Nastaliq support */}
+              <SubtitleLayer
+                subtitlesEnabled={subtitlesEnabled}
+                subtitleTracks={subtitleTracksList}
+                selectedSubtitleLang={selectedSubtitleLang}
+                currentTime={currentTime}
+                subtitleDelayMs={subtitleDelayMs}
+                subtitleSize={subtitleSize}
+                subtitleBgOpacity={subtitleBgOpacity}
+                customSubtitleText={customSubtitleText}
+              />
 
-              {/* TOP PLAYER BAR */}
-              <div
-                className={`absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-3 transition-opacity duration-200 ${
-                  areControlsVisible
-                    ? 'opacity-100 pointer-events-auto'
-                    : 'opacity-0 pointer-events-none'
-                }`}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <button
-                    type="button"
-                    data-testid="close-player-btn"
-                    onClick={onClose}
-                    aria-label="Back to catalog"
-                    className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full bg-black/40 hover:bg-black/70 text-white transition-colors"
-                  >
-                    <ChevronLeft className="w-6 h-6" />
-                  </button>
-                  <div className="truncate">
-                    <h2 className="text-sm sm:text-base font-semibold text-white tracking-wide truncate">
-                      {displayPlayerTitle}
-                    </h2>
-                    <span className="text-[11px] text-[#10d97b] font-medium block truncate">
-                      {offlineDownload
-                        ? `Offline Internal Storage Playback (${offlineDownload.fileSizeMB}MB)`
-                        : activeAlternateStream
-                        ? `Active Stream: ${activeAlternateStream.label} (${activeAlternateStream.format.toUpperCase()})`
-                        : activeEmbeddedTrack
-                        ? `Verified Audio: ${activeEmbeddedTrack.displayLabel}`
-                        : 'CineBox Direct HTML5 / HLS Stream Active'}
-                    </span>
-                  </div>
-                </div>
-
-                {!isLocked && (
-                  <div className="flex items-center gap-2.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setIsMuted((m) => {
-                          const next = !m;
-                          if (videoRef.current) videoRef.current.muted = next;
-                          return next;
-                        })
-                      }
-                      aria-label={isMuted ? 'Unmute audio' : 'Mute audio'}
-                      className="flex flex-col items-center justify-center min-w-[40px] min-h-[40px] text-slate-200 hover:text-white transition-colors"
-                    >
-                      {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-                      <span className="text-[10px] mt-0.5">{isMuted ? 'Muted' : `${volume}%`}</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleTogglePictureInPicture}
-                      aria-label="Picture in Picture"
-                      className={`flex flex-col items-center justify-center min-w-[40px] min-h-[40px] transition-colors ${
-                        isPipActive ? 'text-[#10d97b]' : 'text-slate-200 hover:text-white'
-                      }`}
-                    >
-                      <PictureInPicture2 className="w-5 h-5" />
-                      <span className="text-[10px] mt-0.5">PiP</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setActiveDrawer(activeDrawer === 'settings' ? 'none' : 'settings')
-                      }
-                      aria-label="Player Setting"
-                      className="flex flex-col items-center justify-center min-w-[40px] min-h-[40px] text-slate-200 hover:text-white transition-colors"
-                    >
-                      <Settings className="w-5 h-5" />
-                      <span className="text-[10px] mt-0.5">Setting</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* CENTER PLAYER CONTROLS: `Tap to Lock` + `10s Rewind` + `Play/Pause` + `10s Forward` */}
-              <div
-                className={`absolute inset-x-0 top-[44%] -translate-y-1/2 z-30 flex items-center justify-between px-3 sm:px-8 pointer-events-none transition-opacity duration-200 ${
-                  areControlsVisible ? 'opacity-100' : 'opacity-0'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsLocked((prev) => !prev);
-                    setActiveDrawer('none');
-                  }}
-                  aria-label={isLocked ? 'Unlock Screen Controls' : 'Tap to Lock'}
-                  className="pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl bg-black/50 hover:bg-black/75 backdrop-blur-sm text-white text-[11px] sm:text-sm font-medium transition-colors min-h-[38px] sm:min-h-[44px]"
-                >
-                  {isLocked ? (
-                    <>
-                      <Lock className="w-4 h-4 sm:w-5 sm:h-5 text-[#10d97b]" />
-                      <span>Locked</span>
-                    </>
-                  ) : (
-                    <>
-                      <Unlock className="w-4 h-4 sm:w-5 sm:h-5 text-white/90" />
-                      <span>Tap to Lock</span>
-                    </>
-                  )}
-                </button>
-
-                {!isLocked && (
-                  <div className="pointer-events-auto flex items-center gap-4 sm:gap-12">
-                    <button
-                      type="button"
-                      onClick={() => handleSeekOffset(-10)}
-                      aria-label="Rewind 10 seconds"
-                      className="relative flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-black/40 hover:bg-black/65 text-white transition-transform active:scale-95"
-                    >
-                      <RotateCcw className="w-6 h-6 sm:w-8 sm:h-8 stroke-[1.75]" />
-                      <span className="absolute text-[9px] sm:text-[10px] font-bold">10</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleTogglePlay}
-                      aria-label={isPlaying ? 'Pause video' : 'Play video'}
-                      className="flex items-center justify-center w-11 h-11 sm:w-14 sm:h-14 rounded-full bg-black/50 hover:bg-black/75 text-white transition-transform active:scale-95"
-                    >
-                      {isPlaying ? (
-                        <Pause className="w-7 h-7 sm:w-9 sm:h-9 fill-white" />
-                      ) : (
-                        <Play className="w-7 h-7 sm:w-9 sm:h-9 fill-white ml-0.5" />
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleSeekOffset(10)}
-                      aria-label="Forward 10 seconds"
-                      className="relative flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-black/40 hover:bg-black/65 text-white transition-transform active:scale-95"
-                    >
-                      <RotateCw className="w-6 h-6 sm:w-8 sm:h-8 stroke-[1.75]" />
-                      <span className="absolute text-[9px] sm:text-[10px] font-bold">10</span>
-                    </button>
-                  </div>
-                )}
-
-                <div className="w-16 sm:w-24" />
-              </div>
-
-              {/* LIVE SUBTITLE CAPTION OVERLAY */}
-              {subtitlesEnabled && (
-                <div className="pointer-events-none absolute bottom-14 sm:bottom-16 inset-x-0 z-30 flex flex-col items-center justify-center px-4 text-center">
-                  <span
-                    className={`px-2.5 py-0.5 rounded bg-black/65 text-white font-medium tracking-wide drop-shadow ${
-                      subtitleSize === 'large' ? 'text-sm sm:text-xl' : 'text-[11px] sm:text-base'
-                    }`}
-                  >
-                    {selectedSubtitle === 'Hindi'
-                      ? activeCue.hi
-                      : selectedSubtitle === 'Urdu'
-                      ? activeCue.ur
-                      : activeCue.en}
-                  </span>
-                  {bilingualEnabled && (
-                    <span className="mt-0.5 px-2 py-0.5 rounded bg-black/65 text-[#10d97b] text-[10px] sm:text-sm font-medium">
-                      {activeCue.hi}
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* BOTTOM PLAYER BAR (Mobile-Aligned Controls: Play/Pause, Seek Bar, Subtitles CC, Settings Gear, Quality, Speed, Fit/Cover, Fullscreen) */}
-              {!isLocked && (
-                <div
-                  data-testid="player-bottom-controls-bar"
-                  onClick={(e) => e.stopPropagation()}
-                  className={`absolute bottom-0 left-0 right-0 z-30 transition-opacity duration-200 ${
-                    fsConfig.bottomControlsSafePaddingClass
-                  } ${
-                    areControlsVisible
-                      ? 'opacity-100 pointer-events-auto'
-                      : 'opacity-0 pointer-events-none'
-                  }`}
-                >
-                  {/* Row 1: Mobile-Friendly Seek Bar & Timecodes */}
-                  <div className="flex items-center gap-2.5 sm:gap-3 mb-2">
-                    <span className="text-[11px] sm:text-xs font-mono tabular-nums text-slate-200 shrink-0">
-                      {formatPlayerTimecode(currentTime)}
-                    </span>
-                    <div className="relative flex-1 flex items-center py-1">
-                      <div className="w-full h-1.5 sm:h-2 bg-white/30 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-[#10d97b]"
-                          style={{ width: `${progressPercent}%` }}
-                        />
-                      </div>
-                      <input
-                        type="range"
-                        min={0}
-                        max={duration}
-                        value={currentTime}
-                        onChange={handleScrub}
-                        aria-label="Seek video timeline"
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer touch-none"
-                      />
-                      <div
-                        className="pointer-events-none absolute w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-white ring-2 ring-[#10d97b] shadow-md -translate-x-1/2"
-                        style={{ left: `${progressPercent}%` }}
-                      />
-                    </div>
-                    <span className="text-[11px] sm:text-xs font-mono tabular-nums text-slate-200 shrink-0">
-                      {formatPlayerTimecode(duration)}
-                    </span>
-                  </div>
-
-                  {/* Row 2: Bottom Controls Bar (Left: Play/Pause & Seek | Right: CC Subtitles, Gear Settings, Quality, Fit, Fullscreen) */}
-                  <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-                    <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={handleTogglePlay}
-                        aria-label={isPlaying ? 'Pause' : 'Play'}
-                        className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b] transition-colors shrink-0"
-                      >
-                        {isPlaying ? (
-                          <Pause className="w-5 h-5 fill-current" />
-                        ) : (
-                          <Play className="w-5 h-5 fill-current ml-0.5" />
-                        )}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSeekOffset(-10)}
-                        aria-label="Seek backward 10 seconds"
-                        className="min-h-[38px] px-2 rounded-lg bg-white/5 hover:bg-white/15 text-slate-200 hover:text-white text-[11px] font-bold flex items-center gap-1 transition-colors shrink-0"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>10s</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSeekOffset(10)}
-                        aria-label="Seek forward 10 seconds"
-                        className="min-h-[38px] px-2 rounded-lg bg-white/5 hover:bg-white/15 text-slate-200 hover:text-white text-[11px] font-bold flex items-center gap-1 transition-colors shrink-0"
-                      >
-                        <RotateCw className="w-3.5 h-3.5" />
-                        <span>10s</span>
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-2 sm:gap-3.5 text-[11px] sm:text-xs font-medium text-white shrink-0">
-                      {/* 1. Subtitles (CC) & Audio Language Button */}
-                      <button
-                        type="button"
-                        data-testid="audio-language-drawer-btn"
-                        onClick={() =>
-                          setActiveDrawer(activeDrawer === 'language' ? 'none' : 'language')
-                        }
-                        aria-label="Subtitles and Audio"
-                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg min-h-[38px] transition-colors ${
-                          activeDrawer === 'language'
-                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
-                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
-                        }`}
-                      >
-                        <Subtitles className="w-4 h-4 shrink-0" />
-                        <span>
-                          CC / Audio
-                          {audioCapability.canSwitchEmbeddedAudio && activeEmbeddedTrack
-                            ? ` (${activeEmbeddedTrack.languageName})`
-                            : activeAlternateStream
-                            ? ` (${activeAlternateStream.languageName})`
-                            : ''}
-                        </span>
-                      </button>
-
-                      {/* 2. Settings (Gear) Button aligned in bottom bar */}
-                      <button
-                        type="button"
-                        data-testid="bottom-settings-gear-btn"
-                        onClick={() =>
-                          setActiveDrawer(activeDrawer === 'settings' ? 'none' : 'settings')
-                        }
-                        aria-label="Player Settings"
-                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg min-h-[38px] transition-colors ${
-                          activeDrawer === 'settings'
-                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
-                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
-                        }`}
-                      >
-                        <Settings className="w-4 h-4 shrink-0" />
-                        <span>Settings</span>
-                      </button>
-
-                      {/* 3. Video Quality Selector Button */}
-                      <button
-                        type="button"
-                        data-testid="video-quality-drawer-btn"
-                        onClick={() =>
-                          setActiveDrawer(activeDrawer === 'quality' ? 'none' : 'quality')
-                        }
-                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg min-h-[38px] transition-colors ${
-                          activeDrawer === 'quality'
-                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
-                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
-                        }`}
-                      >
-                        <Layers className="w-4 h-4 shrink-0" />
-                        <span>
-                          {hlsQualityLevels.length > 0
-                            ? selectedHlsLevel === -1
-                              ? 'Auto'
-                              : hlsQualityLevels.find((l) => l.index === selectedHlsLevel)?.label.split(' ')[0] || 'HD'
-                            : activeQualityLabel}
-                        </span>
-                      </button>
-
-                      {/* 4. Playback Speed Selector Button */}
-                      <button
-                        type="button"
-                        data-testid="playback-speed-drawer-btn"
-                        onClick={() =>
-                          setActiveDrawer(activeDrawer === 'speed' ? 'none' : 'speed')
-                        }
-                        className={`flex items-center gap-1 px-2 py-1.5 rounded-lg min-h-[38px] transition-colors ${
-                          activeDrawer === 'speed'
-                            ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
-                            : 'bg-white/10 hover:bg-white/20 text-white hover:text-[#10d97b]'
-                        }`}
-                      >
-                        <Gauge className="w-4 h-4 shrink-0" />
-                        <span>{playbackSpeed}x</span>
-                      </button>
-
-                      {/* 5. Fit / Cover Mode (Available on both mobile & desktop to eliminate letterboxing if desired) */}
-                      <button
-                        type="button"
-                        data-testid="fit-mode-toggle-btn"
-                        onClick={handleCycleFitMode}
-                        className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 min-h-[38px] hover:text-[#10d97b] transition-colors"
-                      >
-                        <Smartphone className="w-4 h-4 shrink-0" />
-                        <span className="capitalize">{fitMode}</span>
-                      </button>
-
-                      {/* 6. Fullscreen / Exit Fullscreen */}
-                      <button
-                        type="button"
-                        data-testid="bottom-fullscreen-toggle-btn"
-                        onClick={handleToggleFullscreen}
-                        aria-label="Toggle Fullscreen"
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#10d97b] text-slate-950 font-bold min-h-[38px] hover:bg-[#0fc36d] transition-colors"
-                      >
-                        {isFullscreen ? (
-                          <>
-                            <Minimize2 className="w-4 h-4 shrink-0" />
-                            <span>Exit</span>
-                          </>
-                        ) : (
-                          <>
-                            <Maximize2 className="w-4 h-4 shrink-0" />
-                            <span>Fullscreen</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ===============================================================
-                  DRAWER 1: NETFLIX-STYLE AUDIO & LANGUAGE + SUBTITLES DRAWER
-                  Shows ONLY genuinely detected HLS/HTML5 audio tracks + Verified Alternate Streams
-                 =============================================================== */}
-              {activeDrawer === 'language' && (
-                <div
-                  data-testid="audio-language-drawer"
-                  className="absolute inset-x-0 bottom-0 sm:inset-y-0 sm:left-auto sm:right-0 z-40 max-h-[82%] sm:max-h-none sm:w-[430px] bg-[#0b0f19]/95 backdrop-blur-md border-t sm:border-t-0 sm:border-l border-white/15 flex flex-col justify-between text-white rounded-t-2xl sm:rounded-none"
-                  role="region"
-                  aria-label="Audio & Language and Subtitles"
-                >
-                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10">
-                    <span className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
-                      <Volume2 className="w-4 h-4 text-[#10d97b]" />
-                      <span>Audio &amp; Language</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setActiveDrawer('none')}
-                      className="text-xs text-slate-400 hover:text-white px-2 py-0.5 rounded bg-white/5"
-                    >
-                      Close
-                    </button>
-                  </div>
-
-                  <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/10 overflow-y-auto p-3.5 gap-3 sm:gap-0">
-                    {/* Left Column: Embedded Audio Tracks + Alternate Language Streams */}
-                    <div className="sm:pr-3 space-y-3">
-                      <div>
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                          Embedded Stream Audio
-                        </h4>
-
-                        {verifiedAudioTracks.length > 1 ? (
-                          <div className="space-y-1.5" data-testid="audio-track-list-menu">
-                            {verifiedAudioTracks.map((track) => {
-                              const isSelected = track.id === selectedAudioTrackId;
-                              return (
-                                <button
-                                  key={track.id}
-                                  type="button"
-                                  disabled={track.failed}
-                                  data-testid={`audio-track-option-${track.id}`}
-                                  onClick={() => handleSelectVerifiedAudioTrack(track)}
-                                  className={`w-full flex items-center justify-between text-left text-xs px-2.5 py-2 rounded-lg transition-colors ${
-                                    track.failed
-                                      ? 'opacity-40 cursor-not-allowed text-rose-400'
-                                      : isSelected
-                                      ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
-                                      : 'bg-white/5 text-slate-200 hover:bg-white/10'
-                                  }`}
-                                >
-                                  <span>
-                                    {track.displayLabel}
-                                    {track.failed ? ' (Unavailable)' : ''}
-                                  </span>
-                                  {isSelected && !track.failed && (
-                                    <Check className="w-4 h-4 text-[#10d97b] shrink-0" />
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <div
-                            data-testid="single-audio-track-honest-notice"
-                            className="p-2.5 rounded-xl bg-white/5 border border-white/10 text-[11px] text-slate-300 space-y-1"
-                          >
-                            <div className="font-semibold text-white flex items-center justify-between">
-                              <span>
-                                {verifiedAudioTracks[0]?.displayLabel ||
-                                  `${movie.language || 'Original'} — Single Track`}
-                              </span>
-                              <Check className="w-3.5 h-3.5 text-[#10d97b]" />
-                            </div>
-                            <p className="text-[10px] text-slate-400 leading-relaxed">
-                              {audioCapability.honestStatusMessage}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Scenario 2: Separate Verified Language Video Streams */}
-                      {plan.alternateLanguageStreams.length > 0 && (
-                        <div className="pt-2 border-t border-white/10">
-                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                            Verified Language Sources ({plan.alternateLanguageStreams.length})
-                          </h4>
-                          <div className="space-y-1.5" data-testid="alternate-language-streams-list">
-                            {plan.alternateLanguageStreams.map((alt) => {
-                              const isSelected = activeDirectSourceUrl === alt.url;
-                              return (
-                                <button
-                                  key={alt.id}
-                                  type="button"
-                                  data-testid={`alt-stream-option-${alt.id}`}
-                                  onClick={() => handleSelectAlternateLanguageStream(alt)}
-                                  className={`w-full flex items-center justify-between text-left text-xs px-2.5 py-2 rounded-lg transition-colors ${
-                                    isSelected
-                                      ? 'bg-[#10d97b]/20 border border-[#10d97b] text-[#10d97b] font-bold'
-                                      : 'bg-white/5 text-slate-200 hover:bg-white/10'
-                                  }`}
-                                >
-                                  <span>{alt.label}</span>
-                                  {isSelected && <Check className="w-4 h-4 text-[#10d97b] shrink-0" />}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Right Column: Subtitles */}
-                    <div className="pt-3 sm:pt-0 sm:pl-3 flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                            Subtitles
-                          </span>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={subtitlesEnabled}
-                            aria-label="Toggle Subtitles"
-                            onClick={() => setSubtitlesEnabled((s) => !s)}
-                            className={`w-9 h-5 rounded-full transition-colors relative ${
-                              subtitlesEnabled ? 'bg-[#10d97b]' : 'bg-slate-600'
-                            }`}
-                          >
-                            <span
-                              className={`block w-3.5 h-3.5 rounded-full bg-white transition-transform translate-y-0.5 ${
-                                subtitlesEnabled ? 'translate-x-4' : 'translate-x-0.5'
-                              }`}
-                            />
-                          </button>
-                        </div>
-
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="text-xs text-slate-300">Bilingual Captions</span>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={bilingualEnabled}
-                            aria-label="Toggle Bilingual Subtitles"
-                            onClick={() => setBilingualEnabled((b) => !b)}
-                            className={`w-9 h-5 rounded-full transition-colors relative ${
-                              bilingualEnabled ? 'bg-[#10d97b]' : 'bg-slate-600'
-                            }`}
-                          >
-                            <span
-                              className={`block w-3.5 h-3.5 rounded-full bg-white transition-transform translate-y-0.5 ${
-                                bilingualEnabled ? 'translate-x-4' : 'translate-x-0.5'
-                              }`}
-                            />
-                          </button>
-                        </div>
-
-                        {/* HLS Native Subtitle Tracks if present */}
-                        {hlsSubtitleTracks.length > 0 && (
-                          <div className="space-y-1 mb-2 pb-2 border-b border-white/10">
-                            {hlsSubtitleTracks.map((st) => (
-                              <button
-                                key={st.id}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedHlsSubtitleId(st.id);
-                                  setSubtitlesEnabled(true);
-                                  if (hlsRef.current) hlsRef.current.subtitleTrack = st.id;
-                                }}
-                                className={`w-full flex items-center justify-between text-left text-xs px-2 py-1.5 rounded ${
-                                  selectedHlsSubtitleId === st.id
-                                    ? 'text-[#10d97b] font-bold'
-                                    : 'text-slate-300 hover:text-white'
-                                }`}
-                              >
-                                <span>{st.label} (HLS)</span>
-                                {selectedHlsSubtitleId === st.id && (
-                                  <Check className="w-3.5 h-3.5 text-[#10d97b]" />
-                                )}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-
-                        <div className="space-y-1.5">
-                          {SUBTITLE_LANGS.map((lang) => {
-                            const isSelected = subtitlesEnabled && selectedSubtitle === lang;
-                            return (
-                              <button
-                                key={lang}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedSubtitle(lang);
-                                  setSubtitlesEnabled(true);
-                                }}
-                                className={`w-full flex items-center justify-between text-left text-xs px-2 py-1.5 rounded ${
-                                  isSelected
-                                    ? 'bg-[#10d97b]/15 text-[#10d97b] font-bold'
-                                    : 'text-slate-300 hover:text-white'
-                                }`}
-                              >
-                                <span>{lang}</span>
-                                {isSelected && <Check className="w-3.5 h-3.5 text-[#10d97b]" />}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 divide-x divide-white/10 border-t border-white/10 bg-black/60 py-2 text-xs">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSubtitleSize((prev) => (prev === 'normal' ? 'large' : 'normal'))
-                      }
-                      className="flex items-center justify-center gap-1.5 text-slate-200 hover:text-[#10d97b]"
-                    >
-                      <span className="font-mono border border-slate-400 rounded px-1 text-[10px]">
-                        CC
-                      </span>
-                      <span>Size ({subtitleSize})</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSubtitleDelayMs((d) => (d >= 1000 ? -500 : d + 500))}
-                      className="flex items-center justify-center gap-1.5 text-slate-200 hover:text-[#10d97b]"
-                    >
-                      <span>Sync ({subtitleDelayMs}ms)</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* DRAWER 2: VIDEO QUALITY SELECTOR (HLS Levels + Direct 480p/720p/1080p) */}
-              {activeDrawer === 'quality' && (
-                <div
-                  data-testid="video-quality-drawer"
-                  className="absolute inset-y-0 right-0 z-40 w-56 bg-[#0b0f19]/95 backdrop-blur-md border-l border-white/15 p-4 flex flex-col justify-between text-xs"
-                  role="region"
-                  aria-label="Video Quality Selector"
-                >
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between border-b border-white/10 pb-2">
-                      <span className="font-bold text-white">Video Quality</span>
-                      <button
-                        type="button"
-                        onClick={() => setActiveDrawer('none')}
-                        className="text-slate-400 hover:text-white"
-                      >
-                        Close
-                      </button>
-                    </div>
-
-                    {hlsQualityLevels.length > 0 ? (
-                      <div className="space-y-1.5">
-                        {hlsQualityLevels.map((lvl) => {
-                          const isSelected = selectedHlsLevel === lvl.index;
-                          return (
-                            <button
-                              key={lvl.index}
-                              type="button"
-                              onClick={() => handleSelectQualityOption(lvl.index)}
-                              className={`w-full px-3 py-2 rounded-lg flex items-center justify-between text-left ${
-                                isSelected
-                                  ? 'bg-[#10d97b] text-slate-950 font-bold'
-                                  : 'bg-white/5 text-slate-200 hover:bg-white/10'
-                              }`}
-                            >
-                              <span>{lvl.label}</span>
-                              {isSelected && <Check className="w-4 h-4 shrink-0" />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {(['480p', '720p', '1080p'] as DownloadQuality[]).map((q) => {
-                          const isSelected = activeQualityLabel === q;
-                          return (
-                            <button
-                              key={q}
-                              type="button"
-                              data-testid={`quality-option-${q}`}
-                              onClick={() => handleSelectQualityOption(-1, q)}
-                              className={`w-full px-3 py-2 rounded-lg flex items-center justify-between text-left ${
-                                isSelected
-                                  ? 'bg-[#10d97b] text-slate-950 font-bold'
-                                  : 'bg-white/5 text-slate-200 hover:bg-white/10'
-                              }`}
-                            >
-                              <span>{q} Full HD</span>
-                              {isSelected && <Check className="w-4 h-4 shrink-0" />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  <p className="text-[10px] text-slate-400">
-                    Playback position is preserved when changing video resolution.
-                  </p>
-                </div>
-              )}
-
-              {/* DRAWER 3: PLAYBACK SPEED DRAWER */}
-              {activeDrawer === 'speed' && (
-                <div
-                  className="absolute inset-y-0 right-0 z-40 w-36 bg-[#0b0f19]/95 backdrop-blur-md border-l border-white/15 flex flex-col items-center justify-center gap-4 text-sm"
-                  role="region"
-                  aria-label="Playback Speed Selector"
-                >
-                  {SPEED_OPTIONS.map((spd) => {
-                    const isSelected = playbackSpeed === spd;
-                    return (
-                      <button
-                        key={spd}
-                        type="button"
-                        onClick={() => handleSelectSpeed(spd)}
-                        className={`w-full py-1.5 text-center font-semibold transition-colors ${
-                          isSelected ? 'text-[#10d97b] text-base' : 'text-white/90 hover:text-white'
-                        }`}
-                      >
-                        {spd}x
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* DRAWER 4: BRIGHTNESS & VOLUME SLIDER DRAWER */}
-              {activeDrawer === 'settings' && (
-                <div
-                  className="absolute inset-y-0 right-0 z-40 w-64 bg-[#0b0f19]/95 backdrop-blur-md border-l border-white/15 p-5 flex flex-col justify-between text-xs text-slate-200"
-                  role="region"
-                  aria-label="Brightness and Volume Controls"
-                >
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold text-white">Display &amp; Audio</span>
-                      <button
-                        type="button"
-                        onClick={() => setActiveDrawer('none')}
-                        className="text-slate-400 hover:text-white"
-                      >
-                        Close
-                      </button>
-                    </div>
-
-                    <div>
-                      <label className="flex items-center justify-between mb-1.5">
-                        <span className="flex items-center gap-1.5">
-                          <Sun className="w-4 h-4 text-amber-400" /> Brightness
-                        </span>
-                        <span className="font-mono">{brightness}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={50}
-                        max={130}
-                        value={brightness}
-                        onChange={(e) => setBrightness(Number(e.target.value))}
-                        className="w-full accent-[#10d97b]"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="flex items-center justify-between mb-1.5">
-                        <span className="flex items-center gap-1.5">
-                          <Volume2 className="w-4 h-4 text-[#10d97b]" /> Volume
-                        </span>
-                        <span className="font-mono">{volume}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={volume}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          setVolume(v);
-                          setIsMuted(v === 0);
-                          if (videoRef.current) {
-                            videoRef.current.volume = v / 100;
-                            videoRef.current.muted = v === 0;
-                          }
-                        }}
-                        className="w-full accent-[#10d97b]"
-                      />
-                    </div>
-                  </div>
-
-                  <p className="text-[11px] text-slate-400">
-                    HLS.js Audio System 2.0 &amp; MP4 hardware acceleration active.
-                  </p>
-                </div>
-              )}
+              {/* Modular Player Controls & Drawers */}
+              <PlayerControls
+                movieTitle={movie.title}
+                moviePosterUrl={movie.posterUrl}
+                displayPlayerTitle={displayPlayerTitle}
+                statusSubline={
+                  offlineDownload
+                    ? `Offline Playback (${offlineDownload.fileSizeMB}MB)`
+                    : activeAlternateStream
+                    ? `Active Stream: ${activeAlternateStream.label} (${activeAlternateStream.format.toUpperCase()})`
+                    : activeEmbeddedTrack
+                    ? `Verified Audio: ${activeEmbeddedTrack.displayLabel}`
+                    : 'CineBox Direct HTML5 / HLS Stream Active'
+                }
+                areControlsVisible={areControlsVisible}
+                isLocked={isLocked}
+                isPlaying={isPlaying}
+                currentTime={currentTime}
+                duration={duration}
+                isMuted={isMuted}
+                volume={volume}
+                brightness={brightness}
+                playbackSpeed={playbackSpeed}
+                fitMode={fitMode}
+                isFullscreen={isFullscreen}
+                isPipActive={isPipActive}
+                bottomControlsSafePaddingClass={fsConfig.bottomControlsSafePaddingClass}
+                activeDrawer={activeDrawer}
+                isReconnecting={isReconnecting}
+                reconnectMessage={reconnectMessage}
+                showSkipIntro={canShowSkipIntro(currentTime)}
+                introEndSeconds={movieLink?.intro_end}
+                nextEpisodeCountdown={nextEpisodeCountdown}
+                nextEpisodeNumber={selectedEpisode + 1}
+                audioSwitchNotice={audioSwitchNotice}
+                verifiedAudioTracks={verifiedAudioTracks}
+                selectedAudioTrackId={selectedAudioTrackId}
+                alternateLanguageStreams={plan.alternateLanguageStreams}
+                activeDirectSourceUrl={activeDirectSourceUrl}
+                hlsQualityLevels={hlsQualityLevels}
+                selectedHlsLevel={selectedHlsLevel}
+                activeQualityLabel={activeQualityLabel}
+                hlsSubtitleTracks={hlsSubtitleTracks}
+                selectedHlsSubtitleId={selectedHlsSubtitleId}
+                subtitleTracks={subtitleTracksList}
+                subtitlesEnabled={subtitlesEnabled}
+                selectedSubtitleLang={selectedSubtitleLang}
+                subtitleDelayMs={subtitleDelayMs}
+                subtitleSize={subtitleSize}
+                subtitleBgOpacity={subtitleBgOpacity}
+                videoRef={videoRef}
+                onClose={onClose}
+                onToggleLock={() => {
+                  setIsLocked((prev) => !prev);
+                  setActiveDrawer('none');
+                }}
+                onTogglePlay={handleTogglePlay}
+                onSeekOffset={handleSeekOffset}
+                onSeekTo={handleSeekTo}
+                onToggleMute={() =>
+                  setIsMuted((m) => {
+                    const next = !m;
+                    if (videoRef.current) videoRef.current.muted = next;
+                    return next;
+                  })
+                }
+                onChangeVolume={(v) => {
+                  setVolume(v);
+                  setIsMuted(v === 0);
+                  if (videoRef.current) {
+                    videoRef.current.volume = v / 100;
+                    videoRef.current.muted = v === 0;
+                  }
+                }}
+                onChangeBrightness={setBrightness}
+                onTogglePip={handleTogglePictureInPicture}
+                onSetActiveDrawer={setActiveDrawer}
+                onSelectVerifiedAudioTrack={handleSelectVerifiedAudioTrack}
+                onSelectAlternateLanguageStream={handleSelectAlternateLanguageStream}
+                onSelectQualityOption={handleSelectQualityOption}
+                onSelectSpeed={handleSelectSpeed}
+                onCycleFitMode={handleCycleFitMode}
+                onToggleFullscreen={handleToggleFullscreen}
+                onToggleSubtitlesEnabled={(enabled) => {
+                  setSubtitlesEnabled(enabled);
+                  saveSubtitlePreferences({ enabled }, activeUserId);
+                }}
+                onSelectSubtitleLang={(lang) => {
+                  setSelectedSubtitleLang(lang);
+                  saveSubtitlePreferences({ preferredLang: lang, enabled: true }, activeUserId);
+                  saveUserPlaybackPreferences({ preferredSubtitleLang: lang }, activeUserId);
+                }}
+                onSelectHlsSubtitleTrack={selectHlsSubtitleTrack}
+                onChangeSubtitleDelay={(delayMs) => {
+                  setSubtitleDelayMs(delayMs);
+                  saveSubtitlePreferences({ delayMs }, activeUserId);
+                }}
+                onChangeSubtitleSize={(fontSize) => {
+                  setSubtitleSize(fontSize);
+                  saveSubtitlePreferences({ fontSize }, activeUserId);
+                }}
+                onChangeSubtitleBgOpacity={(bgOpacity) => {
+                  setSubtitleBgOpacity(bgOpacity);
+                  saveSubtitlePreferences({ bgOpacity }, activeUserId);
+                }}
+                onLoadCustomSubtitleText={setCustomSubtitleText}
+                onPlayNextEpisodeNow={playNextEpisodeImmediately}
+                onCancelNextEpisode={cancelNextEpisodeCountdown}
+              />
             </>
           )}
         </div>
 
         {/* ===================================================================
-            CENTRALIZED STREAM SOURCE MANAGER + SERVER SWITCHER + TV EPISODES
+            BELOW-PLAYER CONTROLS: VIDSRC METADATA, SOURCE PICKER, EPISODES
            =================================================================== */}
         <div className="flex-1 px-3 sm:px-6 py-4 sm:py-5 pb-16 space-y-4 sm:space-y-5">
-          {/* =================================================================
-              PART 1: VIDSRC.SH CONTENT INFO METADATA BAR, 404 & ERROR BANNERS,
-              AND PLAYER_EVENT WATCH HISTORY RESUME INDICATOR
-             ================================================================= */}
+          {/* VidSrc.sh Content Info & Watch Progress Resume Bar */}
           <div
             data-testid="vidsrc-integration-panel"
             className="p-3 sm:p-3.5 rounded-2xl bg-[#111622] border border-slate-800/90 space-y-2.5"
@@ -2480,12 +1614,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="px-2 py-0.5 rounded-md bg-[#10d97b]/15 border border-[#10d97b]/40 text-[10px] font-extrabold text-[#10d97b] uppercase tracking-wider">
-                  VidSrc.sh API v2
+                  Stream Status
                 </span>
                 <span className="text-xs font-bold text-slate-200">
-                  {movie.mediaType === 'tv'
-                    ? `Endpoint: /info/tv/${movie.id}/${selectedSeason}/${selectedEpisode}.json`
-                    : `Endpoint: /info/movie/${movie.id}.json`}
+                  Active: {playerMode === 'embed' ? activeFriendlySourceName : 'Direct Stream'}
                 </span>
               </div>
 
@@ -2503,7 +1635,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
                   }`}
                 >
-                  Play VidSrc.sh (ds_lang=en)
+                  Source 2 (EN Subtitles)
                 </button>
 
                 <button
@@ -2519,7 +1651,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
                   }`}
                 >
-                  2Embed Fallback
+                  Source 1 (Primary)
                 </button>
 
                 <button
@@ -2548,11 +1680,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   })}
                   target="_blank"
                   rel="noopener noreferrer"
-                  data-testid="vidsrc-open-new-tab-btn"
+                  data-testid="prominent-open-new-tab-btn"
                   className="px-2.5 py-1 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-[#10d97b]/50 text-[#10d97b] text-[11px] font-bold flex items-center gap-1"
                 >
                   <ExternalLink className="w-3 h-3" />
-                  <span>Open VidSrc.sh in New Tab</span>
+                  <span>Open in New Tab</span>
                 </a>
               </div>
             </div>
@@ -2560,11 +1692,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             {isLoadingVidsrcInfo && (
               <div className="flex items-center gap-2 text-xs text-slate-400 py-1">
                 <Loader2 className="w-3.5 h-3.5 text-[#10d97b] animate-spin" />
-                <span>Checking VidSrc.sh Content Info API...</span>
+                <span>Checking stream availability...</span>
               </div>
             )}
 
-            {/* Condition 1: status_code === 200 -> Show title, year, poster, quality */}
             {!isLoadingVidsrcInfo && vidsrcInfoState?.ok && vidsrcInfoState.info && (
               <div
                 data-testid="vidsrc-content-info-bar"
@@ -2587,17 +1718,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       <span className="px-1.5 py-0.5 rounded bg-[#10d97b]/20 text-[#10d97b] font-extrabold text-[10px]">
                         Quality: {vidsrcInfoState.info.quality || 'HD'}
                       </span>
-                      <span>·</span>
-                      <span className="text-emerald-300 font-semibold">
-                        Default Subtitles: English (ds_lang=en)
-                      </span>
                     </div>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Condition 2: status_code === 404 -> Show "Movie Not Available" + 2Embed Fallback active */}
             {!isLoadingVidsrcInfo && vidsrcInfoState?.notAvailable && (
               <div
                 data-testid="vidsrc-not-available-banner"
@@ -2607,7 +1733,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <div className="flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                   <div className="text-xs font-bold text-amber-200">
-                    Movie Not Available on VidSrc.sh (404) — Auto-Fallback to 2Embed Active
+                    Source 2 unavailable (404) — Automatic Failover to Source 1 Active
                   </div>
                 </div>
                 <button
@@ -2621,39 +1747,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
             )}
 
-            {/* Condition 3: Network/CORS/500 Error -> Show "Content Unavailable, Try Again" + 2Embed Fallback */}
-            {!isLoadingVidsrcInfo &&
-              vidsrcInfoState &&
-              !vidsrcInfoState.ok &&
-              !vidsrcInfoState.notAvailable && (
-                <div
-                  data-testid="vidsrc-error-banner"
-                  role="alert"
-                  className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/90 border border-slate-700/80"
-                >
-                  <div className="flex items-center gap-2">
-                    <Info className="w-4 h-4 text-amber-400 shrink-0" />
-                    <div className="text-xs font-semibold text-slate-200">
-                      {vidsrcInfoState.errorMessage || 'Content Unavailable, Try Again'}{' '}
-                      <span className="text-slate-400 font-normal">
-                        (Using TMDb Metadata &amp; 2Embed / VidSrc.sh Embed Player)
-                      </span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    data-testid="vidsrc-retry-info-btn"
-                    onClick={loadVidSrcContentInfo}
-                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold flex items-center gap-1"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Try Again</span>
-                  </button>
-                </div>
-              )}
-
-            {/* Part 1 (4): Watch History Progress from PLAYER_EVENT */}
-            {vidsrcWatchProgress && vidsrcWatchProgress.currentTime > 0 && (
+            {effectiveResumeSeconds > 0 && (
               <div
                 data-testid="vidsrc-watch-progress-bar"
                 className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-emerald-950/40 border border-[#10d97b]/30 text-xs"
@@ -2661,20 +1755,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <div className="flex items-center gap-2 text-emerald-200 font-semibold">
                   <Check className="w-3.5 h-3.5 text-[#10d97b]" />
                   <span>
-                    Saved Watch Progress: {formatPlayerTimecode(vidsrcWatchProgress.currentTime)} /{' '}
-                    {formatPlayerTimecode(vidsrcWatchProgress.duration)} (
-                    {vidsrcWatchProgress.watchedPercent}%)
+                    Saved Watch Progress: {formatPlayerTimecode(effectiveResumeSeconds)}
+                    {effectiveResumeDuration > 0
+                      ? ` / ${formatPlayerTimecode(effectiveResumeDuration)}`
+                      : ''}
                   </span>
                 </div>
                 {playerMode === 'direct' && (
                   <button
                     type="button"
-                    onClick={() => {
-                      if (videoRef.current) {
-                        videoRef.current.currentTime = vidsrcWatchProgress.currentTime;
-                        setCurrentTime(vidsrcWatchProgress.currentTime);
-                      }
-                    }}
+                    data-testid="resume-playback-btn"
+                    onClick={() => handleSeekTo(effectiveResumeSeconds)}
                     className="px-2.5 py-1 rounded-lg bg-[#10d97b] text-slate-950 font-extrabold text-[11px]"
                   >
                     Resume Here
@@ -2684,173 +1775,43 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             )}
           </div>
 
-          {/* 1. Centralized Stream Source Manager & Server Switcher */}
+          {/* Modular SourcePicker ("Source 1", "Source 2", "Source 3" + Health Dots + Auto-Failover) */}
           <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-3 sm:p-3.5 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
-                <Server className="w-4 h-4 text-[#10d97b] shrink-0" />
-                <span>
-                  {movie.mediaType === 'tv'
-                    ? `Centralized Stream Source Manager (S${selectedSeason}:E${selectedEpisode})`
-                    : 'Centralized Stream Source Manager & Multi-Audio Controls'}
-                </span>
-              </div>
+            <SourcePicker
+              movieId={movie.id}
+              mediaType={movie.mediaType}
+              selectedSeason={selectedSeason}
+              selectedEpisode={selectedEpisode}
+              isPakDrama={isPakDrama}
+              playerMode={playerMode}
+              selectedEmbedId={selectedEmbedId}
+              embedServers={plan.embedServers}
+              alternateLanguageStreams={plan.alternateLanguageStreams}
+              activeDirectSourceUrl={activeDirectSourceUrl}
+              sourceHealthMap={sourceHealthMap}
+              isCheckingHealth={isCheckingHealth}
+              isAdminUnlocked={isAdminUnlocked}
+              showLinkEditor={showLinkEditor}
+              youtubeKey={movie.youtubeKey}
+              activeEmbedUrl={activeEmbedServer?.url}
+              onRunHealthChecks={handleRunSourceHealthChecks}
+              onToggleLinkEditor={() => setShowLinkEditor((prev) => !prev)}
+              onSelectAlternateStream={handleSelectAlternateLanguageStream}
+              onSelectPakDramaServer={() => {
+                setPlayerMode('pak-drama');
+                if (pakDramaStreams.length === 0 && !isLoadingPakDrama) {
+                  loadPakDramaOrHindiStreams(undefined, selectedEpisode);
+                }
+              }}
+              onSelectEmbedServer={(serverId) => {
+                setSelectedEmbedId(serverId);
+                setPlayerMode('embed');
+              }}
+              onSelectTrailer={() => setPlayerMode('trailer')}
+              onTriggerAutoFailover={handleTriggerAutoFailover}
+            />
 
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  data-testid="check-source-health-btn"
-                  disabled={isCheckingHealth}
-                  onClick={handleRunSourceHealthChecks}
-                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1 transition-colors"
-                >
-                  <Activity className="w-3.5 h-3.5 text-[#10d97b]" />
-                  <span>{isCheckingHealth ? 'Checking Sources...' : 'Check Source Health'}</span>
-                </button>
-
-                <span className="text-[11px] font-mono text-slate-400">
-                  TMDb ID: {movie.id} · {movie.mediaType.toUpperCase()}
-                </span>
-
-                {isAdminUnlocked && (
-                  <button
-                    type="button"
-                    data-testid="toggle-inline-link-editor-btn"
-                    onClick={() => setShowLinkEditor((prev) => !prev)}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-950/90 hover:bg-emerald-900 border border-[#10d97b]/50 text-[#10d97b] text-[11px] font-bold flex items-center gap-1 transition-colors"
-                  >
-                    <Link2 className="w-3.5 h-3.5" />
-                    <span>
-                      {showLinkEditor
-                        ? 'Close Link Setup'
-                        : '+ Attach Stream / Language Links'}
-                    </span>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Separate Verified Language Video Streams Bar (Phase 2C Scenario 2) */}
-            {plan.alternateLanguageStreams.length > 0 && (
-              <div
-                data-testid="verified-language-sources-bar"
-                className="p-2.5 rounded-xl bg-emerald-950/40 border border-[#10d97b]/30 flex flex-wrap items-center justify-between gap-2"
-              >
-                <div className="text-xs font-bold text-[#10d97b] flex items-center gap-1.5">
-                  <Volume2 className="w-4 h-4" />
-                  <span>Verified Language Video Streams:</span>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {plan.alternateLanguageStreams.map((alt) => {
-                    const isActive =
-                      playerMode === 'direct' && activeDirectSourceUrl === alt.url;
-                    return (
-                      <button
-                        key={alt.id}
-                        type="button"
-                        data-testid={`verified-lang-source-btn-${alt.id}`}
-                        onClick={() => handleSelectAlternateLanguageStream(alt)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 ${
-                          isActive
-                            ? 'bg-[#10d97b] text-slate-950 shadow-sm'
-                            : 'bg-slate-900 text-slate-200 border border-slate-700 hover:border-[#10d97b]/60'
-                        }`}
-                      >
-                        <span>{alt.label}</span>
-                        <span className="text-[10px] font-mono opacity-75">
-                          ({alt.format.toUpperCase()})
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
-              {/* 🇵🇰 Dedicated Pakistani Drama & Hindi Dubbed Full Episode/Movie Server */}
-              <button
-                type="button"
-                data-testid="pak-drama-hindi-server-btn"
-                onClick={() => {
-                  setPlayerMode('pak-drama');
-                  if (pakDramaStreams.length === 0 && !isLoadingPakDrama) {
-                    loadPakDramaOrHindiStreams(undefined, selectedEpisode);
-                  }
-                }}
-                className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-bold transition-colors min-h-[40px] flex items-center gap-1.5 border min-w-0 ${
-                  playerMode === 'pak-drama'
-                    ? 'bg-[#10d97b] text-slate-950 border-[#10d97b] shadow-md'
-                    : 'bg-emerald-950/80 border-[#10d97b]/50 text-[#10d97b] hover:bg-emerald-900/70'
-                }`}
-              >
-                <Tv className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">
-                  {isPakDrama || movie.mediaType === 'tv'
-                    ? `🇵🇰 Pak Drama / Urdu (Ep ${selectedEpisode})`
-                    : '🇮🇳 Hindi / Drama Stream Finder'}
-                </span>
-              </button>
-
-              {/* Embed Server Buttons with Source Health Status Badges */}
-              {plan.embedServers.map((srv) => {
-                const isSelected = playerMode === 'embed' && selectedEmbedId === srv.id;
-                const health = sourceHealthMap[srv.id];
-                return (
-                  <button
-                    key={srv.id}
-                    type="button"
-                    data-testid={`embed-server-btn-${srv.id}`}
-                    onClick={() => {
-                      setSelectedEmbedId(srv.id);
-                      setPlayerMode('embed');
-                    }}
-                    className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-semibold transition-colors min-h-[40px] flex items-center gap-1.5 min-w-0 ${
-                      isSelected
-                        ? 'bg-[#10d97b] text-slate-950 font-bold shadow-sm'
-                        : 'bg-slate-800/90 text-slate-200 hover:bg-slate-700'
-                    }`}
-                  >
-                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">{srv.label}</span>
-                    {health === 'available' && (
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" title="Available" />
-                    )}
-                  </button>
-                );
-              })}
-
-              {/* Prominent Open in New Tab Button if Iframe Fails to Load */}
-              <a
-                href={activeEmbedServer?.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-testid="prominent-open-new-tab-btn"
-                className="px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-extrabold transition-transform active:scale-95 min-h-[40px] flex items-center gap-1.5 min-w-0 bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] text-slate-950 shadow-md shadow-[#10d97b]/25 hover:opacity-95"
-              >
-                <ExternalLink className="w-3.5 h-3.5 stroke-[2.5] shrink-0" />
-                <span className="truncate">Open in New Tab</span>
-              </a>
-
-              {/* Official TMDb Video / Trailer */}
-              {movie.youtubeKey && (
-                <button
-                  type="button"
-                  data-testid="play-official-trailer-btn"
-                  onClick={() => setPlayerMode('trailer')}
-                  className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-semibold transition-colors min-h-[40px] flex items-center gap-1.5 min-w-0 ${
-                    playerMode === 'trailer'
-                      ? 'bg-[#10d97b] text-slate-950 font-bold shadow-sm'
-                      : 'bg-rose-950/70 border border-rose-500/40 text-rose-200 hover:bg-rose-900/60'
-                  }`}
-                >
-                  <Youtube className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                  <span className="truncate">Official TMDb Video (HD)</span>
-                </button>
-              )}
-            </div>
-
-            {/* Honest Audio Capability Banner (Phase 3) */}
+            {/* Honest Audio Capability Banner */}
             <div
               data-testid="honest-audio-capability-banner"
               className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300 flex items-start gap-2"
@@ -2858,7 +1819,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               <Info className="w-4 h-4 text-[#10d97b] shrink-0 mt-0.5" />
               <div className="space-y-0.5">
                 <div className="font-semibold text-slate-200">
-                  Audio System 2.0 Status ({audioCapability.mode.toUpperCase()}):
+                  Audio System Status ({audioCapability.mode.toUpperCase()}):
                 </div>
                 <p className="text-slate-400 leading-relaxed">
                   {audioCapability.honestStatusMessage}
@@ -2866,7 +1827,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
             </div>
 
-            {/* 🇵🇰 PAKISTANI DRAMA & HINDI DUBBED STREAM SELECTOR PANEL */}
+            {/* Pak Drama & Hindi Dubbed Stream Finder Panel */}
             {playerMode === 'pak-drama' && (
               <div
                 data-testid="pak-drama-stream-selector-panel"
@@ -2884,7 +1845,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     data-testid="pak-drama-custom-query-input"
                     value={pakDramaQueryInput}
                     onChange={(e) => setPakDramaQueryInput(e.target.value)}
-                    placeholder="Search e.g. Dar e Nijaat Episode 1, Kabhi Main Kabhi Tum Ep 1, or Movie Hindi Dubbed..."
+                    placeholder="Search e.g. Dar e Nijaat Episode 1, Kabhi Main Kabhi Tum Ep 1..."
                     className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white focus:border-[#10d97b] focus:outline-none"
                   />
                   <button
@@ -2892,14 +1853,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     data-testid="pak-drama-search-submit-btn"
                     className="px-4 py-2 rounded-lg bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-bold text-xs shrink-0"
                   >
-                    Find Episode / Hindi Stream
+                    Find Episode / Stream
                   </button>
                 </form>
 
                 {pakDramaStreams.length > 0 && (
                   <div className="space-y-1.5">
                     <div className="text-[11px] font-semibold text-slate-300">
-                      Available Full-Length Streams ({pakDramaStreams.length} found — click to switch):
+                      Available Full-Length Streams ({pakDramaStreams.length} found):
                     </div>
                     <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-1">
                       {pakDramaStreams.slice(0, 8).map((st, idx) => (
@@ -2923,9 +1884,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
             )}
 
-            {/* ===============================================================
-                INLINE REAL MOVIE LINK & MULTI-LANGUAGE STREAM EDITOR (ADMIN)
-               =============================================================== */}
+            {/* Inline Admin Stream, Subtitle & Skip-Intro Editor */}
             {showLinkEditor && (
               <form
                 onSubmit={handleSaveInlineLink}
@@ -2936,19 +1895,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     <h4 className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
                       <Sparkles className="w-4 h-4 text-[#10d97b]" />
                       <span>
-                        Attach Direct HLS/MP4 &amp; Separate Language Streams for &ldquo;{movie.title}&rdquo; (TMDb ID: {movie.id})
+                        Attach Direct HLS/MP4, Real Subtitles (.VTT/.SRT) &amp; Skip-Intro Markers
                       </span>
                     </h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Attach a multi-audio <code className="text-[#10d97b]">.m3u8</code> manifest or separate authorized Original / Hindi Dubbed / Urdu Dubbed video streams:
-                    </p>
                   </div>
                 </div>
 
-                {/* 1-Click Sample Real Stream Presets */}
                 <div className="space-y-1.5">
                   <span className="text-[11px] font-semibold text-slate-300 block">
-                    1-Click Test Presets (Click to auto-fill a real working HD .MP4 link):
+                    1-Click Test Presets:
                   </span>
                   <div className="flex flex-wrap gap-1.5">
                     {PLAYABLE_HD_STREAMS_POOL.map((preset) => (
@@ -2957,9 +1912,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         type="button"
                         onClick={() => {
                           setCustomDirectUrl(preset.mp4_720p);
-                          setCustomDl480(preset.mp4_480p);
-                          setCustomDl720(preset.mp4_720p);
-                          setCustomDl1080(preset.mp4_720p);
                         }}
                         className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] text-[#10d97b] font-semibold"
                       >
@@ -2978,85 +1930,74 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       type="url"
                       value={customDirectUrl}
                       onChange={(e) => setCustomDirectUrl(e.target.value)}
-                      placeholder="https://your-cdn.com/movies/master.m3u8 or movie-720p.mp4"
+                      placeholder="https://your-cdn.com/movies/master.m3u8"
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
 
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      Separate Hindi Dubbed Stream URL (Optional <code>.mp4</code> / <code>.m3u8</code>):
+                      Separate Hindi Dubbed Stream URL:
                     </label>
                     <input
                       type="url"
                       value={customHindiDubbedUrl}
                       onChange={(e) => setCustomHindiDubbedUrl(e.target.value)}
-                      placeholder="https://your-cdn.com/movies/movie-hindi-dubbed.mp4"
+                      placeholder="https://your-cdn.com/movies/movie-hindi.m3u8"
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
 
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      Separate Urdu Dubbed Stream URL (Optional <code>.mp4</code> / <code>.m3u8</code>):
+                      Separate Urdu Dubbed Stream URL:
                     </label>
                     <input
                       type="url"
                       value={customUrduDubbedUrl}
                       onChange={(e) => setCustomUrduDubbedUrl(e.target.value)}
-                      placeholder="https://your-cdn.com/movies/movie-urdu-dubbed.mp4"
+                      placeholder="https://your-cdn.com/movies/movie-urdu.mp4"
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
 
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      480p Download <code>.mp4</code> URL:
+                      Intro Start (seconds, for Skip Intro):
                     </label>
                     <input
-                      type="url"
-                      value={customDl480}
-                      onChange={(e) => setCustomDl480(e.target.value)}
-                      placeholder="https://your-cdn.com/movies/movie-480p.mp4"
+                      type="number"
+                      min={0}
+                      value={customIntroStart}
+                      onChange={(e) => setCustomIntroStart(e.target.value)}
+                      placeholder="e.g. 15"
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
 
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      720p Download <code>.mp4</code> URL:
+                      Intro End (seconds, for Skip Intro):
                     </label>
                     <input
-                      type="url"
-                      value={customDl720}
-                      onChange={(e) => setCustomDl720(e.target.value)}
-                      placeholder="https://your-cdn.com/movies/movie-720p.mp4"
+                      type="number"
+                      min={0}
+                      value={customIntroEnd}
+                      onChange={(e) => setCustomIntroEnd(e.target.value)}
+                      placeholder="e.g. 85"
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
 
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="block text-slate-300 font-semibold mb-1">
-                      1080p Download <code>.mp4</code> URL:
+                      Subtitles JSON (<code>[{`{"lang":"ur","label":"Urdu","url":"https://.../sub.srt"}`}]</code>):
                     </label>
                     <input
-                      type="url"
-                      value={customDl1080}
-                      onChange={(e) => setCustomDl1080(e.target.value)}
-                      placeholder="https://your-cdn.com/movies/movie-1080p.mp4"
-                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-slate-300 font-semibold mb-1">
-                      Custom Iframe Embed URL (Optional):
-                    </label>
-                    <input
-                      type="url"
-                      value={customEmbedUrl}
-                      onChange={(e) => setCustomEmbedUrl(e.target.value)}
-                      placeholder="https://streamwish.to/e/... or https://filemoon.sx/e/..."
+                      type="text"
+                      value={customSubtitlesJson}
+                      onChange={(e) => setCustomSubtitlesJson(e.target.value)}
+                      placeholder='[{"lang":"en","label":"English","url":"https://example.com/en.vtt"},{"lang":"ur","label":"Urdu","url":"https://example.com/ur.srt"}]'
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
@@ -3116,9 +2057,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     <button
                       key={epNum}
                       type="button"
-                      onClick={() => {
-                        setSelectedEpisode(epNum);
-                      }}
+                      onClick={() => setSelectedEpisode(epNum)}
                       className={`min-w-[44px] py-1.5 px-2.5 rounded-lg text-xs font-mono font-semibold shrink-0 transition-colors ${
                         selectedEpisode === epNum
                           ? 'bg-[#10d97b] text-slate-950 font-bold'
@@ -3133,7 +2072,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             )}
           </div>
 
-          {/* 3. Movie/Series Metadata, TMDB Watch Providers & VidSrc.sh AdBlocker Shield */}
+          {/* Movie/Series Metadata, TMDB Watch Providers & VidSrc.sh AdBlocker Shield */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-4">
               <div className="flex items-start justify-between gap-4">
@@ -3181,7 +2120,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
               <p className="text-sm text-slate-300 leading-relaxed">{movie.overview}</p>
 
-              {/* PHASE 6: Official TMDB Watch Providers (Displayed separately from playable sources) */}
               {movie.watchProviders && movie.watchProviders.length > 0 && (
                 <div
                   data-testid="tmdb-watch-providers-section"
@@ -3227,7 +2165,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 </div>
               )}
 
-              {/* Cast Section */}
               {movie.cast && movie.cast.length > 0 && (
                 <div className="pt-2">
                   <h3 className="text-xs font-semibold text-slate-400 mb-2.5">Featured Cast</h3>
@@ -3256,7 +2193,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
             </div>
 
-            {/* Right Column: VidSrc.sh AdBlocker Shield & Official Streaming Info */}
+            {/* Right Column: VidSrc.sh AdBlocker Shield */}
             <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3.5 h-fit">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -3277,7 +2214,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               <p className="text-xs text-slate-400 leading-relaxed">
                 Blocks click-jacking popup windows, <code className="text-slate-200">window.open</code>{' '}
                 ad redirects, and ad-network scripts strictly on{' '}
-                <code className="text-[#10d97b]">vidsrc.sh</code> while keeping Server 3 (2Embed) and
+                <code className="text-[#10d97b]">vidsrc.sh</code> while keeping Source 1 and
                 video playback untouched.
               </p>
 
@@ -3329,7 +2266,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-[#10d97b]/50 text-[#10d97b] font-bold text-xs flex items-center justify-center gap-2 transition-colors min-h-[42px]"
                 >
                   <Film className="w-4 h-4" />
-                  <span>+ Attach Custom Stream / Language Links (Admin)</span>
+                  <span>+ Attach Custom Stream / Subtitles (Admin)</span>
                 </button>
               )}
             </div>

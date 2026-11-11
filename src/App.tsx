@@ -780,16 +780,20 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0b0d12] text-slate-100 flex flex-col">
       {/* =====================================================================
-          STICKY TOP HEADER (WITH ANDROID SAFE-AREA TOP PADDING)
+          FIXED TOP HEADER (WITH ANDROID SAFE-AREA TOP PADDING)
+          Stays locked at the top of the viewport while only page content scrolls
          ===================================================================== */}
-      <header className="sticky top-0 z-30 bg-[#0b0d12]/95 backdrop-blur-md border-b border-slate-800/70 px-3 sm:px-6 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
+      <header
+        data-testid="main-fixed-header"
+        className="fixed top-0 left-0 right-0 z-40 bg-[#0b0d12]/95 backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-6 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 shadow-lg shadow-black/40"
+      >
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 sm:gap-4">
           {/* Brand Logo Button (Tap 5 times to unlock Secret Admin Panel) */}
           <button
             type="button"
             onClick={handleLogoTap}
             aria-label={`${appConfig.app_name} Logo — Tap 5 times for Secret Admin Panel`}
-            className="flex items-center gap-2 shrink-0 group focus:outline-none min-h-[40px]"
+            className="flex items-center gap-2 shrink-0 group focus:outline-none min-h-[42px]"
           >
             <CineBoxBrandLogo
               appName={appConfig.app_name}
@@ -798,10 +802,10 @@ export default function App() {
             />
           </button>
 
-          {/* Rounded Search Bar */}
-          <form onSubmit={handleSearchSubmit} className="flex-1 max-w-2xl">
-            <div className="flex items-center bg-[#1c2029] border border-slate-700/70 rounded-xl px-3 py-1.5 focus-within:border-[#10d97b]/70 transition-colors">
-              <Search className="w-4 h-4 text-slate-400 shrink-0" />
+          {/* Enlarged, Prominent Rounded Search Bar */}
+          <form onSubmit={handleSearchSubmit} className="flex-1 max-w-4xl">
+            <div className="flex items-center bg-[#1c2029] border border-slate-700/80 rounded-2xl px-3.5 sm:px-4 py-2 sm:py-2.5 focus-within:border-[#10d97b] focus-within:ring-1 focus-within:ring-[#10d97b]/30 transition-all shadow-inner">
+              <Search className="w-4 h-4 sm:w-5 sm:h-5 text-[#10d97b] shrink-0" />
               <input
                 type="search"
                 data-testid="search-input"
@@ -811,67 +815,21 @@ export default function App() {
                 }}
                 placeholder="Search movies, series, Hindi dubbed, Pak dramas..."
                 aria-label="Search movies and TV series"
-                className="w-full bg-transparent px-2 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none"
+                className="w-full bg-transparent px-2.5 sm:px-3 text-sm sm:text-base font-medium text-slate-100 placeholder-slate-400 focus:outline-none"
               />
               <button
                 type="submit"
                 data-testid="search-submit-btn"
-                className="pl-2.5 border-l border-slate-700 text-xs sm:text-sm font-bold text-[#10d97b] hover:opacity-90 shrink-0"
+                className="pl-3 sm:pl-4 border-l border-slate-700 text-xs sm:text-sm font-extrabold text-[#10d97b] hover:opacity-90 shrink-0"
               >
                 Search
               </button>
             </div>
           </form>
 
-          {/* Right Actions: Language Toggle + Global APK Download Link + Restricted Admin Console */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              data-testid="header-language-toggle-btn"
-              onClick={() => {
-                const nextLang = currentLang === 'ur' ? 'en' : 'ur';
-                const saved = saveUserAppSettings({ ...userSettings, appLanguage: nextLang });
-                setUserSettings(saved);
-              }}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-bold text-slate-200 whitespace-nowrap"
-              title="Switch App Language (English / اردو)"
-            >
-              {currentLang === 'ur' ? 'EN' : 'اردو'}
-            </button>
-
-            {appConfig.apk_download_url && (
-              <a
-                href={appConfig.apk_download_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-testid="header-download-apk-btn"
-                onClick={(e) => {
-                  if (isUnconfiguredPlaceholderApkUrl(appConfig.apk_download_url)) {
-                    e.preventDefault();
-                    if (isAdminUnlocked) {
-                      setAdminModalState({ open: true, tab: 'admin' });
-                      showToast(
-                        'Paste your Google Drive APK share link in Admin Console -> APK Link to activate global downloads!'
-                      );
-                    } else {
-                      showToast(
-                        'Official APK v1.0.2 link is being updated by Admin — please check back shortly!'
-                      );
-                    }
-                  }
-                }}
-                title={`Download Official Android APK (v${appConfig.apk_latest_version || '1.0.2'})`}
-                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#142920] hover:bg-[#193529] border border-[#10d97b]/40 text-xs font-extrabold text-[#10d97b] whitespace-nowrap transition-colors"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">
-                  {getTranslation(currentLang, 'downloadApkShort')} (v{appConfig.apk_latest_version || '1.0.2'})
-                </span>
-                <span className="sm:hidden">APK</span>
-              </a>
-            )}
-
-            {isAdminUnlocked && (
+          {/* Right Action: Restricted Admin Console (only visible when unlocked) */}
+          {isAdminUnlocked && (
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 data-testid="header-admin-console-btn"
@@ -881,8 +839,8 @@ export default function App() {
                 <ShieldCheck className="w-4 h-4" />
                 <span>{getTranslation(currentLang, 'adminBadge')}</span>
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* Top Horizontal Category Tabs */}
@@ -912,6 +870,17 @@ export default function App() {
           </nav>
         )}
       </header>
+
+      {/* Spacer for Fixed Header so page content starts cleanly below the fixed header */}
+      <div
+        aria-hidden="true"
+        data-testid="fixed-header-spacer"
+        className={
+          activeTab === 'home'
+            ? 'h-[92px] sm:h-[102px] shrink-0'
+            : 'h-[60px] sm:h-[68px] shrink-0'
+        }
+      />
 
       {/* =====================================================================
           TOAST NOTIFICATION BANNER
