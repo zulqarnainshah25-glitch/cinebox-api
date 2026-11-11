@@ -104,6 +104,27 @@ export function sanitizeReferralCode(rawCode: string | null | undefined): string
   return cleaned;
 }
 
+export const normalizeReferralCode = sanitizeReferralCode;
+
+export function buildInitialTrialAndReferralFields(params: {
+  email: string;
+  referredByCode?: string | null;
+  nowMs?: number;
+}): {
+  trial_start_date: string;
+  trial_end_date: string;
+  referral_code: string;
+  referred_by: string | null;
+} {
+  const now = params.nowMs ?? Date.now();
+  return {
+    trial_start_date: new Date(now).toISOString(),
+    trial_end_date: new Date(now + TRIAL_DURATION_MS).toISOString(),
+    referral_code: generateUniqueReferralCode(params.email),
+    referred_by: sanitizeReferralCode(params.referredByCode),
+  };
+}
+
 /**
  * Extracts a referral code from either `/ref/{code}` path or `?ref={code}` query string.
  */
@@ -137,7 +158,7 @@ export function buildReferralShareUrl(referralCode: string, baseOrigin?: string)
     baseOrigin ||
     (typeof window !== 'undefined' && window.location?.origin
       ? window.location.origin
-      : 'https://cinebox-movie-streaming-offline-downloader.ai.studio');
+      : 'https://cineboxmovies.ai.studio');
   const normalizedOrigin = rawOrigin.replace(/\/+$/, '');
   return `${normalizedOrigin}/ref/${safeCode}`;
 }

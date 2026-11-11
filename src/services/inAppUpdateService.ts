@@ -1,14 +1,40 @@
 import { AppConfigRecord } from '../types/movie';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
+import { DetectedPlatform, detectAppPlatform } from './platformTrialReferralService';
 
-export const DEFAULT_CURRENT_APP_VERSION = '1.0.0';
+export const DEFAULT_CURRENT_APP_VERSION = '1.0.2';
 export const DEFAULT_VERSION_JSON_URL = '/version.json';
 export const DEFAULT_GLOBAL_APK_DOWNLOAD_URL =
   'https://drive.google.com/file/d/1CineBoxOfficialReleaseApk/view?usp=sharing';
+export const DEFAULT_GLOBAL_APK_RELEASE_NOTES =
+  'Latest CineBox Android APK (Google Drive Global Download, Native WebView Popup Blocker & Signature-Safe Update).';
+export const DEFAULT_OFFICIAL_WEBSITE_URL = 'https://cineboxmovies.ai.studio';
 export const GITHUB_VERSION_JSON_EXAMPLE_URL =
   'https://raw.githubusercontent.com/cinebox-official/cinebox-apk/main/version.json';
 
 export const CINEBOX_APK_META_PREFIX = 'CINEBOX_APK_META::';
+
+/**
+ * Normalizes an official website URL or domain (e.g. `cineboxmovies.ai.studio` -> `https://cineboxmovies.ai.studio`)
+ * and upgrades legacy/typo placeholder URLs (`cinebox-movie-streaming-offline-downloader.ai.studio` / `neboxmovies.ai.studio` / `movie-box.co`)
+ * to `https://cineboxmovies.ai.studio`.
+ */
+export function normalizeOfficialWebsiteUrl(rawUrl?: string | null): string {
+  if (!rawUrl || typeof rawUrl !== 'string') return DEFAULT_OFFICIAL_WEBSITE_URL;
+  const trimmed = rawUrl.trim();
+  if (
+    !trimmed ||
+    trimmed.includes('cinebox-movie-streaming-offline-downloader.ai.studio') ||
+    trimmed.includes('neboxmovies.ai.studio') ||
+    trimmed === 'https://movie-box.co' ||
+    trimmed === 'http://movie-box.co'
+  ) {
+    return DEFAULT_OFFICIAL_WEBSITE_URL;
+  }
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const safe = sanitizeSafeUrl(withProtocol);
+  return safe ? safe.replace(/\/+$/, '') : DEFAULT_OFFICIAL_WEBSITE_URL;
+}
 
 export interface RemoteVersionManifest {
   version: string;
@@ -23,9 +49,19 @@ export interface InAppUpdateCheckResult {
   remoteVersion: string;
   apkUrl: string;
   releaseNotes: string;
+  platform?: DetectedPlatform;
   isGoogleDriveLink?: boolean;
-  source?: 'supabase-global-config' | 'version-json';
+  source?: 'supabase-global-config' | 'version-json' | 'web-disabled';
   error?: string;
+}
+
+/**
+ * Returns true if the URL is the default unconfigured placeholder link (`1CineBoxOfficialReleaseApk`)
+ * before the Admin saves a real Google Drive or direct APK link.
+ */
+export function isUnconfiguredPlaceholderApkUrl(rawUrl: string | null | undefined): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return true;
+  return rawUrl.includes('1CineBoxOfficialReleaseApk');
 }
 
 /**
@@ -107,24 +143,30 @@ export function encodeGlobalApkConfigCarrier(meta: {
   version: string;
   apkUrl: string;
   releaseNotes?: string;
+  officialWebsite?: string;
 }): string {
   const safeUrl = sanitizeSafeUrl(meta.apkUrl) || '';
   const cleanVersion =
-    (meta.version || '1.0.1')
+    (meta.version || '1.0.2')
       .trim()
       .replace(/^v/i, '')
       .replace(/[^0-9a-zA-Z._-]/g, '')
-      .slice(0, 32) || '1.0.1';
+      .slice(0, 32) || '1.0.2';
   const cleanNotes = (meta.releaseNotes || '')
     .replace(/[<>]/g, '')
     .trim()
     .slice(0, 280);
 
-  return `${CINEBOX_APK_META_PREFIX}${JSON.stringify({
+  const payload: Record<string, string> = {
     version: cleanVersion,
     apkUrl: safeUrl,
     releaseNotes: cleanNotes,
-  })}`;
+  };
+  if (meta.officialWebsite) {
+    payload.officialWebsite = normalizeOfficialWebsiteUrl(meta.officialWebsite);
+  }
+
+  return `${CINEBOX_APK_META_PREFIX}${JSON.stringify(payload)}`;
 }
 
 /**
@@ -134,6 +176,7 @@ export function decodeGlobalApkConfigCarrier(rawCarrier: string | null | undefin
   version: string;
   apkUrl: string;
   releaseNotes: string;
+  officialWebsite?: string;
 } | null {
   if (
     !rawCarrier ||
@@ -153,15 +196,20 @@ export function decodeGlobalApkConfigCarrier(rawCarrier: string | null | undefin
     const rawVer =
       typeof parsed.version === 'string' && parsed.version.trim()
         ? parsed.version.trim().replace(/^v/i, '')
-        : '1.0.1';
+        : '1.0.2';
     const notes =
       typeof parsed.releaseNotes === 'string'
         ? parsed.releaseNotes.replace(/[<>]/g, '').trim().slice(0, 280)
         : '';
+    const officialWebsite =
+      typeof parsed.officialWebsite === 'string' && parsed.officialWebsite.trim()
+        ? normalizeOfficialWebsiteUrl(parsed.officialWebsite)
+        : undefined;
     return {
       version: rawVer,
       apkUrl: safeUrl,
       releaseNotes: notes,
+      ...(officialWebsite ? { officialWebsite } : {}),
     };
   } catch {
     return null;
@@ -169,7 +217,7 @@ export function decodeGlobalApkConfigCarrier(rawCarrier: string | null | undefin
 }
 
 /**
- * Compares two semantic version strings (e.g. "1.0.1" vs "1.0.0").
+ * Compares two semantic version strings (e.g. "1.0.2" vs "1.0.1").
  * Returns:
  *  - `1` if `versionA > versionB`
  *  - `-1` if `versionA < versionB`
@@ -200,7 +248,7 @@ export function compareSemverVersions(versionA: string, versionB: string): numbe
 
 /**
  * Reads the installed APK version via Capacitor's `App.getInfo()` bridge when available,
- * falling back to `DEFAULT_CURRENT_APP_VERSION` ("1.0.0").
+ * falling back to `DEFAULT_CURRENT_APP_VERSION` ("1.0.2").
  */
 export async function getInstalledAppVersion(overrideVersion?: string): Promise<string> {
   if (overrideVersion && overrideVersion.trim()) {
@@ -235,7 +283,7 @@ export async function getInstalledAppVersion(overrideVersion?: string): Promise<
 
 /**
  * Validates and parses the `version.json` payload:
- * `{ "version": "1.0.1", "apk_url": "https://drive.google.com/... or https://github.com/.../app-release.apk" }`
+ * `{ "version": "1.0.2", "apk_url": "https://drive.google.com/... or https://github.com/.../app-release.apk" }`
  * Rejects non-HTTPS or XSS `apk_url` values.
  */
 export function parseRemoteVersionManifest(rawPayload: unknown): {
@@ -279,11 +327,14 @@ export function parseRemoteVersionManifest(rawPayload: unknown): {
 
 /**
  * Checks for an In-App APK Update on startup or when the Admin updates `app_config` globally:
- * 1. First checks if a valid global APK download URL & version are configured in Supabase `app_config`
- *    (`globalAppConfig.apk_download_url` and `globalAppConfig.apk_latest_version`).
- * 2. Otherwise fetches `/version.json` and compares its `version` against `App.getInfo().version`.
+ * - STRICT PLATFORM RULE: If `platform === 'Web'` (or running on Website in browser), returns
+ *   `updateAvailable: false` immediately so Website users NEVER see the "New Update Available" popup.
+ * - On Android APK (`platform === 'Android'`):
+ *   1. Checks if a valid global APK download URL & version are configured in Supabase `app_config`.
+ *   2. Otherwise fetches `/version.json` and compares its `version` against `App.getInfo().version`.
  */
 export async function checkForInAppApkUpdate(options?: {
+  platform?: DetectedPlatform;
   versionJsonUrl?: string;
   currentVersionOverride?: string;
   globalAppConfig?: Partial<AppConfigRecord> | null;
@@ -291,10 +342,32 @@ export async function checkForInAppApkUpdate(options?: {
 }): Promise<InAppUpdateCheckResult> {
   const currentVersion = await getInstalledAppVersion(options?.currentVersionOverride);
 
-  // 1. Check Admin-configured Global APK Link in Supabase `app_config`
-  if (options?.globalAppConfig?.apk_download_url) {
+  // Determine active platform: explicit option -> browser runtime detection -> Android in headless unit tests
+  const effectivePlatform: DetectedPlatform =
+    options?.platform ??
+    (typeof window !== 'undefined' ? detectAppPlatform() : 'Android');
+
+  // 0. STRICT RULE: Never show the In-App Update Popup on Website ('Web')
+  if (effectivePlatform === 'Web') {
+    return {
+      checked: true,
+      updateAvailable: false,
+      currentVersion,
+      remoteVersion: currentVersion,
+      apkUrl: options?.globalAppConfig?.apk_download_url || '',
+      releaseNotes: '',
+      platform: 'Web',
+      source: 'web-disabled',
+    };
+  }
+
+  // 1. Check Admin-configured Global APK Link in Supabase `app_config` (ignore unconfigured placeholder URL)
+  if (
+    options?.globalAppConfig?.apk_download_url &&
+    !isUnconfiguredPlaceholderApkUrl(options.globalAppConfig.apk_download_url)
+  ) {
     const globalParsed = parseRemoteVersionManifest({
-      version: options.globalAppConfig.apk_latest_version || '1.0.1',
+      version: options.globalAppConfig.apk_latest_version || '1.0.2',
       apk_url: options.globalAppConfig.apk_download_url,
       release_notes:
         options.globalAppConfig.apk_release_notes ||
@@ -310,6 +383,7 @@ export async function checkForInAppApkUpdate(options?: {
         remoteVersion: globalParsed.manifest.version,
         apkUrl: globalParsed.manifest.apk_url,
         releaseNotes: globalParsed.manifest.release_notes || '',
+        platform: 'Android',
         isGoogleDriveLink: Boolean(extractGoogleDriveFileId(globalParsed.manifest.apk_url)),
         source: 'supabase-global-config',
       };
@@ -327,6 +401,7 @@ export async function checkForInAppApkUpdate(options?: {
       remoteVersion: currentVersion,
       apkUrl: '',
       releaseNotes: '',
+      platform: 'Android',
       error: 'Fetch API unavailable.',
     };
   }
@@ -349,6 +424,7 @@ export async function checkForInAppApkUpdate(options?: {
         remoteVersion: currentVersion,
         apkUrl: '',
         releaseNotes: '',
+        platform: 'Android',
         error: `HTTP ${response.status} when fetching version.json`,
       };
     }
@@ -363,6 +439,7 @@ export async function checkForInAppApkUpdate(options?: {
         remoteVersion: currentVersion,
         apkUrl: '',
         releaseNotes: '',
+        platform: 'Android',
         error: parsed.error || 'Malformed version.json',
       };
     }
@@ -375,6 +452,7 @@ export async function checkForInAppApkUpdate(options?: {
       remoteVersion: parsed.manifest.version,
       apkUrl: parsed.manifest.apk_url,
       releaseNotes: parsed.manifest.release_notes || '',
+      platform: 'Android',
       isGoogleDriveLink: Boolean(extractGoogleDriveFileId(parsed.manifest.apk_url)),
       source: 'version-json',
     };
@@ -386,6 +464,7 @@ export async function checkForInAppApkUpdate(options?: {
       remoteVersion: currentVersion,
       apkUrl: '',
       releaseNotes: '',
+      platform: 'Android',
       error: err instanceof Error ? err.message : 'Network error checking version.json',
     };
   }
@@ -408,7 +487,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 2
-        versionName "1.0.1"
+        versionName "1.0.2"
     }
 
     // IMPORTANT: Signature-Safe Release Signing Config
@@ -496,8 +575,11 @@ jobs:
 
 export const ANDROID_MAIN_ACTIVITY_POPUP_BLOCKER_JAVA = `package com.cinebox.stream;
 
+import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Message;
+import android.view.View;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import com.getcapacitor.BridgeActivity;
@@ -510,6 +592,7 @@ public class MainActivity extends BridgeActivity {
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView webView = getBridge().getWebView();
+            webView.setBackgroundColor(Color.BLACK);
             WebSettings settings = webView.getSettings();
 
             settings.setJavaScriptCanOpenWindowsAutomatically(false);

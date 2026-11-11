@@ -225,8 +225,92 @@ export function buildEmbedServerList(
 }
 
 /**
+ * Known popup, popunder, and click-hijack ad domains loaded by VidSrc.sh.
+ * Used by the VidSrc.sh AdBlocker to block ad scripts & redirect targets.
+ */
+export const VIDSRC_AD_BLOCKLIST_DOMAINS: readonly string[] = Object.freeze([
+  'doubleclick.net',
+  'googlesyndication.com',
+  'adsterra.com',
+  'popads.net',
+  'popcash.net',
+  'propellerads.com',
+  'onclickads.net',
+  'onclickperformance.com',
+  'acscdn.com',
+  'exoclick.com',
+  'juicyads.com',
+  'tsyndicate.com',
+  'rtmark.net',
+  'histats.com',
+  'trafficjunky.net',
+  'clickadu.com',
+  'hilltopads.net',
+  'admaven.com',
+  'galaksion.com',
+  'a-ads.com',
+  'outbrain.com',
+  'taboola.com',
+  'mc.yandex.ru',
+  'bnhtml.com',
+  'roudodu.com',
+  'cdn4ads.com',
+  'adsco.re',
+  'pushame.com',
+  'notix.io',
+]);
+
+/**
+ * Returns `true` ONLY if the given URL belongs to `vidsrc.sh` (or `*.vidsrc.sh`).
+ * Ensures the VidSrc.sh AdBlocker targets only VidSrc.sh and never interferes with other servers.
+ */
+export function isVidSrcProviderUrl(rawUrl?: string | null): boolean {
+  const safe = sanitizeSafeUrl(rawUrl);
+  if (!safe) return false;
+  try {
+    const parsed = new URL(safe);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'vidsrc.sh' || host.endsWith('.vidsrc.sh');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns `true` if a URL is a known VidSrc.sh popup/popunder ad network domain or ad script path.
+ */
+export function isVidSrcAdNetworkUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim().toLowerCase();
+  if (!trimmed) return false;
+
+  try {
+    const parsed = new URL(trimmed.startsWith('//') ? `https:${trimmed}` : trimmed);
+    const host = parsed.hostname.toLowerCase();
+    for (const adDomain of VIDSRC_AD_BLOCKLIST_DOMAINS) {
+      if (host === adDomain || host.endsWith(`.${adDomain}`)) {
+        return true;
+      }
+    }
+    const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    if (
+      pathAndQuery.includes('/popunder') ||
+      pathAndQuery.includes('/pop.js') ||
+      pathAndQuery.includes('/adserver') ||
+      pathAndQuery.includes('clickid=') ||
+      pathAndQuery.includes('zoneid=')
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Returns clean, sandbox-free iframe attributes (`src` and `allowFullScreen` only)
- * so embed providers like VidSrc.sh and 2Embed.cc are never restricted by a `sandbox` attribute on the player iframe.
+ * for general embed providers.
  */
 export function getCleanIframeAttributes(
   rawUrl?: string | null,
@@ -242,6 +326,276 @@ export function getCleanIframeAttributes(
     src: safeSrc,
     allowFullScreen: true,
     title: title.trim() || 'Movie Stream Player',
+  };
+}
+
+/**
+ * Returns iframe attributes with real VidSrc.sh AdBlocker enforcement:
+ * - When `rawUrl` is `vidsrc.sh` and `isAdBlockerEnabled` is `true`, applies
+ *   `sandbox="allow-scripts allow-same-origin allow-forms allow-presentation"`
+ *   which strictly strips `allow-popups`, `allow-popups-to-escape-sandbox`, and
+ *   `allow-top-navigation`, blocking 100% of click-triggered popup ads on `vidsrc.sh`
+ *   while allowing video playback and fullscreen.
+ * - For all other providers (e.g. `2embed.cc`) or when AdBlocker is toggled off,
+ *   omits `sandbox` so non-VidSrc providers behave normally.
+ */
+export function getVidSrcPlayerIframeAttributes(
+  rawUrl?: string | null,
+  title: string = 'Movie Stream Player',
+  isAdBlockerEnabled: boolean = true
+): {
+  src: string;
+  allowFullScreen: true;
+  title: string;
+  sandbox?: string;
+  isVidSrcTarget: boolean;
+  isVidSrcAdBlockerActive: boolean;
+} {
+  const safeSrc = sanitizeSafeUrl(rawUrl) || '';
+  const isVidSrcTarget = isVidSrcProviderUrl(safeSrc);
+  const isVidSrcAdBlockerActive = isVidSrcTarget && Boolean(isAdBlockerEnabled);
+
+  if (isVidSrcAdBlockerActive) {
+    return {
+      src: safeSrc,
+      allowFullScreen: true,
+      title: title.trim() || 'Movie Stream Player',
+      sandbox: 'allow-scripts allow-same-origin allow-forms allow-presentation',
+      isVidSrcTarget: true,
+      isVidSrcAdBlockerActive: true,
+    };
+  }
+
+  return {
+    src: safeSrc,
+    allowFullScreen: true,
+    title: title.trim() || 'Movie Stream Player',
+    isVidSrcTarget,
+    isVidSrcAdBlockerActive: false,
+  };
+}
+
+/**
+ * Generates targeted CSS hiding rules specifically for `vidsrc.sh` ad overlays,
+ * popunder containers, and ad-network iframes/anchors when the Adblocker toggle switch is enabled.
+ * Returns an empty string when disabled or when a non-VidSrc server is active.
+ */
+export function buildVidSrcAdBlockCssRules(
+  isAdBlockerEnabled: boolean,
+  isVidSrcTarget: boolean
+): string {
+  if (!isAdBlockerEnabled || !isVidSrcTarget) {
+    return '';
+  }
+
+  const domainSelectors = VIDSRC_AD_BLOCKLIST_DOMAINS.map(
+    (domain) =>
+      `iframe[src*="${domain}"], script[src*="${domain}"], a[href*="${domain}"], div[data-domain*="${domain}"]`
+  ).join(',\n  ');
+
+  return `
+  /* CineBox VidSrc.sh Targeted AdBlocker CSS Hiding Layer */
+  ${domainSelectors},
+  [id*="popunder"],
+  [class*="popunder"],
+  [id*="ad-overlay"],
+  [class*="ad-overlay"],
+  [id*="clickjack"],
+  [class*="clickjack"],
+  [data-ad-zone],
+  [data-adblock-hide="true"],
+  a[target="_blank"][href*="clickid="],
+  a[target="_blank"][href*="zoneid="] {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    max-width: 0 !important;
+    max-height: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    z-index: -9999 !important;
+  }
+
+  /* Keep the primary vidsrc.sh video iframe interactive while hiding injected sibling overlays */
+  [data-vidsrc-adblock="active"] > iframe[data-vidsrc-iframe="true"] {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+
+  [data-vidsrc-adblock="active"] > :not(iframe[data-vidsrc-iframe="true"]):not([data-testid="vidsrc-adblock-toast"]) {
+    display: none !important;
+    pointer-events: none !important;
+  }
+`.trim();
+}
+
+export type VidSrcInterceptKind = 'fetch' | 'xhr' | 'popup' | 'dom-node' | 'focus-steal';
+
+/**
+ * Installs a runtime ad-filtering logic layer specifically when a `vidsrc.sh` iframe is active
+ * and the Adblocker toggle switch is ON:
+ * 1. Intercepts `window.fetch` requests to known ad networks (`isVidSrcAdNetworkUrl`) and returns 204.
+ * 2. Intercepts `XMLHttpRequest.prototype.open` / `send` requests to known ad networks.
+ * 3. Intercepts `window.open` popup tabs triggered by clickjacking scripts.
+ * 4. Observes DOM mutations to strip dynamically injected ad `<script>` / `<iframe>` / `<a>` elements.
+ * 5. Refocuses the player window if a cross-origin iframe attempts a blur/focus-steal popunder.
+ *
+ * Returns a cleanup callback that restores all native APIs immediately when toggled OFF or unmounted.
+ */
+export function installVidSrcNetworkAdInterceptor(options: {
+  enabled: boolean;
+  isVidSrcTarget: boolean;
+  onAdBlocked?: (blockedUrl: string, kind: VidSrcInterceptKind) => void;
+  targetWindow?: any;
+  targetDocument?: any;
+}): () => void {
+  const { enabled, isVidSrcTarget, onAdBlocked } = options;
+  if (!enabled || !isVidSrcTarget) {
+    return () => {};
+  }
+
+  const win = options.targetWindow ?? (typeof window !== 'undefined' ? window : null);
+  const doc = options.targetDocument ?? (typeof document !== 'undefined' ? document : null);
+  if (!win) {
+    return () => {};
+  }
+
+  // 1. Intercept window.fetch for VidSrc ad-network URLs
+  const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
+  if (originalFetch) {
+    win.fetch = async (input: any, init?: any) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input && typeof input.url === 'string'
+          ? input.url
+          : String(input || '');
+
+      if (isVidSrcAdNetworkUrl(rawUrl)) {
+        onAdBlocked?.(rawUrl, 'fetch');
+        if (typeof Response !== 'undefined') {
+          return new Response(null, {
+            status: 204,
+            statusText: 'Blocked by CineBox VidSrc AdBlocker',
+          });
+        }
+        return { ok: true, status: 204, text: async () => '', json: async () => ({}) };
+      }
+      return originalFetch(input, init);
+    };
+  }
+
+  // 2. Intercept XMLHttpRequest for VidSrc ad-network URLs
+  const XhrProto = win.XMLHttpRequest?.prototype;
+  const originalXhrOpen = XhrProto?.open;
+  const originalXhrSend = XhrProto?.send;
+  if (XhrProto && typeof originalXhrOpen === 'function' && typeof originalXhrSend === 'function') {
+    XhrProto.open = function (method: string, url: string, ...rest: any[]) {
+      (this as any).__cineboxBlockedAdUrl = isVidSrcAdNetworkUrl(url) ? String(url) : null;
+      return originalXhrOpen.call(this, method, url, ...rest);
+    };
+    XhrProto.send = function (body?: any) {
+      const blockedUrl = (this as any).__cineboxBlockedAdUrl;
+      if (blockedUrl) {
+        onAdBlocked?.(blockedUrl, 'xhr');
+        try {
+          Object.defineProperty(this, 'status', { value: 204, configurable: true });
+          Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+          Object.defineProperty(this, 'responseText', { value: '', configurable: true });
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      return originalXhrSend.call(this, body);
+    };
+  }
+
+  // 3. Intercept window.open popup windows
+  const originalWindowOpen = win.open;
+  win.open = (url?: string | URL) => {
+    onAdBlocked?.(String(url || 'window.open'), 'popup');
+    return null;
+  };
+
+  // 4. Intercept focus-stealing popunders when clicking inside the vidsrc.sh iframe
+  const handleWindowBlur = () => {
+    if (doc?.activeElement && doc.activeElement.tagName === 'IFRAME') {
+      onAdBlocked?.('vidsrc.sh://iframe-focus-popup', 'focus-steal');
+      try {
+        win.focus?.();
+      } catch {
+        // ignore
+      }
+    }
+  };
+  win.addEventListener?.('blur', handleWindowBlur);
+
+  // 5. Intercept click events on injected ad anchors & MutationObserver for injected ad nodes
+  const handleDocumentClickCapture = (ev: any) => {
+    const target = ev?.target?.closest?.('a') as HTMLAnchorElement | null;
+    if (!target) return;
+    const href = target.getAttribute?.('href') || target.href || '';
+    if (isVidSrcAdNetworkUrl(href)) {
+      ev.preventDefault?.();
+      ev.stopPropagation?.();
+      onAdBlocked?.(href, 'dom-node');
+    }
+  };
+  doc?.addEventListener?.('click', handleDocumentClickCapture, true);
+
+  let observer: MutationObserver | null = null;
+  if (typeof MutationObserver !== 'undefined' && doc?.body) {
+    observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        const added = Array.from(mutation.addedNodes || []);
+        for (const node of added) {
+          const el = node as HTMLElement;
+          if (!el || typeof el.tagName !== 'string') continue;
+          const tag = el.tagName.toUpperCase();
+          if (tag === 'SCRIPT' || tag === 'IFRAME' || tag === 'A') {
+            const srcOrHref =
+              el.getAttribute?.('src') ||
+              el.getAttribute?.('href') ||
+              (el as any).src ||
+              (el as any).href ||
+              '';
+            if (isVidSrcAdNetworkUrl(srcOrHref)) {
+              el.setAttribute?.('data-adblock-hide', 'true');
+              try {
+                el.remove?.();
+              } catch {
+                // ignore
+              }
+              onAdBlocked?.(srcOrHref, 'dom-node');
+            }
+          }
+        }
+      }
+    });
+    observer.observe(doc.body, { childList: true, subtree: true });
+  }
+
+  return () => {
+    if (originalFetch) {
+      win.fetch = originalFetch;
+    }
+    if (XhrProto && originalXhrOpen && originalXhrSend) {
+      XhrProto.open = originalXhrOpen;
+      XhrProto.send = originalXhrSend;
+    }
+    win.open = originalWindowOpen;
+    win.removeEventListener?.('blur', handleWindowBlur);
+    doc?.removeEventListener?.('click', handleDocumentClickCapture, true);
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
   };
 }
 
@@ -490,11 +844,13 @@ export function shouldShowAudioTrackButton(
 
 export interface FullscreenPlayerLayoutConfig {
   isFullscreen: boolean;
+  areControlsVisible: boolean;
   backgroundColor: '#000000';
   viewportWidth: '100vw';
   viewportHeight: '100dvh';
   objectFit: 'contain' | 'cover' | 'fill';
   showAlwaysVisibleExitButton: boolean;
+  showControlsSyncedExitButton: boolean;
   containerClassName: string;
   videoObjectFitClass: string;
   bottomControlsSafePaddingClass: string;
@@ -503,11 +859,13 @@ export interface FullscreenPlayerLayoutConfig {
 
 /**
  * Computes fullscreen player container classes, pure #000000 borderless background,
- * always-visible top-left Exit Fullscreen button state, and mobile navigation-bar safe-area padding.
+ * top-left/top-right Exit Fullscreen button state synced with player controls & Android taskbar blending,
+ * and mobile navigation-bar safe-area padding.
  */
 export function getFullscreenPlayerConfig(
   isFullscreen: boolean,
-  fitMode: 'contain' | 'cover' | 'fill' = 'contain'
+  fitMode: 'contain' | 'cover' | 'fill' = 'contain',
+  areControlsVisible: boolean = true
 ): FullscreenPlayerLayoutConfig {
   const videoObjectFitClass =
     fitMode === 'cover'
@@ -517,23 +875,28 @@ export function getFullscreenPlayerConfig(
       : 'object-contain';
 
   const containerClassName = isFullscreen
-    ? 'cinebox-player-fullscreen fixed inset-0 z-[9999] w-[100vw] h-[100vh] h-[100dvh] max-w-[100vw] max-h-[100dvh] bg-[#000000] overflow-hidden select-none border-0 m-0 p-0'
-    : 'relative w-full aspect-video min-h-[225px] sm:min-h-[360px] max-h-[68vh] bg-[#000000] overflow-hidden select-none shadow-2xl border-b border-slate-800/80';
+    ? 'cinebox-player-fullscreen fixed inset-0 z-[9999] w-[100vw] h-[100vh] h-[100dvh] max-w-[100vw] max-h-[100dvh] bg-[#000000] overflow-hidden select-none border-0 outline-none ring-0 shadow-none m-0 p-0'
+    : 'relative w-full aspect-video min-h-[225px] sm:min-h-[360px] max-h-[68vh] bg-[#000000] overflow-hidden select-none border-0 outline-none ring-0 m-0 p-0';
 
   const bottomControlsSafePaddingClass = isFullscreen
     ? 'px-4 sm:px-6 pb-[max(1.25rem,calc(env(safe-area-inset-bottom,16px)+12px))] pt-3 bg-gradient-to-t from-black via-black/80 to-transparent'
     : 'px-3 sm:px-4 pb-[max(0.875rem,calc(env(safe-area-inset-bottom,10px)+6px))] pt-2.5 bg-gradient-to-t from-black/95 via-black/75 to-transparent';
 
-  const exitButtonClassName =
-    'fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md transition-transform active:scale-95 min-h-[40px]';
+  const exitButtonClassName = `fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 min-h-[40px] ${
+    areControlsVisible
+      ? 'opacity-100 pointer-events-auto translate-y-0'
+      : 'opacity-0 pointer-events-none -translate-y-2'
+  }`;
 
   return {
     isFullscreen,
+    areControlsVisible,
     backgroundColor: '#000000',
     viewportWidth: '100vw',
     viewportHeight: '100dvh',
     objectFit: fitMode,
     showAlwaysVisibleExitButton: isFullscreen,
+    showControlsSyncedExitButton: isFullscreen && areControlsVisible,
     containerClassName,
     videoObjectFitClass,
     bottomControlsSafePaddingClass,

@@ -4,5 +4,8 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
+.env
+.env.*
 !.env.example
+*.zip
+cinebox-stage3-updated.zip

@@ -12,6 +12,9 @@ interface CineBoxBrandLogoProps {
  *   neon 'C' reel ring, and glowing play prism.
  * - Displays the stylized "CineBox" wordmark + "4K HD" micro-badge on mobile and desktop.
  */
+export const CINEBOX_APP_ICON_PATH =
+  '/assets/aistudio/WhatsApp_Image_2026-11-11_at_3.05.49_PM-removebg-preview_30d0dc3d.png';
+
 export const CineBoxBrandLogo: React.FC<CineBoxBrandLogoProps> = ({
   appName = 'CineBox',
   size = 'md',
@@ -27,87 +30,16 @@ export const CineBoxBrandLogo: React.FC<CineBoxBrandLogoProps> = ({
       data-testid="cinebox-custom-brand-logo"
       className="flex items-center gap-2 sm:gap-2.5 select-none"
     >
-      {/* Custom SVG Cinema Emblem Icon */}
+      {/* Official CineBox App Icon PNG */}
       <div
-        className={`relative ${iconDimensions} rounded-xl overflow-hidden shadow-lg shadow-[#10d97b]/25 ring-1 ring-[#10d97b]/40 group-active:scale-95 transition-transform shrink-0 bg-[#050811]`}
+        className={`relative ${iconDimensions} rounded-xl overflow-hidden shadow-lg shadow-[#10d97b]/25 ring-1 ring-[#10d97b]/40 group-active:scale-95 transition-transform shrink-0 bg-[#050811] flex items-center justify-center`}
       >
-        <svg
-          viewBox="0 0 512 512"
-          className="w-full h-full block"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-          aria-hidden="true"
-        >
-          <defs>
-            <linearGradient
-              id="cbHeaderBg"
-              x1="0"
-              y1="0"
-              x2="512"
-              y2="512"
-              gradientUnits="userSpaceOnUse"
-            >
-              <stop offset="0%" stopColor="#050811" />
-              <stop offset="55%" stopColor="#0a121e" />
-              <stop offset="100%" stopColor="#041f18" />
-            </linearGradient>
-            <linearGradient
-              id="cbHeaderNeon"
-              x1="80"
-              y1="64"
-              x2="432"
-              y2="448"
-              gradientUnits="userSpaceOnUse"
-            >
-              <stop offset="0%" stopColor="#06b6d4" />
-              <stop offset="50%" stopColor="#10d97b" />
-              <stop offset="100%" stopColor="#22c55e" />
-            </linearGradient>
-            <linearGradient
-              id="cbHeaderPlay"
-              x1="190"
-              y1="160"
-              x2="360"
-              y2="352"
-              gradientUnits="userSpaceOnUse"
-            >
-              <stop offset="0%" stopColor="#34f59b" />
-              <stop offset="100%" stopColor="#06b6d4" />
-            </linearGradient>
-          </defs>
-
-          <rect width="512" height="512" rx="108" fill="url(#cbHeaderBg)" />
-
-          {/* Film Strip Perforations */}
-          <g fill="#10d97b" fillOpacity="0.28">
-            <rect x="38" y="102" width="24" height="36" rx="7" />
-            <rect x="38" y="170" width="24" height="36" rx="7" />
-            <rect x="38" y="238" width="24" height="36" rx="7" />
-            <rect x="38" y="306" width="24" height="36" rx="7" />
-            <rect x="38" y="374" width="24" height="36" rx="7" />
-
-            <rect x="450" y="102" width="24" height="36" rx="7" />
-            <rect x="450" y="170" width="24" height="36" rx="7" />
-            <rect x="450" y="238" width="24" height="36" rx="7" />
-            <rect x="450" y="306" width="24" height="36" rx="7" />
-            <rect x="450" y="374" width="24" height="36" rx="7" />
-          </g>
-
-          {/* Stylized 'C' Cinema Reel Ring */}
-          <path
-            d="M356 140C328 112 290 96 248 96C164.053 96 96 167.634 96 256C96 344.366 164.053 416 248 416C290 416 328 400 356 372"
-            stroke="url(#cbHeaderNeon)"
-            strokeWidth="38"
-            strokeLinecap="round"
-          />
-
-          {/* Center 3D Play Prism */}
-          <path
-            d="M212 172C212 159.5 225.8 151.9 236.4 158.6L364.4 239.4C374.3 245.7 374.3 260.3 364.4 266.6L236.4 347.4C225.8 354.1 212 346.5 212 334V172Z"
-            fill="url(#cbHeaderPlay)"
-          />
-          <path d="M238 212L312 253L238 294V212Z" fill="#04131a" fillOpacity="0.45" />
-        </svg>
+        <img
+          src={CINEBOX_APP_ICON_PATH}
+          alt={`${appName} App Icon`}
+          data-testid="cinebox-app-icon-img"
+          className="w-full h-full object-contain scale-115 block"
+        />
       </div>
 
       {/* Stylized Brand Wordmark */}

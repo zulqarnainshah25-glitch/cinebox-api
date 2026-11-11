@@ -42,28 +42,32 @@ import {
 } from '../types/movie';
 import {
   bulkUpsertMovieLinks,
+  DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
   deleteAppUser,
   deleteMovieLink,
   exportDecentralizedManifest,
+  extractGoogleDriveFileId,
   fetchAllAppUsers,
   fetchAllMovieLinks,
   getSupabaseCredentials,
   importDecentralizedManifestJson,
-  setSupabaseCredentials,
+  sendAdminMagicLink,
+  signInAdminWithSupabase,
+  signOutSupabaseSession,
   SUPABASE_RLS_FIX_SQL,
   SupabaseDiagnosticReport,
   syncFromRemoteDecentralizedNode,
   testSupabaseLiveTables,
+  toGoogleDriveDirectDownloadUrl,
   updateAppConfig,
   upsertAppUser,
   upsertMovieLink,
 } from '../services/supabaseClient';
-import { getActiveTmdbApiKey, setCustomTmdbApiKey } from '../services/tmdbService';
+import { getActiveTmdbApiKey, getActiveTmdbProxyUrl } from '../services/tmdbService';
+import { getActiveCorsProxyBaseUrl } from '../services/movieBoxDirectApi';
 import {
   parseDirectBulkMovieLinksInput,
-  PinRateLimitState,
-  verifyAdminPinRecovery,
-  verifyAdminPinWithRateLimit,
+  sanitizeSafeUrl,
 } from '../utils/securityValidator';
 import {
   buildMovieLinkRecordFromHoster,
@@ -73,13 +77,7 @@ import {
   parseMovieFileName,
   VideoHosterFileItem,
 } from '../services/videoHosterIntegration';
-import {
-  bumpSemverPatchVersion,
-  DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
-  extractGoogleDriveFileId,
-  toGoogleDriveDirectDownloadUrl,
-} from '../services/inAppUpdateService';
-import { sanitizeSafeUrl } from '../utils/securityValidator';
+import { bumpSemverPatchVersion } from '../services/inAppUpdateService';
 
 interface AdminAndDeliverablesModalProps {
   initialTab: 'admin' | 'deliverables';
@@ -137,12 +135,10 @@ CREATE TABLE IF NOT EXISTS public.app_config (
   primary_theme TEXT NOT NULL DEFAULT 'neon-green',
   is_ads_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   popup_ad_image TEXT NOT NULL DEFAULT '',
-  popup_ad_link TEXT NOT NULL DEFAULT 'https://cinebox-movie-streaming-offline-downloader.ai.studio/',
-  direct_ad_link TEXT NOT NULL DEFAULT 'https://cinebox-movie-streaming-offline-downloader.ai.studio/',
+  popup_ad_link TEXT NOT NULL DEFAULT 'https://cineboxmovies.ai.studio',
+  direct_ad_link TEXT NOT NULL DEFAULT 'https://cineboxmovies.ai.studio',
   banner_ad_html TEXT NOT NULL DEFAULT '',
-  admin_pin_hash TEXT NOT NULL DEFAULT '1234',
-  admin_email TEXT NOT NULL DEFAULT 'ZulqarnainShah25@gmail.com',
-  official_website TEXT NOT NULL DEFAULT 'https://cinebox-movie-streaming-offline-downloader.ai.studio/',
+  official_website TEXT NOT NULL DEFAULT 'https://cineboxmovies.ai.studio',
   decentralized_manifest_url TEXT NOT NULL DEFAULT '',
   maintenance_mode BOOLEAN NOT NULL DEFAULT FALSE,
   allow_guest_downloads BOOLEAN NOT NULL DEFAULT TRUE,
@@ -162,7 +158,7 @@ REVOKE ALL ON TABLE public.movie_links FROM anon;
 REVOKE ALL ON TABLE public.app_users FROM anon;
 REVOKE ALL ON TABLE public.app_config FROM anon;
 
--- 5. Server-Side Administrator Verification via Supabase Auth JWT
+-- 5. Server-Side Administrator Verification via Supabase Auth JWT (app_metadata.role = 'admin')
 CREATE OR REPLACE FUNCTION public.is_cinebox_admin()
 RETURNS boolean
 LANGUAGE sql
@@ -171,14 +167,18 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
   SELECT COALESCE(
-    (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-    OR lower(auth.jwt() ->> 'email') = 'zulqarnainshah25@gmail.com',
+    (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin',
     false
   );
 $$;
 
--- 6. movie_links: Public SELECT only; Admin-only INSERT/UPDATE/DELETE
-GRANT SELECT ON TABLE public.movie_links TO anon, authenticated;
+-- 6. movie_links: Public SELECT only on playback columns; Admin-only INSERT/UPDATE/DELETE
+GRANT SELECT (
+  tmdb_id, title, language, direct_video_url, hindi_dubbed_video_url,
+  urdu_dubbed_video_url, alternate_streams, subtitles, intro_start, intro_end,
+  stream_url, download_480p, download_720p, download_1080p,
+  file_size_480p, file_size_720p, file_size_1080p, is_trending, updated_at
+) ON TABLE public.movie_links TO anon, authenticated;
 GRANT INSERT, UPDATE, DELETE ON TABLE public.movie_links TO authenticated;
 
 DROP POLICY IF EXISTS "movie_links_public_select" ON public.movie_links;
@@ -192,13 +192,17 @@ CREATE POLICY "movie_links_admin_write"
   USING (public.is_cinebox_admin())
   WITH CHECK (public.is_cinebox_admin());
 
--- 7. app_users: Private (Zero anon access; Authenticated self-read or Admin full control)
+-- 7. app_users: Private (Zero anon access; Authenticated self-read/update or Admin full control)
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.app_users TO authenticated;
 
 DROP POLICY IF EXISTS "app_users_self_or_admin_select" ON public.app_users;
 CREATE POLICY "app_users_self_or_admin_select"
   ON public.app_users FOR SELECT TO authenticated
-  USING (public.is_cinebox_admin() OR lower(email) = lower(COALESCE(auth.jwt() ->> 'email', '')));
+  USING (
+    public.is_cinebox_admin()
+    OR id = (auth.uid())::text
+    OR lower(email) = lower(COALESCE(auth.jwt() ->> 'email', ''))
+  );
 
 DROP POLICY IF EXISTS "app_users_admin_write" ON public.app_users;
 CREATE POLICY "app_users_admin_write"
@@ -206,7 +210,7 @@ CREATE POLICY "app_users_admin_write"
   USING (public.is_cinebox_admin())
   WITH CHECK (public.is_cinebox_admin());
 
--- 8. app_config: Column-level SELECT (hides admin_pin_hash & admin_email from anon) + Admin-only writes
+-- 8. app_config: Column-level SELECT on non-sensitive columns + Admin-only writes
 GRANT SELECT (
   id, app_name, primary_theme, is_ads_enabled, popup_ad_image, popup_ad_link,
   direct_ad_link, banner_ad_html, official_website, decentralized_manifest_url,
@@ -246,8 +250,8 @@ const ANDROID_MANIFEST_SNIPPET = `<!-- android/app/src/main/AndroidManifest.xml 
 <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
 <application
-    android:usesCleartextTraffic="true"
-    android:requestLegacyExternalStorage="true"
+    android:allowBackup="false"
+    android:usesCleartextTraffic="false"
     android:hardwareAccelerated="true" ...>`;
 
 const CAPACITOR_CLI_COMMANDS = `# 1. Install dependencies & Capacitor Android platform
@@ -293,12 +297,10 @@ export const AdminAndDeliverablesModal: React.FC<AdminAndDeliverablesModalProps>
   const [activeTab, setActiveTab] = useState<AdminSectionTab>(
     initialTab === 'deliverables' ? 'deliverables' : 'bulk'
   );
-  const [pinInput, setPinInput] = useState<string>('');
-  const [pinError, setPinError] = useState<string>('');
-  const [rateLimitState, setRateLimitState] = useState<PinRateLimitState>({
-    failedAttempts: 0,
-    lockedUntilMs: 0,
-  });
+  const [adminEmailInput, setAdminEmailInput] = useState<string>('');
+  const [adminPasswordInput, setAdminPasswordInput] = useState<string>('');
+  const [adminAuthError, setAdminAuthError] = useState<string>('');
+  const [isAdminSigningIn, setIsAdminSigningIn] = useState<boolean>(false);
 
   // 1. Single Movie Link Form State
   const [existingLinks, setExistingLinks] = useState<MovieLinkRecord[]>([]);
@@ -366,7 +368,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
   const [manifestJsonPreview, setManifestJsonPreview] = useState<string>('');
   const [isSyncingNode, setIsSyncingNode] = useState<boolean>(false);
 
-  // 5. App Config, Ad-Free Mode & Forgot PIN State
+  // 5. App Config & Ad-Free Mode State
   const [appName, setAppName] = useState<string>(appConfig.app_name);
   const [primaryTheme, setPrimaryTheme] = useState<ThemeColorId>(appConfig.primary_theme);
   const [isAdsEnabled, setIsAdsEnabled] = useState<boolean>(appConfig.is_ads_enabled);
@@ -374,7 +376,6 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
   const [popupAdLink, setPopupAdLink] = useState<string>(appConfig.popup_ad_link);
   const [directAdLink, setDirectAdLink] = useState<string>(appConfig.direct_ad_link);
   const [bannerAdHtml, setBannerAdHtml] = useState<string>(appConfig.banner_ad_html);
-  const [newAdminPin, setNewAdminPin] = useState<string>(appConfig.admin_pin_hash || '1234');
   const [maintenanceMode, setMaintenanceMode] = useState<boolean>(
     Boolean(appConfig.maintenance_mode)
   );
@@ -401,12 +402,15 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
     appConfig.show_app_open_ad_once !== false
   );
 
-  // Global APK Download Link (Google Drive / Direct URL) & Version State
+  // Global APK Download Link (Google Drive / Direct URL), Official Website & Version State
+  const [officialWebsite, setOfficialWebsite] = useState<string>(
+    appConfig.official_website || 'https://cineboxmovies.ai.studio'
+  );
   const [apkDownloadUrl, setApkDownloadUrl] = useState<string>(
     appConfig.apk_download_url || DEFAULT_GLOBAL_APK_DOWNLOAD_URL
   );
   const [apkLatestVersion, setApkLatestVersion] = useState<string>(
-    appConfig.apk_latest_version || '1.0.1'
+    appConfig.apk_latest_version || '1.0.2'
   );
   const [apkReleaseNotes, setApkReleaseNotes] = useState<string>(
     appConfig.apk_release_notes ||
@@ -414,6 +418,9 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
   );
 
   useEffect(() => {
+    if (appConfig.official_website) {
+      setOfficialWebsite(appConfig.official_website);
+    }
     if (appConfig.apk_download_url) {
       setApkDownloadUrl(appConfig.apk_download_url);
     }
@@ -424,22 +431,16 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       setApkReleaseNotes(appConfig.apk_release_notes);
     }
   }, [
+    appConfig.official_website,
     appConfig.apk_download_url,
     appConfig.apk_latest_version,
     appConfig.apk_release_notes,
   ]);
 
-  // Forgot Admin PIN Recovery State
-  const [showForgotPin, setShowForgotPin] = useState<boolean>(false);
-  const [recoveryEmail, setRecoveryEmail] = useState<string>('');
-  const [recoveryNewPin, setRecoveryNewPin] = useState<string>('');
-  const [recoveryError, setRecoveryError] = useState<string>('');
-
-  // 6. API Credentials & Live Supabase Diagnostics State
-  const [tmdbKey, setTmdbKey] = useState<string>(getActiveTmdbApiKey());
+  // 6. Environment & Proxy Diagnostics State
   const supaCreds = getSupabaseCredentials();
-  const [supabaseUrl, setSupabaseUrl] = useState<string>(supaCreds.url);
-  const [supabaseKey, setSupabaseKey] = useState<string>(supaCreds.anonKey);
+  const activeTmdbProxyUrl = getActiveTmdbProxyUrl();
+  const activeCorsProxyUrl = getActiveCorsProxyBaseUrl();
   const [copiedBlock, setCopiedBlock] = useState<string>('');
   const [supaDiag, setSupaDiag] = useState<SupabaseDiagnosticReport | null>(null);
   const [isTestingSupa, setIsTestingSupa] = useState<boolean>(false);
@@ -479,50 +480,41 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
     }, 4500);
   };
 
-  // STRICT ADMIN PIN VERIFICATION (Guards ALL tabs including APK & SQL Schema)
-  const handlePinSubmit = (e: React.FormEvent) => {
+  // PHASE 1: SUPABASE AUTH ADMIN SIGN-IN (Verifies JWT app_metadata.role = 'admin')
+  const handleAdminAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = verifyAdminPinWithRateLimit(
-      pinInput,
-      appConfig.admin_pin_hash || '1234',
-      rateLimitState
-    );
-    setRateLimitState(res.nextState);
-    if (res.allowed) {
-      onUnlockAdmin();
-      setPinError('');
-    } else if (res.locked) {
-      setPinError(`Too many failed attempts. Locked for ${res.remainingLockSeconds}s.`);
-    } else {
-      setPinError(
-        `Invalid Admin PIN. ${5 - res.nextState.failedAttempts} attempts left.`
-      );
+    setAdminAuthError('');
+    setIsAdminSigningIn(true);
+    try {
+      const res = await signInAdminWithSupabase(adminEmailInput, adminPasswordInput);
+      if (res.ok) {
+        onUnlockAdmin();
+        setAdminAuthError('');
+        setAdminPasswordInput('');
+      } else {
+        setAdminAuthError(
+          res.error ||
+            'Admin authentication failed. Ensure your user has app_metadata.role = "admin" in Supabase Auth.'
+        );
+      }
+    } finally {
+      setIsAdminSigningIn(false);
     }
   };
 
-  const handleForgotPinSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setRecoveryError('');
-    const check = verifyAdminPinRecovery(
-      recoveryEmail,
-      appConfig.admin_email || 'ZulqarnainShah25@gmail.com',
-      recoveryNewPin
-    );
-    if (!check.valid || !check.sanitizedPin) {
-      setRecoveryError(check.error || 'Invalid recovery details.');
-      return;
+  const handleSendAdminMagicLink = async () => {
+    setAdminAuthError('');
+    setIsAdminSigningIn(true);
+    try {
+      const res = await sendAdminMagicLink(adminEmailInput);
+      if (res.ok) {
+        showTempBanner(res.message || 'Admin Magic Link sent! Check your inbox.');
+      } else {
+        setAdminAuthError(res.error || 'Could not send Magic Link.');
+      }
+    } finally {
+      setIsAdminSigningIn(false);
     }
-
-    const updatedRes = await updateAppConfig({
-      admin_pin_hash: check.sanitizedPin,
-    });
-    setNewAdminPin(check.sanitizedPin);
-    onConfigUpdated(updatedRes.config);
-    setShowForgotPin(false);
-    setRecoveryEmail('');
-    setRecoveryNewPin('');
-    onUnlockAdmin();
-    showTempBanner('Admin PIN successfully reset and saved to global config!');
   };
 
   const handleSelectExistingMovie = (mId: number) => {
@@ -637,13 +629,12 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
 
     setIsMatchingTmdb(true);
     setMatchProgress({ current: 0, total: targetItems.length });
-    const currentApiKey = tmdbKey || '3fd2be6f0c70a2a598f084ddfb75487c';
 
     const updated: VideoHosterFileItem[] = [];
     for (let i = 0; i < targetItems.length; i++) {
       const item = targetItems[i];
       const parsed = parseMovieFileName(item.title);
-      const matched = await matchTitleWithTmdb(parsed.cleanTitle, parsed.year, currentApiKey);
+      const matched = await matchTitleWithTmdb(parsed.cleanTitle, parsed.year);
 
       if (matched) {
         updated.push({
@@ -815,7 +806,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       popup_ad_link: popupAdLink,
       direct_ad_link: directAdLink,
       banner_ad_html: bannerAdHtml,
-      admin_pin_hash: newAdminPin.trim() || '1234',
+      official_website: officialWebsite.trim() || 'https://cineboxmovies.ai.studio',
       decentralized_manifest_url: decentralizedUrl.trim(),
       maintenance_mode: maintenanceMode,
       allow_guest_downloads: allowGuestDownloads,
@@ -827,12 +818,13 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       open_ads_same_tab: openAdsSameTab,
       show_app_open_ad_once: showAppOpenAdOnce,
       apk_download_url: apkDownloadUrl.trim() || DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
-      apk_latest_version: apkLatestVersion.trim() || '1.0.1',
+      apk_latest_version: apkLatestVersion.trim() || '1.0.2',
       apk_release_notes: apkReleaseNotes.trim(),
       ...partialOverride,
     });
+    setOfficialWebsite(res.config.official_website || 'https://cineboxmovies.ai.studio');
     onConfigUpdated(res.config);
-    showTempBanner('Global App Config & APK Download Link saved to Supabase across all users!');
+    showTempBanner('Global App Config, Official Website & APK Download Link saved to Supabase across all users!');
   };
 
   const handleSaveGlobalApkDownloadLink = async (e?: React.FormEvent) => {
@@ -843,30 +835,20 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
       return;
     }
     const cleanVer =
-      apkLatestVersion.trim().replace(/^v/i, '') || '1.0.1';
+      apkLatestVersion.trim().replace(/^v/i, '') || '1.0.2';
     const res = await updateAppConfig({
+      official_website: officialWebsite.trim() || 'https://cineboxmovies.ai.studio',
       apk_download_url: safeUrl,
       apk_latest_version: cleanVer,
       apk_release_notes: apkReleaseNotes.trim(),
     });
+    setOfficialWebsite(res.config.official_website || 'https://cineboxmovies.ai.studio');
     setApkDownloadUrl(res.config.apk_download_url || safeUrl);
     setApkLatestVersion(res.config.apk_latest_version || cleanVer);
     onConfigUpdated(res.config);
     showTempBanner(
-      `Global APK Download Link (v${cleanVer}) updated! All Web & APK users now receive this link globally.`
+      `Global APK Link (v${cleanVer}) & Official Website (${res.config.official_website}) updated globally!`
     );
-  };
-
-  const handleSaveApiCredentials = (e: React.FormEvent) => {
-    e.preventDefault();
-    setCustomTmdbApiKey(tmdbKey);
-    const supaRes = setSupabaseCredentials(supabaseUrl, supabaseKey);
-    if (!supaRes.ok) {
-      showTempBanner(supaRes.error || 'Rejected unsafe Supabase key.');
-      return;
-    }
-    onLinksUpdated();
-    showTempBanner('TMDb API Key & Supabase Global Database credentials updated!');
   };
 
   const copyCode = (label: string, text: string) => {
@@ -915,13 +897,14 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                 type="button"
                 data-testid="lock-admin-session-btn"
                 onClick={() => {
+                  void signOutSupabaseSession();
                   onLockAdmin();
                   onClose();
                 }}
                 className="px-3 py-1.5 rounded-xl bg-rose-950/80 hover:bg-rose-900 border border-rose-500/40 text-rose-300 text-xs font-bold flex items-center gap-1.5"
               >
                 <LogOut className="w-3.5 h-3.5" />
-                <span>Lock Admin</span>
+                <span>Sign Out Admin</span>
               </button>
             )}
             <button
@@ -1066,137 +1049,83 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
         <div className="flex-1 overflow-y-auto p-5 space-y-6">
           {!isAdminUnlocked ? (
             /* =================================================================
-               STRICT ADMIN AUTHENTICATION GATE (Default PIN hidden + Forgot PIN option)
+               PHASE 1: SUPABASE AUTH ADMIN GATE (JWT app_metadata.role = 'admin')
                ================================================================= */
-            !showForgotPin ? (
-              <form
-                onSubmit={handlePinSubmit}
-                data-testid="admin-pin-gate-form"
-                className="max-w-md mx-auto my-6 p-6 rounded-2xl bg-[#171c28] border border-slate-700/80 space-y-4 text-center shadow-2xl"
-              >
-                <div className="w-14 h-14 rounded-2xl bg-[#10d97b]/15 border border-[#10d97b]/30 text-[#10d97b] flex items-center justify-center mx-auto">
-                  <KeyRound className="w-7 h-7" />
-                </div>
-                <div className="space-y-1">
-                  <h3 className="text-base sm:text-lg font-extrabold text-white">
-                    Restricted Admin-Only Access
-                  </h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    <strong>APK &amp; SQL Schema</strong>, <strong>Bulk Movie Link Uploads</strong>,
-                    and <strong>Global Users Control</strong> are strictly locked for the
-                    Administrator. Protected by brute-force rate-limiting (5 attempts max).
-                  </p>
-                </div>
+            <form
+              onSubmit={handleAdminAuthSubmit}
+              data-testid="admin-auth-gate-form"
+              className="max-w-md mx-auto my-6 p-6 rounded-2xl bg-[#171c28] border border-slate-700/80 space-y-4 text-left shadow-2xl"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-[#10d97b]/15 border border-[#10d97b]/30 text-[#10d97b] flex items-center justify-center mx-auto">
+                <KeyRound className="w-7 h-7" />
+              </div>
+              <div className="text-center space-y-1">
+                <h3 className="text-base sm:text-lg font-extrabold text-white">
+                  Supabase Auth Administrator Sign-In
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Sign in with your Supabase Administrator account. Access requires server-verified
+                  JWT claim <code className="text-[#10d97b]">app_metadata.role = &apos;admin&apos;</code>.
+                </p>
+              </div>
 
-                <div className="p-2.5 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-300 font-mono">
-                  Protected by Encrypted Admin PIN &amp; Brute-Force Lockout
-                </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">
+                  Administrator Email
+                </label>
+                <input
+                  type="email"
+                  required
+                  data-testid="admin-email-input"
+                  value={adminEmailInput}
+                  onChange={(e) => setAdminEmailInput(e.target.value)}
+                  placeholder="admin@yourdomain.com"
+                  aria-label="Administrator Email"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:border-[#10d97b] focus:outline-none"
+                />
+              </div>
 
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">
+                  Administrator Password
+                </label>
                 <input
                   type="password"
-                  data-testid="admin-pin-input"
-                  value={pinInput}
-                  onChange={(e) => setPinInput(e.target.value)}
-                  placeholder="Enter Secret Admin PIN"
-                  aria-label="Admin PIN"
-                  className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-center font-mono text-lg tracking-widest text-white focus:border-[#10d97b] focus:outline-none"
+                  required
+                  data-testid="admin-password-input"
+                  value={adminPasswordInput}
+                  onChange={(e) => setAdminPasswordInput(e.target.value)}
+                  placeholder="Enter your Supabase Auth password"
+                  aria-label="Administrator Password"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:border-[#10d97b] focus:outline-none"
                 />
+              </div>
 
-                {pinError && (
-                  <p data-testid="admin-pin-error" className="text-xs text-rose-400 font-bold">
-                    {pinError}
-                  </p>
-                )}
+              {adminAuthError && (
+                <p data-testid="admin-auth-error" className="text-xs text-rose-400 font-bold">
+                  {adminAuthError}
+                </p>
+              )}
 
-                <button
-                  type="submit"
-                  data-testid="admin-pin-submit-btn"
-                  className="w-full py-3 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-sm transition-colors"
-                >
-                  Unlock Global Admin Console
-                </button>
-
-                <button
-                  type="button"
-                  data-testid="forgot-admin-pin-btn"
-                  onClick={() => {
-                    setRecoveryError('');
-                    setShowForgotPin(true);
-                  }}
-                  className="text-xs text-[#10d97b] hover:underline font-semibold"
-                >
-                  Forgot Admin PIN? Recover via Registered Admin Email
-                </button>
-              </form>
-            ) : (
-              <form
-                onSubmit={handleForgotPinSubmit}
-                data-testid="admin-pin-recovery-form"
-                className="max-w-md mx-auto my-6 p-6 rounded-2xl bg-[#171c28] border border-slate-700/80 space-y-4 text-left shadow-2xl"
+              <button
+                type="submit"
+                disabled={isAdminSigningIn}
+                data-testid="admin-auth-submit-btn"
+                className="w-full py-3 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] disabled:opacity-50 text-slate-950 font-extrabold text-sm transition-colors"
               >
-                <div className="text-center space-y-1">
-                  <h3 className="text-base sm:text-lg font-extrabold text-white">
-                    Recover / Reset Admin PIN
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Verify your registered Administrator email to set a new Secret Admin PIN.
-                  </p>
-                </div>
+                {isAdminSigningIn ? 'Verifying JWT Admin Claim...' : 'Sign In to Admin Console'}
+              </button>
 
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">
-                    Registered Administrator Email
-                  </label>
-                  <input
-                    type="email"
-                    required
-                    data-testid="recovery-admin-email-input"
-                    value={recoveryEmail}
-                    onChange={(e) => setRecoveryEmail(e.target.value)}
-                    placeholder="Enter registered Admin email"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:border-[#10d97b] focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">
-                    New Secret Admin PIN (4–16 chars)
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    data-testid="recovery-new-pin-input"
-                    value={recoveryNewPin}
-                    onChange={(e) => setRecoveryNewPin(e.target.value)}
-                    placeholder="Enter new Admin PIN"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-white focus:border-[#10d97b] focus:outline-none"
-                  />
-                </div>
-
-                {recoveryError && (
-                  <p data-testid="recovery-pin-error" className="text-xs text-rose-400 font-bold">
-                    {recoveryError}
-                  </p>
-                )}
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    data-testid="recovery-submit-btn"
-                    className="flex-1 py-2.5 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs"
-                  >
-                    Verify Email &amp; Reset PIN
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowForgotPin(false)}
-                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs"
-                  >
-                    Back to Login
-                  </button>
-                </div>
-              </form>
-            )
+              <button
+                type="button"
+                disabled={isAdminSigningIn}
+                data-testid="admin-magic-link-btn"
+                onClick={handleSendAdminMagicLink}
+                className="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs text-[#10d97b] font-semibold transition-colors"
+              >
+                Send Admin Magic Link (Email OTP)
+              </button>
+            </form>
           ) : activeTab === 'apk-download' ? (
             /* =================================================================
                TAB 0: GLOBAL APK DOWNLOAD LINK & VERSION MANAGER (GOOGLE DRIVE / DIRECT)
@@ -1215,7 +1144,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                     </span>
                   </h3>
                   <span className="px-2.5 py-1 rounded-lg bg-[#10d97b]/15 border border-[#10d97b]/40 text-[11px] font-mono font-bold text-[#10d97b]">
-                    Active Global Version: v{apkLatestVersion || '1.0.1'}
+                    Active Global Version: v{apkLatestVersion || '1.0.2'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed">
@@ -1320,6 +1249,24 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:border-[#10d97b] focus:outline-none"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-white mb-1.5">
+                    4. Official Website Domain / Link (`official_website`) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    data-testid="admin-official-website-input"
+                    value={officialWebsite}
+                    onChange={(e) => setOfficialWebsite(e.target.value)}
+                    placeholder="https://cineboxmovies.ai.studio"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs font-mono text-[#10d97b] focus:border-[#10d97b] focus:outline-none"
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Linked globally with Home (&ldquo;Watch on TV &amp; Web&rdquo;), Profile (&ldquo;Me&rdquo;), and Referral Share Links. Default: <code>https://cineboxmovies.ai.studio</code>
+                  </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 pt-2">
@@ -2136,14 +2083,14 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
 
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">
-                    Secret Admin PIN (`admin_pin_hash`)
+                    Official Website (`official_website`)
                   </label>
                   <input
-                    type="password"
-                    value={newAdminPin}
-                    onChange={(e) => setNewAdminPin(e.target.value)}
-                    placeholder="Enter new Admin PIN"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                    type="text"
+                    value={officialWebsite}
+                    onChange={(e) => setOfficialWebsite(e.target.value)}
+                    placeholder="https://cineboxmovies.ai.studio"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-[#10d97b]"
                   />
                 </div>
               </div>
@@ -2156,7 +2103,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                     <span>Global APK Download Link (Google Drive / Direct URL)</span>
                   </div>
                   <span className="text-[11px] font-mono text-[#10d97b]">
-                    v{apkLatestVersion || '1.0.1'}
+                    v{apkLatestVersion || '1.0.2'}
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
@@ -2287,54 +2234,55 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
               </button>
             </form>
           ) : activeTab === 'api' ? (
-            /* TAB 6: TMDB API & SUPABASE CONNECTION SETTINGS */
-            <form onSubmit={handleSaveApiCredentials} className="space-y-4 max-w-xl">
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">
-                  TMDb API v3 Key (`TMDB_API_KEY`)
-                </label>
-                <input
-                  type="text"
-                  value={tmdbKey}
-                  onChange={(e) => setTmdbKey(e.target.value)}
-                  placeholder="Enter TMDb v3 API key"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
-                />
-              </div>
+            /* TAB 6: DEPLOYED SUPABASE EDGE FUNCTIONS (TMDB-PROXY & CORS-PROXY) & ENVIRONMENT SECURITY STATUS */
+            <div className="space-y-4 max-w-2xl" data-testid="admin-env-security-panel">
+              <div className="p-4 rounded-2xl bg-slate-900 border border-[#10d97b]/40 space-y-3">
+                <div className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-[#10d97b]" />
+                  <span>
+                    Live Supabase Edge Functions (`tmdb-proxy` &amp; `cors-proxy`) &amp; Environment Security
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  All API keys and proxy endpoints are strictly configured via{' '}
+                  <code className="text-[#10d97b]">import.meta.env.VITE_*</code> and server-side
+                  Supabase Edge Functions. Client-side key storage in{' '}
+                  <code>localStorage</code> is disabled. Every TMDB request automatically attaches{' '}
+                  <code>apikey</code> and <code>Authorization: Bearer &lt;VITE_SUPABASE_ANON_KEY&gt;</code>{' '}
+                  headers, and external stream extraction calls route through{' '}
+                  <code>cors-proxy?target=&#123;original_url&#125;</code>.
+                </p>
 
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">
-                  Supabase Project URL (`VITE_SUPABASE_URL`)
-                </label>
-                <input
-                  type="url"
-                  value={supabaseUrl}
-                  onChange={(e) => setSupabaseUrl(e.target.value)}
-                  placeholder="https://your-project.supabase.co"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
-                />
+                <div className="space-y-2 text-xs font-mono">
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                    <span className="text-slate-400">VITE_TMDB_PROXY_URL</span>
+                    <span className="text-[#10d97b] break-all">
+                      {activeTmdbProxyUrl || 'Not Set'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                    <span className="text-slate-400">VITE_CORS_PROXY_URL</span>
+                    <span className="text-[#10d97b] break-all">
+                      {activeCorsProxyUrl || 'Not Set'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                    <span className="text-slate-400">VITE_SUPABASE_URL</span>
+                    <span className="text-slate-200 break-all">
+                      {supaCreds.url || 'Not Configured'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                    <span className="text-slate-400">VITE_SUPABASE_ANON_KEY</span>
+                    <span className="text-slate-200">
+                      {supaCreds.anonKey
+                        ? 'Configured (Sent in apikey & Authorization headers)'
+                        : 'Not Set (Add in .env)'}
+                    </span>
+                  </div>
+                </div>
               </div>
-
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">
-                  Supabase Anon Public Key (`VITE_SUPABASE_ANON_KEY`)
-                </label>
-                <input
-                  type="password"
-                  value={supabaseKey}
-                  onChange={(e) => setSupabaseKey(e.target.value)}
-                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-bold text-xs sm:text-sm"
-              >
-                Save API &amp; Global Database Credentials
-              </button>
-            </form>
+            </div>
           ) : (
             /* TAB 7: SECURED ADMIN-ONLY DELIVERABLES (SUPABASE SQL + ANDROIDMANIFEST.XML + CAPACITOR APK) */
             <div className="space-y-5">

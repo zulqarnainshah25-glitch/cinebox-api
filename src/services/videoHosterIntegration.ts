@@ -1,5 +1,6 @@
 import { MovieLinkRecord } from '../types/movie';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
+import { buildTmdbProxyHeaders, buildTmdbRequestUrl } from './tmdbService';
 
 export interface VideoHosterAccountConfig {
   hoster: 'streamwish' | 'filemoon' | 'vidhide' | 'doodstream' | 'custom';
@@ -64,19 +65,14 @@ export const HOSTER_API_PRESETS: Record<
   },
 };
 
-/**
- * Extracts a clean movie search title and year from typical video file names:
- * e.g., "Deadpool.and.Wolverine.2024.1080p.WEBRip.Hindi.x264.mp4" -> { cleanTitle: "Deadpool and Wolverine", year: "2024" }
- */
 export function parseMovieFileName(rawName: string): { cleanTitle: string; year?: string } {
   if (!rawName) return { cleanTitle: '' };
 
   let name = rawName
-    .replace(/\.[a-z0-9]{2,4}$/i, '') // strip extension (.mp4, .mkv)
-    .replace(/[._]/g, ' ') // replace dots and underscores with spaces
+    .replace(/\.[a-z0-9]{2,4}$/i, '')
+    .replace(/[._]/g, ' ')
     .trim();
 
-  // Look for 4-digit release year (1950 - 2035)
   const yearMatch = name.match(/\b(19\d\d|20[0-3]\d)\b/);
   const year = yearMatch ? yearMatch[1] : undefined;
 
@@ -87,7 +83,6 @@ export function parseMovieFileName(rawName: string): { cleanTitle: string; year?
     }
   }
 
-  // Remove common scene tags
   name = name
     .replace(
       /\b(1080p|720p|480p|2160p|4k|uhd|bluray|blu-ray|webrip|web-dl|hdrip|dvdrip|camrip|hdcam|x264|x265|hevc|aac|hindi|english|dual audio|org|dubbed|subbed)\b/gi,
@@ -101,24 +96,25 @@ export function parseMovieFileName(rawName: string): { cleanTitle: string; year?
 }
 
 /**
- * Search TMDb API for a given movie title to find its exact `tmdb_id`.
+ * Search TMDb API via the deployed Supabase `tmdb-proxy` (sending `apikey` and `Authorization` headers).
  */
 export async function matchTitleWithTmdb(
   cleanTitle: string,
-  year?: string,
-  apiKey: string = '3fd2be6f0c70a2a598f084ddfb75487c'
+  year?: string
 ): Promise<{ tmdbId: number; title: string; year: string; posterPath?: string } | null> {
   if (!cleanTitle || cleanTitle.trim().length === 0) return null;
 
   try {
-    let url = `https://api.themoviedb.org/3/search/movie?api_key=${encodeURIComponent(
-      apiKey
-    )}&query=${encodeURIComponent(cleanTitle)}`;
-    if (year) {
-      url += `&year=${encodeURIComponent(year)}`;
-    }
+    const params: Record<string, string> = { query: cleanTitle };
+    if (year) params.year = year;
 
-    const res = await fetch(url);
+    const url = buildTmdbRequestUrl('/search/movie', params);
+    if (!url) return null;
+
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: buildTmdbProxyHeaders(),
+    });
     if (!res.ok) return null;
     const data = await res.json();
     if (Array.isArray(data.results) && data.results.length > 0) {
@@ -136,10 +132,6 @@ export async function matchTitleWithTmdb(
   }
 }
 
-/**
- * Parses raw JSON or CSV data from Video Hosters (StreamWish, FileMoon, VidHide, etc.)
- * or custom lists into normalized file items.
- */
 export function parseHosterFilesList(
   input: string,
   hoster: string = 'streamwish'
@@ -147,7 +139,6 @@ export function parseHosterFilesList(
   const trimmed = input.trim();
   if (!trimmed) return [];
 
-  // 1. Try parsing as JSON from hoster API
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       const parsed = JSON.parse(trimmed);
@@ -161,29 +152,31 @@ export function parseHosterFilesList(
         ? parsed.files
         : [];
 
-      return rawList.map((item: any) => {
-        const fileCode = item.file_code || item.filecode || item.code || item.id || '';
-        const title = item.title || item.file_title || item.name || `Movie_${fileCode}`;
-        const embedUrl =
-          item.embed_url ||
-          (fileCode ? `https://${hoster}.com/e/${fileCode}` : '');
-        const directDownload = item.download_url || item.direct_url || undefined;
-        const sizeMb = item.size ? Math.round((Number(item.size) / (1024 * 1024)) * 10) / 10 : undefined;
+      return rawList
+        .map((item: any) => {
+          const fileCode = item.file_code || item.filecode || item.code || item.id || '';
+          const title = item.title || item.file_title || item.name || `Movie_${fileCode}`;
+          const embedUrl =
+            item.embed_url || (fileCode ? `https://${hoster}.com/e/${fileCode}` : '');
+          const directDownload = item.download_url || item.direct_url || undefined;
+          const sizeMb = item.size
+            ? Math.round((Number(item.size) / (1024 * 1024)) * 10) / 10
+            : undefined;
 
-        return {
-          fileCode: String(fileCode),
-          title: String(title),
-          embedUrl: sanitizeSafeUrl(embedUrl) || '',
-          directDownloadUrl: sanitizeSafeUrl(directDownload) || undefined,
-          fileSizeMb: sizeMb,
-        };
-      }).filter((f: VideoHosterFileItem) => f.title && (f.embedUrl || f.fileCode));
+          return {
+            fileCode: String(fileCode),
+            title: String(title),
+            embedUrl: sanitizeSafeUrl(embedUrl) || '',
+            directDownloadUrl: sanitizeSafeUrl(directDownload) || undefined,
+            fileSizeMb: sizeMb,
+          };
+        })
+        .filter((f: VideoHosterFileItem) => f.title && (f.embedUrl || f.fileCode));
     } catch {
       // Fallback to line-by-line parsing
     }
   }
 
-  // 2. Parse text/CSV format: "Title | FileCode or EmbedURL | DirectDownloadURL (optional)"
   const lines = trimmed.split('\n');
   const items: VideoHosterFileItem[] = [];
 
@@ -191,7 +184,6 @@ export function parseHosterFilesList(
     const l = line.trim();
     if (!l || l.startsWith('#') || l.startsWith('//')) continue;
 
-    // Split by pipe '|', comma, or tab
     const parts = l.includes('|')
       ? l.split('|')
       : l.includes('\t')
@@ -226,9 +218,6 @@ export function parseHosterFilesList(
   return items;
 }
 
-/**
- * Converts a VideoHosterFileItem with matched TMDb metadata into a Supabase `MovieLinkRecord`.
- */
 export function buildMovieLinkRecordFromHoster(
   item: VideoHosterFileItem,
   defaultLang: string = 'Hindi Dubbed'

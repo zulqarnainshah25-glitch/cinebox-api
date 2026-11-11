@@ -1,4 +1,5 @@
 import { sanitizeSearchQuery } from '../utils/streamResolver';
+import { buildCorsProxyHeaders, buildProxiedUrl } from './movieBoxDirectApi';
 
 export interface DramaOrHindiStreamOption {
   id: string;
@@ -188,7 +189,16 @@ export async function searchPakDramaOrHindiStreams(params: {
       queryUsed
     )}&limit=15&fields=id,title,duration,thumbnail_url`;
 
-    const res = await fetch(apiUrl, { signal: controller.signal });
+    let res: Response;
+    try {
+      res = await fetch(apiUrl, { signal: controller.signal });
+    } catch {
+      const proxiedUrl = buildProxiedUrl(apiUrl);
+      res = await fetch(proxiedUrl, {
+        headers: buildCorsProxyHeaders(proxiedUrl),
+        signal: controller.signal,
+      });
+    }
     clearTimeout(timer);
 
     if (!res.ok) {

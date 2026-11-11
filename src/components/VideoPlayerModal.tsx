@@ -29,7 +29,9 @@ import {
   Save,
   Server,
   Settings,
+  Shield,
   ShieldCheck,
+  ShieldOff,
   Smartphone,
   Sparkles,
   Subtitles,
@@ -52,11 +54,13 @@ import {
   SourceAvailabilityStatus,
 } from '../types/movie';
 import {
-  FALLBACK_MULTI_AUDIO_HLS_URL,
+  buildVidSrcAdBlockCssRules,
   formatPlayerTimecode,
-  getBlobStreamAlertState,
   getCleanIframeAttributes,
   getFullscreenPlayerConfig,
+  getVidSrcPlayerIframeAttributes,
+  installVidSrcNetworkAdInterceptor,
+  isVidSrcProviderUrl,
   lockScreenOrientationSafely,
   PLAYABLE_HD_STREAMS_POOL,
   resolvePlaybackPlan,
@@ -70,7 +74,6 @@ import {
   switchEmbeddedAudioTrackSafely,
   VerifiedAudioTrack,
 } from '../services/streamSourceManager';
-import { CustomHeaderBlobPlayer } from './CustomHeaderBlobPlayer';
 import {
   EXTRACTION_UNAVAILABLE_MESSAGE,
   extractStreamFromEmbedServers,
@@ -97,10 +100,6 @@ interface VideoPlayerModalProps {
   appConfig: AppConfigRecord;
   offlineDownload?: DownloadItem | null;
   isInWatchlist: boolean;
-  isFetchingStream?: boolean;
-  streamFetchError?: string | null;
-  movieBoxDirectStreamUrl?: string | null;
-  onRetryStreamFetch?: () => void;
   onClose: () => void;
   onToggleWatchlist: (movie: MovieItem) => void;
   onStartDownload: (movie: MovieItem, quality: DownloadQuality, url: string, sizeMB: number) => void;
@@ -146,10 +145,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   appConfig,
   offlineDownload,
   isInWatchlist,
-  isFetchingStream = false,
-  streamFetchError = null,
-  movieBoxDirectStreamUrl = null,
-  onRetryStreamFetch,
   onClose,
   onToggleWatchlist,
   onStartDownload,
@@ -174,16 +169,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const isPakDrama = isPakistaniOrUrduContent(movie);
 
   const [playerMode, setPlayerMode] = useState<
-    'direct' | 'blob' | 'trailer' | 'embed' | 'pak-drama'
+    'direct' | 'trailer' | 'embed' | 'pak-drama'
   >(
-    offlineDownload || plan.directVideoUrl
+    offlineDownload
       ? 'direct'
       : isPakDrama
       ? 'pak-drama'
       : 'embed'
   );
   const [selectedEmbedId, setSelectedEmbedId] = useState<string>(
-    movieLink?.stream_url ? 'custom-supabase' : 'auto-server-1'
+    movieLink?.stream_url ? 'custom-supabase' : 'auto-server-3'
   );
 
   // VidSrc.sh Content Info Metadata & Watch Progress State
@@ -247,15 +242,40 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [linkSaveMessage, setLinkSaveMessage] = useState<string | null>(null);
   const [isSavingLink, setIsSavingLink] = useState<boolean>(false);
 
-  const hasRealBlobMp4 = Boolean(
-    movieBoxDirectStreamUrl ||
-      (plan.directVideoUrl && !plan.directVideoUrl.toLowerCase().includes('.m3u8'))
-  );
+  // VidSrc.sh Real AdBlocker State (Strict Iframe Sandbox + Window Popup/Redirect Shield)
+  const [isVidSrcAdBlockerEnabled, setIsVidSrcAdBlockerEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('cinebox_vidsrc_adblocker_v1');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [blockedAdsCount, setBlockedAdsCount] = useState<number>(0);
+  const [adBlockToast, setAdBlockToast] = useState<string | null>(null);
 
-  // 2Embed / VidSrc Stream Extraction State
-  const [isExtractingStream, setIsExtractingStream] = useState<boolean>(false);
-  const [extractionResult, setExtractionResult] = useState<StreamExtractionResult | null>(null);
-  const [isStreamErrorDismissed, setIsStreamErrorDismissed] = useState<boolean>(false);
+  const handleToggleVidSrcAdBlocker = () => {
+    setIsVidSrcAdBlockerEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('cinebox_vidsrc_adblocker_v1', String(next));
+      } catch {
+        // ignore storage quota errors
+      }
+      setAdBlockToast(
+        next
+          ? '🛡️ VidSrc.sh AdBlocker Enabled — Popup Ads Blocked'
+          : '⚠️ VidSrc.sh AdBlocker Disabled'
+      );
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!adBlockToast) return;
+    const timer = setTimeout(() => setAdBlockToast(null), 3000);
+    return () => clearTimeout(timer);
+  }, [adBlockToast]);
 
   // Custom HTML5 & HLS.js Video Player State
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -275,28 +295,72 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [isPipActive, setIsPipActive] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [areControlsVisible, setAreControlsVisible] = useState<boolean>(true);
+  const controlsHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleControlsAutoHide = () => {
+    if (controlsHideTimerRef.current) {
+      clearTimeout(controlsHideTimerRef.current);
+      controlsHideTimerRef.current = null;
+    }
+    controlsHideTimerRef.current = setTimeout(() => {
+      setAreControlsVisible(false);
+      controlsHideTimerRef.current = null;
+    }, 3500);
+  };
+
+  const handleWakeOrToggleControls = (forceShow: boolean = false) => {
+    if (forceShow) {
+      setAreControlsVisible(true);
+      scheduleControlsAutoHide();
+      return;
+    }
+    setAreControlsVisible((prev) => {
+      const next = !prev;
+      if (next) {
+        scheduleControlsAutoHide();
+      } else if (controlsHideTimerRef.current) {
+        clearTimeout(controlsHideTimerRef.current);
+        controlsHideTimerRef.current = null;
+      }
+      return next;
+    });
+  };
 
   // Sync native browser/WebView fullscreen state & automatic Landscape/Portrait orientation
   useEffect(() => {
-    // Attempt automatic landscape orientation on mobile when video player opens
-    if (typeof window !== 'undefined' && window.innerWidth <= 900) {
-      lockScreenOrientationSafely('landscape').catch(() => {});
-    }
-
     const handleFullscreenChange = () => {
       const docAny = document as any;
       const activeFsEl = document.fullscreenElement || docAny.webkitFullscreenElement || null;
       if (activeFsEl) {
         setIsFullscreen(true);
+        setAreControlsVisible(true);
+        scheduleControlsAutoHide();
         lockScreenOrientationSafely('landscape').catch(() => {});
+
+        // If an internal <iframe> triggered fullscreen, promote playerContainerRef so our
+        // React Exit Fullscreen button remains visible on top of the iframe!
+        const containerEl = playerContainerRef.current as any;
+        if (
+          containerEl &&
+          activeFsEl !== containerEl &&
+          containerEl.contains(activeFsEl) &&
+          typeof containerEl.requestFullscreen === 'function'
+        ) {
+          containerEl.requestFullscreen().catch(() => {});
+        }
       } else {
         setIsFullscreen(false);
+        setAreControlsVisible(true);
+        lockScreenOrientationSafely('portrait').catch(() => {});
       }
     };
 
     const handleKeyDown = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
         setIsFullscreen(false);
+        setAreControlsVisible(true);
+        lockScreenOrientationSafely('portrait').catch(() => {});
       }
     };
 
@@ -305,6 +369,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
+      if (controlsHideTimerRef.current) {
+        clearTimeout(controlsHideTimerRef.current);
+        controlsHideTimerRef.current = null;
+      }
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
       window.removeEventListener('keydown', handleKeyDown);
@@ -412,13 +480,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     );
 
     setPlayerMode(
-      offlineDownload || nextPlan.directVideoUrl
+      offlineDownload
         ? 'direct'
         : pakDetected
         ? 'pak-drama'
         : 'embed'
     );
-    setSelectedEmbedId(movieLink?.stream_url ? 'custom-supabase' : 'auto-server-1');
+    setSelectedEmbedId(movieLink?.stream_url ? 'custom-supabase' : 'auto-server-3');
     setSelectedAltStreamUrl(nextPlan.directVideoUrl);
     setSelectedSeason(1);
     setSelectedEpisode(1);
@@ -431,9 +499,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setCustomDl1080(movieLink?.download_1080p || '');
     setCustomLang(movieLink?.language || movie.language || 'English');
     setLinkSaveMessage(null);
-    setIsExtractingStream(false);
-    setExtractionResult(null);
-    setIsStreamErrorDismissed(false);
     setVerifiedAudioTracks([]);
     setSelectedAudioTrackId(0);
     setHlsQualityLevels([]);
@@ -898,47 +963,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [activeDirectSourceUrl, playerMode, movie.originalLanguageCode]);
 
-  const handleExtractStreamAndDownload = async (
-    quality: DownloadQuality = '720p',
-    preferredServer?: 'server-3-2embed' | 'server-1-vidsrc'
-  ) => {
-    setActiveQualityLabel(quality);
-
-    const customUrl =
-      movieBoxDirectStreamUrl ||
-      (quality === '480p' && movieLink?.download_480p) ||
-      (quality === '720p' && movieLink?.download_720p) ||
-      (quality === '1080p' && movieLink?.download_1080p) ||
-      movieLink?.direct_video_url;
-
-    if (customUrl) {
-      onStartDownload(movie, quality, customUrl, quality === '480p' ? 480.5 : 1020.6);
-      return;
-    }
-
-    setIsExtractingStream(true);
-    setExtractionResult(null);
-
-    const targetServer =
-      preferredServer ||
-      (selectedEmbedId === 'auto-server-1' ? 'server-1-vidsrc' : 'server-3-2embed');
-
-    const res = await extractStreamFromEmbedServers({
-      tmdbId: movie.id,
-      mediaType: movie.mediaType,
-      season: selectedSeason,
-      episode: selectedEpisode,
-      preferredServer: targetServer,
-    });
-
-    setIsExtractingStream(false);
-    setExtractionResult(res);
-
-    if (res.ok && res.streamUrl) {
-      onStartDownload(movie, quality, res.streamUrl, quality === '480p' ? 480.5 : 1020.6);
-    }
-  };
-
   const handleTogglePlay = () => {
     if (isLocked) return;
     const videoEl = videoRef.current;
@@ -994,7 +1018,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   };
 
   const handleExitFullscreen = () => {
+    if (controlsHideTimerRef.current) {
+      clearTimeout(controlsHideTimerRef.current);
+      controlsHideTimerRef.current = null;
+    }
     setIsFullscreen(false);
+    setAreControlsVisible(true);
     lockScreenOrientationSafely('portrait').catch(() => {});
     const docAny = document as any;
     try {
@@ -1016,6 +1045,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
 
     setIsFullscreen(true);
+    setAreControlsVisible(true);
+    scheduleControlsAutoHide();
     lockScreenOrientationSafely('landscape').catch(() => {});
     const el = playerContainerRef.current as any;
     if (!el) return;
@@ -1099,6 +1130,32 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     `${movie.title} - ${activeEmbedServer?.label || 'Stream Player'}`
   );
 
+  const vidsrcIframeAttrs = getVidSrcPlayerIframeAttributes(
+    activeEmbedServer?.url,
+    `${movie.title} - ${activeEmbedServer?.label || 'Stream Player'}`,
+    isVidSrcAdBlockerEnabled
+  );
+
+  const isCurrentServerVidSrc = isVidSrcProviderUrl(activeEmbedServer?.url);
+
+  const vidsrcAdBlockCss = buildVidSrcAdBlockCssRules(
+    isVidSrcAdBlockerEnabled,
+    playerMode === 'embed' && isCurrentServerVidSrc
+  );
+
+  // Real VidSrc.sh Ad-Filtering Logic Layer (Network Request Interception + Popup/DOM/Focus Shield)
+  useEffect(() => {
+    const cleanup = installVidSrcNetworkAdInterceptor({
+      enabled: playerMode === 'embed' && isVidSrcAdBlockerEnabled,
+      isVidSrcTarget: isCurrentServerVidSrc,
+      onAdBlocked: (_blockedUrl, kind) => {
+        setBlockedAdsCount((c) => c + 1);
+        setAdBlockToast(`🛡️ VidSrc.sh Ad Blocked (${kind})`);
+      },
+    });
+    return cleanup;
+  }, [playerMode, isCurrentServerVidSrc, isVidSrcAdBlockerEnabled]);
+
   const progressPercent = Math.min(100, Math.max(0, (currentTime / Math.max(1, duration)) * 100));
 
   const seasonsList =
@@ -1119,31 +1176,30 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       ? `${movie.title} — S${selectedSeason}:E${selectedEpisode}`
       : `${activeQualityLabel.toUpperCase()} ${movie.title}`;
 
-  const blobAlertState = getBlobStreamAlertState(
-    playerMode,
-    isFetchingStream,
-    streamFetchError,
-    isStreamErrorDismissed
-  );
-
-  const fsConfig = getFullscreenPlayerConfig(isFullscreen, fitMode);
+  const fsConfig = getFullscreenPlayerConfig(isFullscreen, fitMode, areControlsVisible);
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-[#000000] text-slate-100 overflow-y-auto"
+      className="fixed inset-0 z-50 bg-[#000000] text-slate-100 overflow-y-auto border-0 outline-none"
       style={{ backgroundColor: '#000000' }}
       role="dialog"
       aria-label={`Playing ${movie.title}`}
     >
-      <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#000000]">
+      {/* Dynamic CSS Hiding Rules Layer (Injected only when VidSrc.sh is active & Adblocker Toggle Switch is ON) */}
+      {vidsrcAdBlockCss && (
+        <style id="cinebox-vidsrc-adblocker-css" data-testid="vidsrc-adblocker-css-rules">
+          {vidsrcAdBlockCss}
+        </style>
+      )}
+      <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#000000] border-0 outline-none">
         {/* ===================================================================
             MOBILE-FIRST TOP PLAYER BAR (OUTSIDE ASPECT-VIDEO CONTAINER)
             PHASE 3 RULE: Never display a fake embedded audio selector on cross-origin iframes.
            =================================================================== */}
-        {playerMode === 'embed' && (
+        {!isFullscreen && playerMode === 'embed' && (
           <div
             data-testid="player-top-header-bar"
-            className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-5 py-2 bg-[#0d111a]/95 backdrop-blur-md border-b border-slate-800/90"
+            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
           >
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <button
@@ -1184,24 +1240,47 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 </button>
               )}
 
+              {/* Interactive 'Adblocker' Toggle Switch targeting vidsrc.sh */}
               <button
                 type="button"
-                data-testid="server-extract-download-btn"
-                disabled={isExtractingStream}
-                onClick={() => handleExtractStreamAndDownload('720p')}
-                className="px-2.5 sm:px-3.5 py-1.5 rounded-xl bg-emerald-950/90 hover:bg-emerald-900 border border-[#10d97b] text-[#10d97b] text-[11px] sm:text-xs font-extrabold shadow-md flex items-center gap-1.5 min-h-[36px] transition-transform active:scale-95 disabled:opacity-60"
+                role="switch"
+                aria-checked={isVidSrcAdBlockerEnabled}
+                aria-label="Adblocker toggle switch for VidSrc.sh"
+                data-testid="vidsrc-adblocker-toggle-btn"
+                onClick={handleToggleVidSrcAdBlocker}
+                title="Toggle Adblocker (Network Request Interceptor & CSS Hiding Layer for vidsrc.sh)"
+                className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold shadow-md flex items-center gap-2 min-h-[36px] transition-all active:scale-95 border ${
+                  isVidSrcAdBlockerEnabled
+                    ? 'bg-emerald-950/95 hover:bg-emerald-900 border-[#10d97b] text-[#10d97b]'
+                    : 'bg-slate-800/90 hover:bg-slate-700 border-slate-600 text-slate-300'
+                }`}
               >
-                {isExtractingStream ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Extracting...</span>
-                  </>
+                {isVidSrcAdBlockerEnabled ? (
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
                 ) : (
-                  <>
-                    <Download className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Download Movie</span>
-                    <span className="sm:hidden">Download</span>
-                  </>
+                  <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                )}
+                <span>Adblocker</span>
+                {/* Visual Toggle Switch Track & Thumb */}
+                <span
+                  aria-hidden="true"
+                  className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                    isVidSrcAdBlockerEnabled ? 'bg-[#10d97b]' : 'bg-slate-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3 w-3 transform rounded-full bg-slate-950 transition-transform ${
+                      isVidSrcAdBlockerEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                    }`}
+                  />
+                </span>
+                {blockedAdsCount > 0 && (
+                  <span
+                    data-testid="vidsrc-blocked-ads-badge"
+                    className="px-1.5 py-0.5 rounded-full bg-[#10d97b] text-slate-950 text-[10px] font-black leading-none"
+                  >
+                    {blockedAdsCount}
+                  </span>
                 )}
               </button>
 
@@ -1221,20 +1300,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="open-in-new-tab-btn"
-                className="px-2.5 sm:px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] sm:text-xs font-extrabold shadow-lg shadow-[#10d97b]/25 flex items-center gap-1.5 min-h-[36px] transition-transform active:scale-95"
+                className="inline-flex px-2.5 sm:px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] sm:text-xs font-extrabold shadow-lg shadow-[#10d97b]/25 items-center gap-1.5 min-h-[36px] transition-transform active:scale-95"
               >
                 <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
-                <span className="hidden sm:inline">Open in New Tab</span>
-                <span className="sm:hidden">New Tab</span>
+                <span>Open in New Tab</span>
               </a>
             </div>
           </div>
         )}
 
-        {playerMode === 'pak-drama' && (
+        {!isFullscreen && playerMode === 'pak-drama' && (
           <div
             data-testid="player-top-header-bar"
-            className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-5 py-2 bg-[#0d111a]/95 backdrop-blur-md border-b border-slate-800/90"
+            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
           >
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <button
@@ -1259,25 +1337,38 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
             </div>
 
-            {pakDramaStreams[activePakStreamIdx] && (
-              <a
-                href={pakDramaStreams[activePakStreamIdx].watchUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-testid="open-in-new-tab-btn"
-                className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] sm:text-xs font-extrabold shadow-lg flex items-center gap-1.5 min-h-[36px] shrink-0"
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="enter-fullscreen-btn"
+                onClick={handleToggleFullscreen}
+                aria-label="Enter Fullscreen"
+                className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] sm:text-xs font-extrabold flex items-center gap-1.5 min-h-[36px]"
               >
-                <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
-                <span>Open in New Tab</span>
-              </a>
-            )}
+                <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
+                <span>Fullscreen</span>
+              </button>
+
+              {pakDramaStreams[activePakStreamIdx] && (
+                <a
+                  href={pakDramaStreams[activePakStreamIdx].watchUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="open-in-new-tab-btn"
+                  className="hidden md:inline-flex px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-xs font-extrabold shadow-lg items-center gap-1.5 min-h-[36px] shrink-0"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>Open in New Tab</span>
+                </a>
+              )}
+            </div>
           </div>
         )}
 
-        {playerMode === 'trailer' && movie.youtubeKey && (
+        {!isFullscreen && playerMode === 'trailer' && movie.youtubeKey && (
           <div
             data-testid="player-top-header-bar"
-            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-4 py-2 bg-[#0d111a]/95 backdrop-blur-md border-b border-slate-800/90"
+            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-4 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
           >
             <div className="flex items-center gap-2 min-w-0">
               <button
@@ -1313,61 +1404,68 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         <div
           ref={playerContainerRef}
           data-testid="video-player-surface-container"
+          onClick={() => {
+            if (isFullscreen) {
+              handleWakeOrToggleControls(false);
+            }
+          }}
           className={fsConfig.containerClassName}
           style={{ filter: `brightness(${brightness}%)`, backgroundColor: '#000000' }}
         >
-          {/* ALWAYS-VISIBLE TOP-LEFT EXIT FULLSCREEN / BACK BUTTON */}
-          {fsConfig.showAlwaysVisibleExitButton && (
-            <button
-              type="button"
-              data-testid="fullscreen-exit-back-btn"
-              onClick={handleExitFullscreen}
-              aria-label="Exit Fullscreen"
-              className={fsConfig.exitButtonClassName}
-            >
-              <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />
-              <span>Back / Exit Fullscreen</span>
-              <X className="w-3.5 h-3.5 text-slate-300 ml-0.5" />
-            </button>
-          )}
-
-          {blobAlertState.showLoadingOverlay && (
+          {/* TOP-EDGE WAKE ZONE WHEN CONTROLS ARE HIDDEN IN FULLSCREEN (SO IFRAME VIEWERS CAN WAKE EXIT BUTTON) */}
+          {isFullscreen && !areControlsVisible && (
             <div
-              data-testid="stream-loading-spinner"
-              className="absolute inset-0 z-50 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center space-y-3"
-            >
-              <Loader2 className="w-10 h-10 text-[#10d97b] animate-spin" />
-              <div className="text-sm font-bold text-white">
-                Fetching Direct .MP4 Stream via Client-Side Proxy...
-              </div>
-              <div className="text-[11px] font-mono text-slate-400 max-w-lg break-all">
-                Target: https://h5.aoneroom.com/wefeed-h5api-bff/media/play?subjectId=
-                {movie.originalTitle || movie.id}&amp;se=0&amp;ep=0
-              </div>
-            </div>
+              data-testid="fullscreen-top-wake-strip"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleWakeOrToggleControls(true);
+              }}
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                handleWakeOrToggleControls(true);
+              }}
+              className="fixed top-0 left-0 right-0 h-14 z-[9999] bg-transparent cursor-pointer"
+              aria-label="Tap to show fullscreen controls and exit button"
+            />
           )}
 
-          {playerMode === 'blob' ? (
-            <div className="relative w-full h-full flex flex-col bg-[#000000]">
-              <CustomHeaderBlobPlayer
-                initialVideoUrl={
-                  movieBoxDirectStreamUrl ||
-                  (plan.directVideoUrl && !plan.directVideoUrl.includes('.m3u8')
-                    ? plan.directVideoUrl
-                    : '')
-                }
-                movieTitle={movie.title}
-                onClose={onClose}
-                onSwitchToServer3={() => {
-                  setSelectedEmbedId('auto-server-3');
-                  setPlayerMode('embed');
+          {/* CONTROLS-SYNCED TOP-LEFT & TOP-RIGHT EXIT FULLSCREEN / BACK BUTTONS */}
+          {fsConfig.showAlwaysVisibleExitButton && (
+            <>
+              <button
+                type="button"
+                data-testid="fullscreen-exit-back-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleExitFullscreen();
                 }}
-                onDownloadBlobToApp={(url, sizeMB) => {
-                  onStartDownload(movie, '720p', url, sizeMB);
+                aria-label="Exit Fullscreen"
+                className={fsConfig.exitButtonClassName}
+              >
+                <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />
+                <span>Back / Exit Fullscreen</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="fullscreen-exit-corner-x-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleExitFullscreen();
                 }}
-              />
-            </div>
-          ) : playerMode === 'trailer' && movie.youtubeKey ? (
+                aria-label="Close Fullscreen"
+                className={`fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] right-[max(0.75rem,env(safe-area-inset-right,12px))] z-[10000] w-10 h-10 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white flex items-center justify-center shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 ${
+                  areControlsVisible
+                    ? 'opacity-100 pointer-events-auto translate-y-0'
+                    : 'opacity-0 pointer-events-none -translate-y-2'
+                }`}
+              >
+                <X className="w-5 h-5 text-white" />
+              </button>
+            </>
+          )}
+
+          {playerMode === 'trailer' && movie.youtubeKey ? (
             <div className="relative w-full h-full bg-[#000000]">
               <iframe
                 key={movie.youtubeKey}
@@ -1411,13 +1509,28 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
             </div>
           ) : playerMode === 'embed' ? (
-            <div className="relative w-full h-full bg-[#000000]">
+            <div
+              data-vidsrc-adblock={
+                vidsrcIframeAttrs.isVidSrcAdBlockerActive ? 'active' : 'inactive'
+              }
+              className="relative w-full h-full bg-[#000000]"
+            >
+              {adBlockToast && (
+                <div
+                  data-testid="vidsrc-adblock-toast"
+                  className="absolute top-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-black/90 border border-[#10d97b] text-xs font-extrabold text-[#10d97b] shadow-xl pointer-events-none"
+                >
+                  {adBlockToast}
+                </div>
+              )}
               <iframe
-                key={cleanIframeAttrs.src}
+                key={`${cleanIframeAttrs.src}::adblock-${vidsrcIframeAttrs.isVidSrcAdBlockerActive ? 'on' : 'off'}`}
                 data-testid="embed-iframe-player"
+                data-vidsrc-iframe={vidsrcIframeAttrs.isVidSrcTarget ? 'true' : 'false'}
                 src={cleanIframeAttrs.src}
                 allowFullScreen={cleanIframeAttrs.allowFullScreen}
                 title={cleanIframeAttrs.title}
+                {...(vidsrcIframeAttrs.sandbox ? { sandbox: vidsrcIframeAttrs.sandbox } : {})}
                 className="w-full h-full border-0 bg-[#000000]"
                 style={{ backgroundColor: '#000000' }}
               />
@@ -1504,7 +1617,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               />
 
               {/* Subtle Top & Bottom Cinema Scrims */}
-              <div className="pointer-events-none absolute inset-0 z-20 bg-gradient-to-b from-black/75 via-transparent to-black/85" />
+              <div
+                className={`pointer-events-none absolute inset-0 z-20 bg-gradient-to-b from-black/75 via-transparent to-black/85 transition-opacity duration-200 ${
+                  areControlsVisible ? 'opacity-100' : 'opacity-0'
+                }`}
+              />
 
               {/* Audio Switch / Fallback Toast Notification inside Player */}
               {audioSwitchNotice && (
@@ -1517,7 +1634,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
 
               {/* TOP PLAYER BAR */}
-              <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 py-3">
+              <div
+                className={`absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-3 transition-opacity duration-200 ${
+                  areControlsVisible
+                    ? 'opacity-100 pointer-events-auto'
+                    : 'opacity-0 pointer-events-none'
+                }`}
+              >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <button
                     type="button"
@@ -1590,7 +1713,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
 
               {/* CENTER PLAYER CONTROLS: `Tap to Lock` + `10s Rewind` + `Play/Pause` + `10s Forward` */}
-              <div className="absolute inset-x-0 top-[44%] -translate-y-1/2 z-30 flex items-center justify-between px-3 sm:px-8 pointer-events-none">
+              <div
+                className={`absolute inset-x-0 top-[44%] -translate-y-1/2 z-30 flex items-center justify-between px-3 sm:px-8 pointer-events-none transition-opacity duration-200 ${
+                  areControlsVisible ? 'opacity-100' : 'opacity-0'
+                }`}
+              >
                 <button
                   type="button"
                   onClick={() => {
@@ -1679,7 +1806,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               {!isLocked && (
                 <div
                   data-testid="player-bottom-controls-bar"
-                  className={`absolute bottom-0 left-0 right-0 z-30 ${fsConfig.bottomControlsSafePaddingClass}`}
+                  onClick={(e) => e.stopPropagation()}
+                  className={`absolute bottom-0 left-0 right-0 z-30 transition-opacity duration-200 ${
+                    fsConfig.bottomControlsSafePaddingClass
+                  } ${
+                    areControlsVisible
+                      ? 'opacity-100 pointer-events-auto'
+                      : 'opacity-0 pointer-events-none'
+                  }`}
                 >
                   {/* Row 1: Mobile-Friendly Seek Bar & Timecodes */}
                   <div className="flex items-center gap-2.5 sm:gap-3 mb-2">
@@ -2330,6 +2464,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   2Embed Fallback
                 </button>
 
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isVidSrcAdBlockerEnabled}
+                  data-testid="vidsrc-panel-adblocker-switch"
+                  onClick={handleToggleVidSrcAdBlocker}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold flex items-center gap-1.5 border transition-colors ${
+                    isVidSrcAdBlockerEnabled
+                      ? 'bg-emerald-950/90 border-[#10d97b] text-[#10d97b]'
+                      : 'bg-slate-800 border-slate-700 text-slate-300'
+                  }`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Adblocker: {isVidSrcAdBlockerEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+
                 <a
                   href={buildVidSrcEmbedUrl({
                     tmdbId: movie.id,
@@ -2476,115 +2626,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             )}
           </div>
 
-          {isExtractingStream && (
-            <div
-              data-testid="extraction-loading-banner"
-              className="p-3.5 rounded-2xl bg-[#112229] border border-cyan-500/50 flex items-center gap-3"
-            >
-              <Loader2 className="w-5 h-5 text-[#10d97b] animate-spin shrink-0" />
-              <div className="text-xs sm:text-sm font-bold text-white">
-                Extracting direct <code className="text-[#10d97b]">.m3u8</code> /{' '}
-                <code className="text-[#10d97b]">.mp4</code> stream from Server 3 (2Embed) &rarr;
-                Server 1 (VidSrc.sh)...
-              </div>
-            </div>
-          )}
-
-          {extractionResult && !extractionResult.ok && (
-            <div
-              data-testid="extraction-error-banner"
-              role="alert"
-              className="p-3.5 rounded-2xl bg-amber-950/70 border border-amber-500/60 flex flex-wrap items-center justify-between gap-3"
-            >
-              <div className="flex items-center gap-2.5">
-                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
-                <div>
-                  <div className="text-sm font-extrabold text-amber-200">
-                    {extractionResult.errorMessage || EXTRACTION_UNAVAILABLE_MESSAGE}
-                  </div>
-                  <div className="text-[11px] font-mono text-amber-300/80">
-                    Tried extracting .m3u8 / .mp4 from: {extractionResult.triedServers.join(' → ')}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  data-testid="try-vidsrc-extract-btn"
-                  onClick={() => {
-                    setSelectedEmbedId('auto-server-1');
-                    setPlayerMode('embed');
-                    handleExtractStreamAndDownload('720p', 'server-1-vidsrc');
-                  }}
-                  className="px-3 py-1.5 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-bold text-xs flex items-center gap-1.5"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Try Server 1 (VidSrc .m3u8)</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {extractionResult && extractionResult.ok && extractionResult.streamUrl && (
-            <div
-              data-testid="extraction-success-banner"
-              className="p-3.5 rounded-2xl bg-emerald-950/70 border border-[#10d97b]/60 flex flex-wrap items-center justify-between gap-3"
-            >
-              <div className="min-w-0">
-                <div className="text-sm font-extrabold text-[#10d97b]">
-                  Extracted {extractionResult.format?.toUpperCase()} Stream from{' '}
-                  {extractionResult.sourceServer === 'server-1-vidsrc'
-                    ? 'Server 1 (VidSrc)'
-                    : 'Server 3 (2Embed)'}
-                  !
-                </div>
-                <div className="text-[11px] font-mono text-slate-300 truncate">
-                  {extractionResult.streamUrl}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {blobAlertState.showErrorBanner && (
-            <div
-              data-testid="stream-error-banner"
-              role="alert"
-              className="p-3.5 rounded-2xl bg-rose-950/60 border border-rose-500/50 flex flex-wrap items-center justify-between gap-3"
-            >
-              <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-sm font-extrabold text-rose-200">{streamFetchError}</div>
-                  <div className="text-[11px] font-mono text-rose-300/80 break-all">
-                    Proxy (corsproxy.io / allorigins.win) &rarr; h5.aoneroom.com/wefeed-h5api-bff/media/play?subjectId={movie.originalTitle || movie.id}&amp;se=0&amp;ep=0 (Blob Fallback Stream Active)
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {onRetryStreamFetch && (
-                  <button
-                    type="button"
-                    data-testid="retry-stream-fetch-btn"
-                    onClick={onRetryStreamFetch}
-                    className="px-3 py-1.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-slate-950 font-bold text-xs flex items-center gap-1.5"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Try Again</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setIsStreamErrorDismissed(true)}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* 1. Centralized Stream Source Manager & Server Switcher */}
           <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-3 sm:p-3.5 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2721,68 +2762,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 );
               })}
 
-              {/* Direct Native HTML5 / MP4 Player Button */}
-              <button
-                type="button"
-                data-testid="test-native-player-btn"
-                onClick={() => {
-                  setSelectedAltStreamUrl(plan.directVideoUrl || plan.testFallbackMp4Url);
-                  setPlayerMode('direct');
-                }}
-                className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-semibold transition-colors min-h-[40px] flex items-center gap-1.5 min-w-0 ${
-                  playerMode === 'direct' &&
-                  !activeDirectSourceUrl.toLowerCase().includes('.m3u8')
-                    ? 'bg-[#10d97b] text-slate-950 font-bold shadow-sm'
-                    : 'bg-slate-800/90 text-slate-200 hover:bg-slate-700'
-                }`}
+              {/* Prominent Open in New Tab Button if Iframe Fails to Load */}
+              <a
+                href={activeEmbedServer?.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="prominent-open-new-tab-btn"
+                className="px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-extrabold transition-transform active:scale-95 min-h-[40px] flex items-center gap-1.5 min-w-0 bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] text-slate-950 shadow-md shadow-[#10d97b]/25 hover:opacity-95"
               >
-                <Play className="w-3.5 h-3.5 fill-current shrink-0" />
-                <span className="truncate">
-                  {plan.directVideoUrl || offlineDownload
-                    ? 'Direct HLS / MP4 Player'
-                    : 'In-App Direct MP4'}
-                </span>
-              </button>
-
-              {/* Verified Multi-Audio HLS 2.0 Stream Button */}
-              <button
-                type="button"
-                data-testid="test-multi-audio-hls-btn"
-                onClick={() => {
-                  setSelectedAltStreamUrl(FALLBACK_MULTI_AUDIO_HLS_URL);
-                  setPlayerMode('direct');
-                }}
-                className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-semibold transition-colors min-h-[40px] flex items-center gap-1.5 min-w-0 ${
-                  playerMode === 'direct' &&
-                  activeDirectSourceUrl === FALLBACK_MULTI_AUDIO_HLS_URL
-                    ? 'bg-[#10d97b] text-slate-950 font-bold shadow-sm'
-                    : 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-200 hover:bg-emerald-900/60'
-                }`}
-              >
-                <Layers className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
-                <span className="truncate">Multi-Audio HLS 2.0 (EN/DE/IT/FR/ES)</span>
-              </button>
-
-              {/* Blob Player Button */}
-              <button
-                type="button"
-                data-testid="switch-to-blob-player-btn"
-                onClick={() => setPlayerMode('blob')}
-                className={`px-2.5 sm:px-3.5 py-2 rounded-xl text-[11px] sm:text-xs font-semibold transition-colors min-h-[40px] flex items-center gap-1.5 min-w-0 ${
-                  playerMode === 'blob'
-                    ? 'bg-[#10d97b] text-slate-950 font-bold shadow-sm'
-                    : hasRealBlobMp4
-                    ? 'bg-cyan-950/80 border border-cyan-500/40 text-cyan-200 hover:bg-cyan-900/60'
-                    : 'bg-slate-900/90 border border-amber-500/40 text-amber-300 hover:bg-slate-800'
-                }`}
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="truncate">
-                  {hasRealBlobMp4
-                    ? 'Blob Player (In-App .MP4 Ready)'
-                    : 'In-App Blob MP4 (Try Server 3)'}
-                </span>
-              </button>
+                <ExternalLink className="w-3.5 h-3.5 stroke-[2.5] shrink-0" />
+                <span className="truncate">Open in New Tab</span>
+              </a>
 
               {/* Official TMDb Video / Trailer */}
               {movie.youtubeKey && (
@@ -3085,7 +3075,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             )}
           </div>
 
-          {/* 3. Movie/Series Metadata, TMDB Watch Providers & Offline Download Manager */}
+          {/* 3. Movie/Series Metadata, TMDB Watch Providers & VidSrc.sh AdBlocker Shield */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-4">
               <div className="flex items-start justify-between gap-4">
@@ -3208,75 +3198,82 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
             </div>
 
-            {/* Right Column: Advanced Offline Download & Save to Device Box */}
+            {/* Right Column: VidSrc.sh AdBlocker Shield & Official Streaming Info */}
             <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3.5 h-fit">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <Download className="w-4 h-4 text-[#10d97b]" />
-                  <span>Offline Download Manager</span>
+                  <Shield className="w-4 h-4 text-[#10d97b]" />
+                  <span>VidSrc.sh AdBlocker Shield</span>
                 </h3>
-                <span className="text-[11px] text-slate-400 font-mono">Directory.Data</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                    isVidSrcAdBlockerEnabled
+                      ? 'bg-[#10d97b]/20 text-[#10d97b] border border-[#10d97b]/40'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {isVidSrcAdBlockerEnabled ? 'ACTIVE (VIDSRC.SH)' : 'DISABLED'}
+                </span>
               </div>
 
               <p className="text-xs text-slate-400 leading-relaxed">
-                Download directly inside the app for offline playback, or export the{' '}
-                <code className="text-slate-200">.mp4</code> file to your phone&apos;s public{' '}
-                <code className="text-[#10d97b]">/Download/{appConfig.app_name}/</code> folder.
+                Blocks click-jacking popup windows, <code className="text-slate-200">window.open</code>{' '}
+                ad redirects, and ad-network scripts strictly on{' '}
+                <code className="text-[#10d97b]">vidsrc.sh</code> while keeping Server 3 (2Embed) and
+                video playback untouched.
               </p>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isVidSrcAdBlockerEnabled}
+                data-testid="vidsrc-sidebar-adblocker-btn"
+                onClick={handleToggleVidSrcAdBlocker}
+                className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-between gap-2 transition-colors min-h-[42px] border ${
+                  isVidSrcAdBlockerEnabled
+                    ? 'bg-emerald-950/90 hover:bg-emerald-900/80 border-[#10d97b] text-[#10d97b]'
+                    : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-300'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  {isVidSrcAdBlockerEnabled ? (
+                    <ShieldCheck className="w-4 h-4 text-[#10d97b]" />
+                  ) : (
+                    <ShieldOff className="w-4 h-4 text-amber-400" />
+                  )}
+                  <span>
+                    Adblocker ({isVidSrcAdBlockerEnabled ? 'Enabled' : 'Disabled'})
+                  </span>
+                </span>
+                <span className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono">
+                    {blockedAdsCount} Blocked
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors ${
+                      isVidSrcAdBlockerEnabled ? 'bg-[#10d97b]' : 'bg-slate-600'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-slate-950 transition-transform ${
+                        isVidSrcAdBlockerEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </span>
+                </span>
+              </button>
 
               {isAdminUnlocked && (
                 <button
                   type="button"
                   onClick={() => setShowLinkEditor((prev) => !prev)}
-                  className="w-full py-2.5 px-3 rounded-xl bg-emerald-950/90 hover:bg-emerald-900/80 border border-[#10d97b]/50 text-[#10d97b] font-bold text-xs flex items-center justify-center gap-2 transition-colors min-h-[42px]"
+                  className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-[#10d97b]/50 text-[#10d97b] font-bold text-xs flex items-center justify-center gap-2 transition-colors min-h-[42px]"
                 >
                   <Film className="w-4 h-4" />
-                  <span>+ Attach Custom .MP4 / Language Links (Admin)</span>
+                  <span>+ Attach Custom Stream / Language Links (Admin)</span>
                 </button>
               )}
-
-              <div className="space-y-2">
-                {plan.downloads.map((dl) => (
-                  <div
-                    key={dl.quality}
-                    className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-900/90 border border-slate-800"
-                  >
-                    <div>
-                      <div className="text-xs font-bold text-white">
-                        {dl.quality} Full HD ({movie.language})
-                      </div>
-                      <div className="text-[11px] font-mono text-slate-400">
-                        {dl.sizeLabel} · .M3U8 / .MP4 Extractor
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        data-testid={`download-btn-${dl.quality}`}
-                        disabled={isExtractingStream}
-                        onClick={() => {
-                          handleExtractStreamAndDownload(dl.quality);
-                        }}
-                        className="px-3 py-2 rounded-lg bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-bold text-xs flex items-center gap-1 min-h-[40px] transition-colors disabled:opacity-60"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>{isExtractingStream ? 'Extracting...' : 'Download'}</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleExtractStreamAndDownload(dl.quality, 'server-1-vidsrc')}
-                        title="Extract .m3u8 from Server 1 (VidSrc)"
-                        className="px-2.5 py-2 rounded-lg bg-[#f3e5ab] hover:bg-[#ebd88b] text-slate-950 font-bold text-xs flex items-center gap-1 min-h-[40px] transition-colors"
-                      >
-                        <FolderDown className="w-3.5 h-3.5" />
-                        <span>VidSrc .m3u8</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         </div>

@@ -38,14 +38,17 @@ import {
   fetchAllMovieLinks,
   fetchAppConfig,
   fetchMovieLinkByTmdbId,
+  getActiveAdminSession,
   getCurrentDeviceUserId,
   getLoggedInUser,
   getUserAppSettings,
   saveUserAppSettings,
+  signOutSupabaseSession,
   syncFromRemoteDecentralizedNode,
   updateAppConfig,
   upsertMovieLink,
 } from './services/supabaseClient';
+import { applyDocumentLanguageDirection, getTranslation } from './utils/i18n';
 import { evaluateGlobalUserAccess } from './utils/securityValidator';
 import {
   fetchBollywoodMovies,
@@ -55,10 +58,6 @@ import {
   fetchTrendingTvSeries,
   searchMovies,
 } from './services/tmdbService';
-import {
-  fetchMovieBoxStreamViaProxy,
-  searchMovieBoxViaProxy,
-} from './services/movieBoxDirectApi';
 import {
   cleanupAllActiveDownloadTimers,
   deleteDownload,
@@ -98,9 +97,10 @@ import {
 import {
   checkForInAppApkUpdate,
   InAppUpdateCheckResult,
+  isUnconfiguredPlaceholderApkUrl,
 } from './services/inAppUpdateService';
 
-type BottomNavTab = 'home' | 'search' | 'downloads' | 'watchlist' | 'me';
+type BottomNavTab = 'home' | 'search' | 'watchlist' | 'me';
 
 const TOP_CATEGORIES: CategoryFilter[] = [
   'Trending',
@@ -172,13 +172,10 @@ export default function App() {
   const [appConfig, setAppConfig] = useState<AppConfigRecord>(DEFAULT_APP_CONFIG);
   const [movieLinksMap, setMovieLinksMap] = useState<Record<number, MovieLinkRecord>>({});
 
-  // Active Video Player Modal & MovieBox Stream Fetch State
+  // Active Video Player Modal State
   const [playingMovie, setPlayingMovie] = useState<MovieItem | null>(null);
   const [playingOfflineItem, setPlayingOfflineItem] = useState<DownloadItem | null>(null);
   const [activeMovieLink, setActiveMovieLink] = useState<MovieLinkRecord | null>(null);
-  const [isFetchingStream, setIsFetchingStream] = useState<boolean>(false);
-  const [streamFetchError, setStreamFetchError] = useState<string | null>(null);
-  const [movieBoxDirectStreamUrl, setMovieBoxDirectStreamUrl] = useState<string | null>(null);
 
   // Downloads, Watchlist & Watch History State
   const [downloads, setDownloads] = useState<DownloadItem[]>(() => getDownloadedItems());
@@ -225,37 +222,9 @@ export default function App() {
     return code;
   });
 
-  const [loggedInUser, setLoggedInUser] = useState<AppUserRecord | null>(() => {
-    const existing = getLoggedInUser();
-    if (existing) return existing;
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('autostart') === '1') {
-        const plat = detectAppPlatform();
-        const now = Date.now();
-        const isExpiredSim = params.get('trial') === 'expired';
-        const autoUser: AppUserRecord = {
-          id: 'USR-1097888621',
-          username: 'Zulqarnain Shah',
-          email: 'zulqarnainshah25@gmail.com',
-          role: plat === 'Web' ? 'vip' : 'user',
-          status: 'active',
-          platform: plat,
-          referral_code: 'CBX-ZULQ25',
-          successful_referrals: 0,
-          trial_start_date: isExpiredSim
-            ? new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString()
-            : new Date(now).toISOString(),
-          trial_end_date: isExpiredSim
-            ? new Date(now - 24 * 60 * 60 * 1000).toISOString()
-            : new Date(now + TRIAL_DURATION_MS).toISOString(),
-          access_expiry_date: null,
-        };
-        return autoUser;
-      }
-    }
-    return null;
-  });
+  const [loggedInUser, setLoggedInUser] = useState<AppUserRecord | null>(() =>
+    getLoggedInUser()
+  );
 
   // In-App Update Checker State (Reads /version.json & compares with App.getInfo().version)
   const [updateCheckResult, setUpdateCheckResult] = useState<InAppUpdateCheckResult | null>(
@@ -264,13 +233,7 @@ export default function App() {
   const [isUpdateDialogDismissed, setIsUpdateDialogDismissed] = useState<boolean>(false);
 
   const [userSettings, setUserSettings] = useState<UserAppSettings>(() => getUserAppSettings());
-  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(() => {
-    try {
-      return sessionStorage.getItem('cinebox_admin_unlocked') === '1';
-    } catch {
-      return false;
-    }
-  });
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(false);
   const [logoTapCount, setLogoTapCount] = useState<number>(0);
   const [adminModalState, setAdminModalState] = useState<{
     open: boolean;
@@ -319,12 +282,17 @@ export default function App() {
     }
     setMovieLinksMap(map);
 
-    // 4. In-App Update Checker: Compare global Supabase `app_config` (Google Drive APK Link & Version) or /version.json against installed App version
-    checkForInAppApkUpdate({ globalAppConfig: cfg }).then((res) => {
-      if (res.checked && res.updateAvailable) {
-        setUpdateCheckResult(res);
-      }
-    });
+    // 4. In-App Update Checker (Android APK ONLY — never shows on Website 'Web')
+    const currentPlat = detectAppPlatform();
+    if (currentPlat === 'Android') {
+      checkForInAppApkUpdate({ platform: 'Android', globalAppConfig: cfg }).then((res) => {
+        if (res.checked && res.updateAvailable) {
+          setUpdateCheckResult(res);
+        }
+      });
+    } else {
+      setUpdateCheckResult(null);
+    }
 
     // If a Global Decentralized Manifest URL is configured, automatically sync from it in the background
     if (cfg.decentralized_manifest_url) {
@@ -341,11 +309,16 @@ export default function App() {
             for (const r of freshLinks) nextMap[r.tmdb_id] = r;
             setMovieLinksMap(nextMap);
             setAppUsers(freshUsers);
-            checkForInAppApkUpdate({ globalAppConfig: freshCfg }).then((res) => {
-              if (res.checked && res.updateAvailable) {
-                setUpdateCheckResult(res);
-              }
-            });
+            if (detectAppPlatform() === 'Android') {
+              checkForInAppApkUpdate({
+                platform: 'Android',
+                globalAppConfig: freshCfg,
+              }).then((res) => {
+                if (res.checked && res.updateAvailable) {
+                  setUpdateCheckResult(res);
+                }
+              });
+            }
           }
         })
         .catch(() => {});
@@ -355,6 +328,15 @@ export default function App() {
   useEffect(() => {
     refreshSupabaseData();
     setDetectedPlatform(detectAppPlatform());
+
+    // Phase 1 Security: Verify active Supabase Auth Admin JWT claim (`app_metadata.role = 'admin'`)
+    getActiveAdminSession()
+      .then((res) => {
+        setIsAdminUnlocked(res.isAdmin);
+      })
+      .catch(() => {
+        setIsAdminUnlocked(false);
+      });
 
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -374,11 +356,16 @@ export default function App() {
         fetchAppConfig()
           .then((latestCfg) => {
             setAppConfig(latestCfg);
-            checkForInAppApkUpdate({ globalAppConfig: latestCfg }).then((res) => {
-              if (res.checked && res.updateAvailable) {
-                setUpdateCheckResult(res);
-              }
-            });
+            if (detectAppPlatform() === 'Android') {
+              checkForInAppApkUpdate({
+                platform: 'Android',
+                globalAppConfig: latestCfg,
+              }).then((res) => {
+                if (res.checked && res.updateAvailable) {
+                  setUpdateCheckResult(res);
+                }
+              });
+            }
           })
           .catch(() => {});
       };
@@ -392,12 +379,17 @@ export default function App() {
             if (ev?.data && typeof ev.data === 'object') {
               const incomingCfg = ev.data as AppConfigRecord;
               setAppConfig(incomingCfg);
-              checkForInAppApkUpdate({ globalAppConfig: incomingCfg }).then((res) => {
-                if (res.checked && res.updateAvailable) {
-                  setUpdateCheckResult(res);
-                  setIsUpdateDialogDismissed(false);
-                }
-              });
+              if (detectAppPlatform() === 'Android') {
+                checkForInAppApkUpdate({
+                  platform: 'Android',
+                  globalAppConfig: incomingCfg,
+                }).then((res) => {
+                  if (res.checked && res.updateAvailable) {
+                    setUpdateCheckResult(res);
+                    setIsUpdateDialogDismissed(false);
+                  }
+                });
+              }
             }
           };
         }
@@ -426,38 +418,6 @@ export default function App() {
         const combined = [...bollywood.slice(0, 6), ...south.slice(0, 6)];
         setBollywoodAndSouthSection(combined);
         setSearchResults(combined);
-        // Seed Watchlist & Watch History with real TMDb items if empty
-        setWatchlist((prev) => {
-          if (prev.length > 0) return prev;
-          const initial = combined.slice(0, 2);
-          try {
-            localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(initial));
-          } catch {
-            // ignore
-          }
-          return initial;
-        });
-        setWatchHistory((prev) => {
-          if (prev.length > 0) return prev;
-          const initialHist: WatchHistoryItem[] = combined.slice(0, 2).map((m, idx) => ({
-            tmdbId: m.id,
-            title: m.title,
-            language: m.language,
-            mediaType: m.mediaType,
-            backdropUrl: m.backdropUrl,
-            posterUrl: m.posterUrl,
-            watchedPercent: idx === 0 ? 35 : 60,
-            currentTimeSeconds: 1228,
-            durationSeconds: 7781,
-            updatedAt: Date.now() - idx * 3600_000,
-          }));
-          try {
-            localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(initialHist));
-          } catch {
-            // ignore
-          }
-          return initialHist;
-        });
       })
       .catch(() => {});
 
@@ -524,6 +484,11 @@ export default function App() {
     document.documentElement.style.setProperty('--brand-accent', themeAccentHex);
   }, [themeAccentHex]);
 
+  const currentLang = userSettings.appLanguage || 'en';
+  useEffect(() => {
+    applyDocumentLanguageDirection(currentLang);
+  }, [currentLang]);
+
   const saveQueryToRecentSearches = (rawQuery: string) => {
     const clean = sanitizeSearchQuery(rawQuery);
     if (!clean) return;
@@ -559,9 +524,7 @@ export default function App() {
     }
   };
 
-  // Requirement 1: Search Function (Client-Side Fetch with Proxy: corsproxy.io -> allorigins.win)
-  // Calls https://h5.aoneroom.com/wefeed-h5api-bff/subject/search?keyword={userQuery}
-  // with User-Agent & Referer headers. Shows Loading Spinner & "Server Busy, Try Again" on proxy failure.
+  // Search Movies & TV Series via TMDb Catalog
   const handleSearchSubmit = async (e?: React.FormEvent, overrideQuery?: string) => {
     e?.preventDefault();
     const rawTarget = overrideQuery !== undefined ? overrideQuery : searchQuery;
@@ -584,31 +547,10 @@ export default function App() {
       // Persist search query in localStorage for Recent Searches chips
       saveQueryToRecentSearches(q);
 
-      // 1. Render TMDb matches immediately (~250ms) so mobile & desktop users never wait on slow CORS proxies
       const tmdbMatches = await searchMovies(q);
-      if (tmdbMatches.length > 0) {
-        setSearchResults(tmdbMatches);
-        setIsSearching(false);
-      }
-
-      // 2. Fetch MovieBox proxy results in parallel/background and merge if available
-      const mbResult = await searchMovieBoxViaProxy(q);
-      if (mbResult.ok && mbResult.items.length > 0) {
-        const seenIds = new Set<number>();
-        const merged: MovieItem[] = [];
-        for (const item of [...tmdbMatches, ...mbResult.items]) {
-          if (!seenIds.has(item.id)) {
-            seenIds.add(item.id);
-            merged.push(item);
-          }
-        }
-        setSearchResults(merged);
-        setSearchProxyUsed(mbResult.proxyUsed || null);
-      } else if (tmdbMatches.length === 0) {
-        setSearchError(mbResult.error || 'Server Busy, Try Again');
-      }
+      setSearchResults(tmdbMatches);
     } catch {
-      setSearchError('Server Busy, Try Again');
+      setSearchError('Unable to load search results. Please try again.');
     } finally {
       setIsSearching(false);
     }
@@ -628,28 +570,6 @@ export default function App() {
     }
   };
 
-  // Requirement 2: Stream Link Fetch (Client-Side Fetch with Proxy)
-  // Calls https://h5.aoneroom.com/wefeed-h5api-bff/media/play?subjectId={subjectId}&se=0&ep=0
-  // via corsproxy.io / allorigins.win with User-Agent & Referer headers.
-  const fetchMovieStreamForItem = async (movie: MovieItem) => {
-    setIsFetchingStream(true);
-    setStreamFetchError(null);
-    setMovieBoxDirectStreamUrl(null);
-    try {
-      const subjectId = movie.originalTitle || String(movie.id);
-      const streamRes = await fetchMovieBoxStreamViaProxy(subjectId, 0, 0);
-      if (streamRes.ok && streamRes.streamUrl) {
-        setMovieBoxDirectStreamUrl(streamRes.streamUrl);
-      } else {
-        setStreamFetchError(streamRes.error || 'Server Busy, Try Again');
-      }
-    } catch {
-      setStreamFetchError('Server Busy, Try Again');
-    } finally {
-      setIsFetchingStream(false);
-    }
-  };
-
   const handleOpenMovie = async (movie: MovieItem) => {
     const existingOffline = downloads.find(
       (d) => d.tmdbId === movie.id && d.status === 'completed'
@@ -658,15 +578,6 @@ export default function App() {
     setActiveMovieLink(link);
     setPlayingOfflineItem(existingOffline || null);
     setPlayingMovie(movie);
-
-    // Only auto-fetch MovieBox proxy stream when the item originates from MovieBox (numeric subjectId)
-    if (movie.originalTitle && /^\d{5,}$/.test(movie.originalTitle.trim())) {
-      fetchMovieStreamForItem(movie);
-    } else {
-      setIsFetchingStream(false);
-      setStreamFetchError(null);
-      setMovieBoxDirectStreamUrl(null);
-    }
 
     // Enrich with full TMDb details (cast, runtime, TV seasons/episodes, watch/providers)
     fetchMediaDetails(movie).then((enriched) => {
@@ -869,9 +780,9 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0b0d12] text-slate-100 flex flex-col">
       {/* =====================================================================
-          STICKY TOP HEADER
+          STICKY TOP HEADER (WITH ANDROID SAFE-AREA TOP PADDING)
          ===================================================================== */}
-      <header className="sticky top-0 z-30 bg-[#0b0d12]/95 backdrop-blur-md border-b border-slate-800/70 px-3 sm:px-6 py-2">
+      <header className="sticky top-0 z-30 bg-[#0b0d12]/95 backdrop-blur-md border-b border-slate-800/70 px-3 sm:px-6 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
           {/* Brand Logo Button (Tap 5 times to unlock Secret Admin Panel) */}
           <button
@@ -912,20 +823,49 @@ export default function App() {
             </div>
           </form>
 
-          {/* Right Actions: Global APK Download Link + Restricted Admin Console */}
+          {/* Right Actions: Language Toggle + Global APK Download Link + Restricted Admin Console */}
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              data-testid="header-language-toggle-btn"
+              onClick={() => {
+                const nextLang = currentLang === 'ur' ? 'en' : 'ur';
+                const saved = saveUserAppSettings({ ...userSettings, appLanguage: nextLang });
+                setUserSettings(saved);
+              }}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-bold text-slate-200 whitespace-nowrap"
+              title="Switch App Language (English / اردو)"
+            >
+              {currentLang === 'ur' ? 'EN' : 'اردو'}
+            </button>
+
             {appConfig.apk_download_url && (
               <a
                 href={appConfig.apk_download_url}
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="header-download-apk-btn"
-                title={`Download Official Android APK (v${appConfig.apk_latest_version || '1.0.1'})`}
+                onClick={(e) => {
+                  if (isUnconfiguredPlaceholderApkUrl(appConfig.apk_download_url)) {
+                    e.preventDefault();
+                    if (isAdminUnlocked) {
+                      setAdminModalState({ open: true, tab: 'admin' });
+                      showToast(
+                        'Paste your Google Drive APK share link in Admin Console -> APK Link to activate global downloads!'
+                      );
+                    } else {
+                      showToast(
+                        'Official APK v1.0.2 link is being updated by Admin — please check back shortly!'
+                      );
+                    }
+                  }
+                }}
+                title={`Download Official Android APK (v${appConfig.apk_latest_version || '1.0.2'})`}
                 className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#142920] hover:bg-[#193529] border border-[#10d97b]/40 text-xs font-extrabold text-[#10d97b] whitespace-nowrap transition-colors"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">
-                  Download APK (v{appConfig.apk_latest_version || '1.0.1'})
+                  {getTranslation(currentLang, 'downloadApkShort')} (v{appConfig.apk_latest_version || '1.0.2'})
                 </span>
                 <span className="sm:hidden">APK</span>
               </a>
@@ -939,7 +879,7 @@ export default function App() {
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-950/90 hover:bg-emerald-900 border border-[#10d97b]/60 text-xs font-extrabold text-[#10d97b] shrink-0 whitespace-nowrap"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>Admin Console</span>
+                <span>{getTranslation(currentLang, 'adminBadge')}</span>
               </button>
             )}
           </div>
@@ -1409,29 +1349,31 @@ export default function App() {
                       Watch on TV &amp; Web
                     </div>
                     <div className="text-xs font-medium text-slate-800">
-                      Bigger screen, one premium account.
+                      Bigger screen, one premium streaming account.
                     </div>
-                    <div className="text-[11px] font-mono text-slate-700 truncate">
-                      Official website :{' '}
-                      {appConfig.official_website ||
-                        'https://cinebox-movie-streaming-offline-downloader.ai.studio/'}
+                    <div
+                      data-testid="home-official-website-link"
+                      className="text-[11px] font-mono text-slate-700 truncate"
+                    >
+                      Official website : {appConfig.official_website || 'https://cineboxmovies.ai.studio'}
                     </div>
                   </div>
 
-                  <button
-                    type="button"
+                  <a
+                    href={appConfig.official_website || 'https://cineboxmovies.ai.studio'}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     onClick={() => {
                       showToast(
-                        `Official TV & Web Portal: ${
-                          appConfig.official_website ||
-                          'https://cinebox-movie-streaming-offline-downloader.ai.studio/'
+                        `Official Website: ${
+                          appConfig.official_website || 'https://cineboxmovies.ai.studio'
                         }`
                       );
                     }}
-                    className="px-4 py-2 rounded-full bg-[#0d9488] hover:bg-[#0f766e] text-white font-bold text-xs shrink-0 shadow-sm min-h-[38px]"
+                    className="px-4 py-2 rounded-full bg-[#0d9488] hover:bg-[#0f766e] text-white font-bold text-xs shrink-0 shadow-sm min-h-[38px] inline-flex items-center justify-center"
                   >
-                    Download TV
-                  </button>
+                    Open Web Portal
+                  </a>
                 </div>
               </section>
             </div>
@@ -1538,7 +1480,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Requirement 4: "Server Busy, Try Again" Error Alert when Proxy fails */}
             {searchError && (
               <div
                 data-testid="search-error-banner"
@@ -1549,9 +1490,6 @@ export default function App() {
                   <AlertTriangle className="w-6 h-6 text-rose-400 shrink-0" />
                   <div>
                     <div className="text-sm font-extrabold text-rose-200">{searchError}</div>
-                    <div className="text-[11px] font-mono text-rose-300/80">
-                      Tried corsproxy.io &amp; api.allorigins.win &rarr; h5.aoneroom.com/wefeed-h5api-bff/subject/search?keyword={searchQuery}
-                    </div>
                   </div>
                 </div>
 
@@ -1567,17 +1505,14 @@ export default function App() {
               </div>
             )}
 
-            {isSearching ? (
+            {isSearching && searchResults.length === 0 ? (
               <div
                 data-testid="search-loading-spinner"
                 className="py-14 rounded-2xl bg-[#131722] border border-slate-800 flex flex-col items-center justify-center gap-3 text-center"
               >
                 <Loader2 className="w-9 h-9 text-[#10d97b] animate-spin" />
                 <div className="text-sm font-bold text-white">
-                  Searching MovieBox API via Client-Side Proxy (corsproxy.io / allorigins.win)...
-                </div>
-                <div className="text-[11px] font-mono text-slate-400">
-                  Target: https://h5.aoneroom.com/wefeed-h5api-bff/subject/search?keyword={searchQuery}
+                  Searching Movies &amp; TV Series...
                 </div>
               </div>
             ) : (
@@ -1620,26 +1555,12 @@ export default function App() {
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
-                          onClick={() =>
-                            handleStartDownload(movie, '720p', FALLBACK_TEST_MP4_720P, 1020.6)
-                          }
-                          aria-label={`Download ${movie.title} 720p`}
-                          className="flex-1 py-1.5 rounded-lg bg-[#10d97b]/15 hover:bg-[#10d97b]/25 text-[#10d97b] font-bold text-[11px] flex items-center justify-center gap-1"
+                          onClick={() => handleOpenMovie(movie)}
+                          aria-label={`Watch ${movie.title} Now`}
+                          className="w-full py-1.5 rounded-lg bg-[#10d97b]/15 hover:bg-[#10d97b]/25 text-[#10d97b] font-bold text-[11px] flex items-center justify-center gap-1 transition-colors"
                         >
-                          <Download className="w-3 h-3" />
-                          <span>720p</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportToDevice(movie, '720p', FALLBACK_TEST_MP4_720P, 1020.6)
-                          }
-                          aria-label={`Save ${movie.title} to device`}
-                          className="px-2 py-1.5 rounded-lg bg-[#f3e5ab] text-slate-950 font-bold text-[11px] flex items-center gap-0.5"
-                        >
-                          <FolderDown className="w-3 h-3" />
-                          <span>Save</span>
+                          <Play className="w-3 h-3 fill-[#10d97b]" />
+                          <span>Watch HD</span>
                         </button>
                       </div>
                     </div>
@@ -1651,56 +1572,14 @@ export default function App() {
         )}
 
         {/* ===================================================================
-            TAB 3: DOWNLOADS (OFFLINE PLAYBACK + SAVE TO DEVICE STORAGE)
-           =================================================================== */}
-        {activeTab === 'downloads' && (
-          <DownloadsView
-            appName={appConfig.app_name}
-            downloads={downloads}
-            recommendedMovies={
-              bollywoodAndSouthSection.length > 0
-                ? bollywoodAndSouthSection.slice(0, 6)
-                : trendingMoviesSection.slice(0, 6)
-            }
-            isOfflineSimulated={isOfflineSimulated}
-            onToggleOfflineSimulation={() => {
-              setIsOfflineSimulated((prev) => {
-                const next = !prev;
-                showToast(
-                  next
-                    ? 'Offline Mode Activated: Playing downloaded files from internal Directory.Data!'
-                    : 'Online Mode Restored'
-                );
-                return next;
-              });
-            }}
-            onPlayOfflineItem={handlePlayOfflineItem}
-            onPauseDownload={pauseDownload}
-            onResumeDownload={resumeDownload}
-            onDeleteDownload={deleteDownload}
-            onExportItemToDevice={handleExportExistingItemToDevice}
-            onSelectMovie={handleOpenMovie}
-            onRefreshRecommendations={() => {
-              fetchBollywoodMovies().then((list) => {
-                setBollywoodAndSouthSection(list);
-                showToast('Refreshed live TMDb recommendations!');
-              });
-            }}
-            onOpenDeliverables={() =>
-              showToast('Local P2P Wi-Fi File Transfer ready — select any downloaded movie to share.')
-            }
-          />
-        )}
-
-        {/* ===================================================================
-            TAB 4: WATCHLIST VIEW
+            TAB 3: WATCHLIST VIEW
            =================================================================== */}
         {activeTab === 'watchlist' && (
           <div className="pb-24 px-4 sm:px-6 pt-4 max-w-7xl mx-auto space-y-4">
             <div className="flex items-center justify-between">
               <h1 className="text-xl font-bold text-white">My Watchlist ({watchlist.length})</h1>
               <span className="text-xs text-slate-400">
-                Saved for quick streaming &amp; offline download
+                Saved for quick HD streaming
               </span>
             </div>
 
@@ -1824,7 +1703,7 @@ export default function App() {
         aria-label="Primary Bottom Navigation"
         className="fixed bottom-0 left-0 right-0 z-40 bg-[#11141c]/95 backdrop-blur-md border-t border-slate-800/80 h-14 px-2"
       >
-        <div className="max-w-xl mx-auto h-full grid grid-cols-5 items-center">
+        <div className="max-w-xl mx-auto h-full grid grid-cols-4 items-center">
           <button
             type="button"
             onClick={() => setActiveTab('home')}
@@ -1833,7 +1712,7 @@ export default function App() {
             }`}
           >
             <Home className="w-5 h-5" />
-            <span className="text-[10px] font-semibold mt-0.5">Home</span>
+            <span className="text-[10px] font-semibold mt-0.5">{getTranslation(currentLang, 'navHome')}</span>
           </button>
 
           <button
@@ -1844,25 +1723,7 @@ export default function App() {
             }`}
           >
             <Search className="w-5 h-5" />
-            <span className="text-[10px] font-semibold mt-0.5">Search</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('downloads')}
-            className={`relative flex flex-col items-center justify-center min-h-[44px] transition-colors ${
-              activeTab === 'downloads' ? 'text-[#10d97b]' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <div className="relative">
-              <Download className="w-5 h-5" />
-              {activeDownloadsCount > 0 && (
-                <span className="absolute -top-1.5 -right-2.5 px-1 rounded-full bg-[#10d97b] text-slate-950 font-mono text-[9px] font-extrabold">
-                  {activeDownloadsCount}
-                </span>
-              )}
-            </div>
-            <span className="text-[10px] font-semibold mt-0.5">Downloads</span>
+            <span className="text-[10px] font-semibold mt-0.5">{getTranslation(currentLang, 'navSearch')}</span>
           </button>
 
           <button
@@ -1873,7 +1734,7 @@ export default function App() {
             }`}
           >
             <Bookmark className="w-5 h-5" />
-            <span className="text-[10px] font-semibold mt-0.5">Watchlist</span>
+            <span className="text-[10px] font-semibold mt-0.5">{getTranslation(currentLang, 'navWatchlist')}</span>
           </button>
 
           <button
@@ -1884,7 +1745,7 @@ export default function App() {
             }`}
           >
             <User className="w-5 h-5" />
-            <span className="text-[10px] font-semibold mt-0.5">Me</span>
+            <span className="text-[10px] font-semibold mt-0.5">{getTranslation(currentLang, 'navMe')}</span>
           </button>
         </div>
       </nav>
@@ -1899,10 +1760,6 @@ export default function App() {
           appConfig={appConfig}
           offlineDownload={playingOfflineItem}
           isInWatchlist={watchlist.some((w) => w.id === playingMovie.id)}
-          isFetchingStream={isFetchingStream}
-          streamFetchError={streamFetchError}
-          movieBoxDirectStreamUrl={movieBoxDirectStreamUrl}
-          onRetryStreamFetch={() => fetchMovieStreamForItem(playingMovie)}
           onClose={() => {
             setPlayingMovie(null);
             setPlayingOfflineItem(null);
@@ -1919,7 +1776,11 @@ export default function App() {
               setMovieLinksMap((prev) => ({ ...prev, [res.record!.tmdb_id]: res.record! }));
               showToast(`Saved custom link for ${playingMovie.title}!`);
             }
-            return res;
+            return {
+              ok: res.ok,
+              error: res.error || undefined,
+              record: res.record || undefined,
+            };
           }}
         />
       )}
@@ -1976,30 +1837,26 @@ export default function App() {
           onClose={() => setAdminModalState((s) => ({ ...s, open: false }))}
           onUnlockAdmin={() => {
             setIsAdminUnlocked(true);
-            try {
-              sessionStorage.setItem('cinebox_admin_unlocked', '1');
-            } catch {
-              // ignore
-            }
-            showToast('Admin Session Unlocked — Full Global Control Active!');
+            showToast('Admin Session Unlocked via Supabase Auth — Full Global Control Active!');
           }}
           onLockAdmin={() => {
             setIsAdminUnlocked(false);
-            try {
-              sessionStorage.removeItem('cinebox_admin_unlocked');
-            } catch {
-              // ignore
-            }
-            showToast('Admin Session Locked.');
+            void signOutSupabaseSession();
+            showToast('Admin Session Signed Out.');
           }}
           onConfigUpdated={(nextCfg) => {
             setAppConfig(nextCfg);
-            checkForInAppApkUpdate({ globalAppConfig: nextCfg }).then((res) => {
-              if (res.checked && res.updateAvailable) {
-                setUpdateCheckResult(res);
-                setIsUpdateDialogDismissed(false);
-              }
-            });
+            if (detectAppPlatform() === 'Android') {
+              checkForInAppApkUpdate({
+                platform: 'Android',
+                globalAppConfig: nextCfg,
+              }).then((res) => {
+                if (res.checked && res.updateAvailable) {
+                  setUpdateCheckResult(res);
+                  setIsUpdateDialogDismissed(false);
+                }
+              });
+            }
           }}
           onLinksUpdated={refreshSupabaseData}
           onUsersUpdated={(updatedUsers) => setAppUsers(updatedUsers)}
@@ -2042,9 +1899,10 @@ export default function App() {
       )}
 
       {/* =====================================================================
-          IN-APP UPDATE CHECKER DIALOG (VERSION.JSON VS APP.GETINFO().VERSION)
+          IN-APP UPDATE CHECKER DIALOG (ANDROID APK ONLY — NEVER ON WEB)
          ===================================================================== */}
-      {updateCheckResult &&
+      {detectedPlatform === 'Android' &&
+        updateCheckResult &&
         updateCheckResult.updateAvailable &&
         !isUpdateDialogDismissed &&
         !adminModalState.open && (

@@ -5,13 +5,14 @@ import {
   sanitizeFileName,
   buildPublicExportPath,
   sanitizeBannerHtml,
-  verifyAdminPinWithRateLimit,
+  isAdminJwtUser,
+  isModeratorOrAdminJwtUser,
+  sanitizeDatabaseTextField,
   validateMovieLinkInput,
   validateAppUserInput,
   parseDirectBulkMovieLinksInput,
   evaluateGlobalUserAccess,
   generateAllottedUserId,
-  verifyAdminPinRecovery,
   verifyAdFreeHtmlGuard,
 } from './securityValidator';
 import {
@@ -34,11 +35,25 @@ import {
   sanitizeHeaderValue,
 } from './blobStreamFetcher';
 import {
+  buildCorsProxyHeaders,
   buildProxiedUrl,
+  DEFAULT_SUPABASE_CORS_PROXY_URL,
+  getActiveCorsProxyBaseUrl,
   MOVIEBOX_REQUIRED_HEADERS,
   parseMovieBoxSearchResponse,
   parseMovieBoxStreamResponse,
 } from '../services/movieBoxDirectApi';
+import {
+  buildDirectTmdbHeaders,
+  buildDirectTmdbUrl,
+  buildTmdbProxyHeaders,
+  buildTmdbRequestUrl,
+  DEFAULT_DEPLOYED_TMDB_PROXY_URL,
+  getActiveTmdbApiKey,
+  getActiveTmdbProxyUrl,
+  getActiveTmdbReadAccessToken,
+} from '../services/tmdbService';
+import { getLanguageDirection, getTranslation } from './i18n';
 
 test('Security: sanitizeSafeUrl allows valid https/http and blocks XSS schemes', () => {
   assert.equal(
@@ -75,31 +90,37 @@ test('Security: sanitizeBannerHtml strips script tags, iframes, and inline event
   assert.equal(cleanHtml.includes('Promo'), true);
 });
 
-test('Security: verifyAdminPinWithRateLimit enforces lockout after 5 failed attempts', () => {
-  let state = { failedAttempts: 0, lockedUntilMs: 0 };
-  const now = 1_700_000_000_000;
-
-  for (let i = 1; i <= 4; i++) {
-    const res = verifyAdminPinWithRateLimit('0000', '1234', state, now);
-    assert.equal(res.allowed, false);
-    assert.equal(res.locked, false);
-    state = res.nextState;
-  }
-
-  const fifth = verifyAdminPinWithRateLimit('0000', '1234', state, now);
-  assert.equal(fifth.allowed, false);
-  assert.equal(fifth.locked, true);
-  assert.equal(fifth.remainingLockSeconds, 60);
-  state = fifth.nextState;
-
-  const duringLock = verifyAdminPinWithRateLimit('1234', '1234', state, now + 10_000);
-  assert.equal(duringLock.allowed, false);
-  assert.equal(duringLock.locked, true);
-
-  const afterExpiry = verifyAdminPinWithRateLimit('1234', '1234', state, now + 61_000);
-  assert.equal(afterExpiry.allowed, true);
-  assert.equal(afterExpiry.locked, false);
-  assert.equal(afterExpiry.nextState.failedAttempts, 0);
+test('Phase 1 Security: isAdminJwtUser and isModeratorOrAdminJwtUser strictly verify JWT app_metadata.role = "admin" and reject user_metadata spoofing', () => {
+  assert.equal(isAdminJwtUser(null), false);
+  assert.equal(isAdminJwtUser(undefined), false);
+  assert.equal(
+    isAdminJwtUser({
+      user: {
+        email: 'user@example.com',
+        app_metadata: { role: 'user' },
+        user_metadata: { role: 'admin' }, // Spoofed user_metadata must be rejected
+      },
+    }),
+    false
+  );
+  assert.equal(
+    isAdminJwtUser({
+      user: {
+        email: 'admin@cinebox.app',
+        app_metadata: { role: 'admin' },
+      },
+    }),
+    true
+  );
+  assert.equal(
+    isModeratorOrAdminJwtUser({
+      user: {
+        email: 'mod@cinebox.app',
+        app_metadata: { role: 'moderator' },
+      },
+    }),
+    true
+  );
 });
 
 test('Validation: validateMovieLinkInput rejects invalid tmdb_id or malicious URLs', () => {
@@ -421,36 +442,17 @@ test('Global Decentralized Access Control: evaluateGlobalUserAccess enforces ban
   assert.equal(maintenanceCheck.reason?.includes('maintenance'), true);
 });
 
-test('Real Login & Forgot Admin PIN: generateAllottedUserId and verifyAdminPinRecovery work deterministically and securely', () => {
-  const id1 = generateAllottedUserId('ZulqarnainShah25@gmail.com');
-  const id2 = generateAllottedUserId('zulqarnainshah25@gmail.com  ');
+test('Phase 1 User ID & Database Text Sanitization: generateAllottedUserId and sanitizeDatabaseTextField work deterministically and block XSS', () => {
+  const id1 = generateAllottedUserId('user@cinebox.app');
+  const id2 = generateAllottedUserId('USER@cinebox.app  ');
   assert.equal(id1.startsWith('USR-'), true);
   assert.equal(id1, id2);
 
-  // Wrong Admin email rejected
-  const wrongEmail = verifyAdminPinRecovery(
-    'hacker@evil.com',
-    'ZulqarnainShah25@gmail.com',
-    '9999'
-  );
-  assert.equal(wrongEmail.valid, false);
-
-  // Short PIN rejected
-  const shortPin = verifyAdminPinRecovery(
-    'ZulqarnainShah25@gmail.com',
-    'ZulqarnainShah25@gmail.com',
-    '12'
-  );
-  assert.equal(shortPin.valid, false);
-
-  // Valid Admin email + valid new PIN accepted
-  const validRecovery = verifyAdminPinRecovery(
-    'zulqarnainshah25@gmail.com',
-    'ZulqarnainShah25@gmail.com',
-    '7860'
-  );
-  assert.equal(validRecovery.valid, true);
-  assert.equal(validRecovery.sanitizedPin, '7860');
+  const dirtyTitle = '<script>alert(1)</script>Jawan <img src=x onerror=evil()> (2023)';
+  const cleanTitle = sanitizeDatabaseTextField(dirtyTitle, 120);
+  assert.equal(cleanTitle.includes('<script'), false);
+  assert.equal(cleanTitle.includes('onerror'), false);
+  assert.equal(cleanTitle, 'Jawan (2023)');
 });
 
 test('Ad-Free HTML Security Guard: verifyAdFreeHtmlGuard blocks external ad scripts, popunders, and inline XSS handlers', () => {
@@ -1288,9 +1290,9 @@ test('Stage 3 Task 3: attachSafariNativeAudioTrackListeners registers change/add
 test('Stage 3 Task 4: Supabase Least-Privilege Security rejects service_role keys, excludes admin_pin_hash from public config reads, and removes anon write grants', async () => {
   const { isForbiddenServiceRoleKey } = await import('./securityValidator');
   const {
+    DEFAULT_APP_CONFIG,
     PUBLIC_APP_CONFIG_COLUMNS,
     SUPABASE_RLS_FIX_SQL,
-    setSupabaseCredentials,
   } = await import('../services/supabaseClient');
 
   // 1. Construct a fake JWT with {"role":"service_role"} payload
@@ -1304,12 +1306,11 @@ test('Stage 3 Task 4: Supabase Least-Privilege Security rejects service_role key
   assert.equal(isForbiddenServiceRoleKey('sb_secret_1234567890abcdef'), true);
   assert.equal(isForbiddenServiceRoleKey(fakeAnonJwt), false);
 
-  const rejectedSave = setSupabaseCredentials('https://example.supabase.co', fakeServiceRoleJwt);
-  assert.equal(rejectedSave.ok, false);
-
-  // 2. Public app_config columns never include admin_pin_hash or admin_email
+  // 2. Public app_config columns and DEFAULT_APP_CONFIG never include admin_pin_hash or admin_email
   assert.equal(PUBLIC_APP_CONFIG_COLUMNS.includes('admin_pin_hash'), false);
   assert.equal(PUBLIC_APP_CONFIG_COLUMNS.includes('admin_email'), false);
+  assert.equal('admin_pin_hash' in DEFAULT_APP_CONFIG, false);
+  assert.equal('admin_email' in DEFAULT_APP_CONFIG, false);
 
   // 3. SUPABASE_RLS_FIX_SQL enforces least-privilege (no FOR ALL TO anon, no GRANT ALL ... TO anon)
   assert.equal(/FOR\s+ALL\s+TO\s+anon/i.test(SUPABASE_RLS_FIX_SQL), false);
@@ -1470,7 +1471,7 @@ test('Part 2 & 3: YouTube Data API v3 Pakistani Dramas Integration (Official Cha
   assert.equal(searchUrl.includes('https://www.googleapis.com/youtube/v3/search?'), true);
   assert.equal(searchUrl.includes('key=TEST_YT_KEY'), true);
   assert.equal(searchUrl.includes('channelId=UC6-F5tO8uklgE9Zy8IvbdFw'), true);
-  assert.equal(searchUrl.includes('part=snippet,id'), true);
+  assert.equal(decodeURIComponent(searchUrl).includes('part=snippet,id'), true);
   assert.equal(searchUrl.includes('order=date'), true);
   assert.equal(searchUrl.includes('maxResults=20'), true);
 
@@ -1479,7 +1480,7 @@ test('Part 2 & 3: YouTube Data API v3 Pakistani Dramas Integration (Official Cha
     videoIds: ['9bZkp7q19f0', 'dQw4w9WgXcQ'],
   });
   assert.equal(detailsUrl.includes('https://www.googleapis.com/youtube/v3/videos?'), true);
-  assert.equal(detailsUrl.includes('part=snippet,contentDetails,statistics'), true);
+  assert.equal(decodeURIComponent(detailsUrl).includes('part=snippet,contentDetails,statistics'), true);
 
   assert.equal(
     buildYouTubeDramaEmbedUrl('9bZkp7q19f0'),
@@ -1921,7 +1922,8 @@ test('Global Admin APK Download Link (Google Drive / Direct URL): extracts Googl
   assert.equal(fetchedCfg.apk_latest_version, '1.0.6');
 
   const updateCheck = await checkForInAppApkUpdate({
-    currentVersionOverride: '1.0.1',
+    platform: 'Android',
+    currentVersionOverride: '1.0.2',
     globalAppConfig: fetchedCfg,
   });
   assert.equal(updateCheck.checked, true);
@@ -1931,4 +1933,462 @@ test('Global Admin APK Download Link (Google Drive / Direct URL): extracts Googl
   assert.equal(updateCheck.isGoogleDriveLink, true);
   assert.equal(updateCheck.source, 'supabase-global-config');
 });
+
+test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0.2 (versionCode 2), Fullscreen Back Button & Taskbar Blending, and Borderless #000000 Player', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    DEFAULT_CURRENT_APP_VERSION,
+    DEFAULT_GLOBAL_APK_DOWNLOAD_URL,
+    isUnconfiguredPlaceholderApkUrl,
+    checkForInAppApkUpdate,
+  } = await import('../services/inAppUpdateService');
+  const { DEFAULT_APP_CONFIG } = await import('../services/supabaseClient');
+  const { getFullscreenPlayerConfig } = await import('./streamResolver');
+
+  // 1. Web Par Update Popup Band: platform === 'Web' NEVER returns updateAvailable: true
+  const webCheck = await checkForInAppApkUpdate({
+    platform: 'Web',
+    currentVersionOverride: '1.0.0',
+    globalAppConfig: {
+      apk_download_url: 'https://drive.google.com/uc?export=download&id=1RealGoogleDriveFileId123',
+      apk_latest_version: '1.0.9',
+    },
+  });
+  assert.equal(webCheck.checked, true);
+  assert.equal(webCheck.updateAvailable, false);
+  assert.equal(webCheck.platform, 'Web');
+  assert.equal(webCheck.source, 'web-disabled');
+
+  // 2. Placeholder URL guard prevents "Document lookup failed" before Admin saves a real Drive link
+  assert.equal(isUnconfiguredPlaceholderApkUrl(DEFAULT_GLOBAL_APK_DOWNLOAD_URL), true);
+  assert.equal(
+    isUnconfiguredPlaceholderApkUrl(
+      'https://drive.google.com/file/d/1RealGoogleDriveFileId123/view?usp=sharing'
+    ),
+    false
+  );
+
+  // 3. Version Number Update (1.0.1 -> 1.0.2, versionCode 2)
+  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.2');
+  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.2');
+
+  const buildGradle = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/build.gradle'),
+    'utf8'
+  );
+  assert.equal(buildGradle.includes('versionCode 2'), true);
+  assert.equal(buildGradle.includes('versionName "1.0.2"'), true);
+
+  const versionJson = JSON.parse(
+    fs.readFileSync(path.resolve(process.cwd(), 'public/version.json'), 'utf8')
+  );
+  assert.equal(versionJson.version, '1.0.2');
+
+  // 4. Fullscreen Back Button (Controls-Synced Visibility & Taskbar Blending) + Borderless #000000 object-fit: contain
+  const fsVisible = getFullscreenPlayerConfig(true, 'contain', true);
+  assert.equal(fsVisible.backgroundColor, '#000000');
+  assert.equal(fsVisible.objectFit, 'contain');
+  assert.equal(fsVisible.videoObjectFitClass, 'object-contain');
+  assert.equal(fsVisible.showAlwaysVisibleExitButton, true);
+  assert.equal(fsVisible.showControlsSyncedExitButton, true);
+  assert.equal(fsVisible.containerClassName.includes('border-0'), true);
+  assert.equal(fsVisible.containerClassName.includes('bg-[#000000]'), true);
+  assert.equal(fsVisible.exitButtonClassName.includes('opacity-100'), true);
+
+  const fsHiddenBlend = getFullscreenPlayerConfig(true, 'contain', false);
+  assert.equal(fsHiddenBlend.showControlsSyncedExitButton, false);
+  assert.equal(fsHiddenBlend.exitButtonClassName.includes('opacity-0'), true);
+
+  const normalBorderless = getFullscreenPlayerConfig(false, 'contain', true);
+  assert.equal(normalBorderless.containerClassName.includes('border-0'), true);
+  assert.equal(normalBorderless.containerClassName.includes('border-b'), false);
+
+  // 5. Verify MainActivity.java includes immersive taskbar blending & native Exit Fullscreen overlay
+  const mainActivityJava = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(mainActivityJava.includes('onShowCustomView'), true);
+  assert.equal(mainActivityJava.includes('attachNativeExitFullscreenOverlay'), true);
+  assert.equal(mainActivityJava.includes('configureSystemBarsPureBlack'), true);
+  assert.equal(mainActivityJava.includes('BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE'), true);
+});
+
+test('Rollback MovieBox Direct API Integration: Restores Server 3 (2Embed.cc) and Server 1 (VidSrc.sh) as default iframe servers, removes movie-api-vercel.onrender.com, and keeps Admin/Trial/Referral intact', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  // 1. Default embed servers start with Server 3 (2Embed.cc) and Server 1 (VidSrc.sh)
+  const moviePlan = resolvePlaybackPlan(872906, null, 'movie');
+  assert.equal(moviePlan.embedServers.length >= 2, true);
+  assert.equal(moviePlan.embedServers[0].id, 'auto-server-3');
+  assert.equal(moviePlan.embedServers[0].label, 'Server 3 (2Embed.cc)');
+  assert.equal(moviePlan.embedServers[0].url, 'https://www.2embed.cc/embed/872906');
+  assert.equal(moviePlan.embedServers[1].id, 'auto-server-1');
+  assert.equal(moviePlan.embedServers[1].label, 'Server 1 (VidSrc.sh)');
+  assert.equal(moviePlan.embedServers[1].url, 'https://vidsrc.sh/embed/movie/872906?ds_lang=en');
+
+  // 2. Clean iframe attributes load Server 3 and Server 1 without restrictive sandbox
+  const server3Iframe = getCleanIframeAttributes(
+    moviePlan.embedServers[0].url,
+    'Jawan - Server 3 (2Embed.cc)'
+  );
+  assert.equal(server3Iframe.src, 'https://www.2embed.cc/embed/872906');
+  assert.equal(server3Iframe.allowFullScreen, true);
+  assert.equal('sandbox' in server3Iframe, false);
+
+  const server1Iframe = getCleanIframeAttributes(
+    moviePlan.embedServers[1].url,
+    'Jawan - Server 1 (VidSrc.sh)'
+  );
+  assert.equal(server1Iframe.src, 'https://vidsrc.sh/embed/movie/872906?ds_lang=en');
+  assert.equal(server1Iframe.allowFullScreen, true);
+
+  // 3. Verify movie-api-vercel.onrender.com and Server 1 (MovieBox Direct) are completely removed from codebase
+  const appSource = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  const directApiSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/movieBoxDirectApi.ts'),
+    'utf8'
+  );
+
+  assert.equal(appSource.includes('movie-api-vercel.onrender.com'), false);
+  assert.equal(modalSource.includes('movie-api-vercel.onrender.com'), false);
+  assert.equal(directApiSource.includes('movie-api-vercel.onrender.com'), false);
+  assert.equal(modalSource.includes('Server 1 (MovieBox Direct)'), false);
+  assert.equal(modalSource.includes('switch-to-blob-player-btn'), false);
+  assert.equal(modalSource.includes('test-native-player-btn'), false);
+  assert.equal(modalSource.includes('prominent-open-new-tab-btn'), true);
+});
+
+test('Phase 1 Security & Live Supabase Edge Functions (tmdb-proxy & cors-proxy): verifies headers, URLs, schema RLS, i18n RTL, and Android hardening', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  // 1. Live TMDB Proxy URL & Headers (apikey + Authorization: Bearer <anon_key>)
+  assert.equal(
+    DEFAULT_DEPLOYED_TMDB_PROXY_URL,
+    'https://myeammfiwahmmemkoqif.supabase.co/functions/v1/tmdb-proxy'
+  );
+  assert.equal(
+    getActiveTmdbProxyUrl(),
+    'https://myeammfiwahmmemkoqif.supabase.co/functions/v1/tmdb-proxy'
+  );
+  const tmdbUrl = buildTmdbRequestUrl('trending/movie/day', { language: 'en-US', page: '1' });
+  assert.equal(
+    (tmdbUrl || '').startsWith(
+      'https://myeammfiwahmmemkoqif.supabase.co/functions/v1/tmdb-proxy?endpoint=%2Ftrending%2Fmovie%2Fday'
+    ),
+    true
+  );
+
+  const tmdbHeaders = buildTmdbProxyHeaders('test-supabase-anon-jwt');
+  assert.equal(tmdbHeaders.Accept, 'application/json');
+  assert.equal(tmdbHeaders.apikey, 'test-supabase-anon-jwt');
+  assert.equal(tmdbHeaders.Authorization, 'Bearer test-supabase-anon-jwt');
+
+  // 1b. Direct TMDB API Key & Read Access Token (Bearer) verification
+  assert.equal(getActiveTmdbApiKey(), '3577dcd731c0418a06c8866c83b1dbfe');
+  assert.equal(
+    getActiveTmdbReadAccessToken().startsWith('eyJhbGciOiJIUzI1NiJ9.'),
+    true
+  );
+  const directUrl = buildDirectTmdbUrl('search/multi', { query: 'Jawan' });
+  assert.equal(
+    directUrl,
+    'https://api.themoviedb.org/3/search/multi?api_key=3577dcd731c0418a06c8866c83b1dbfe&query=Jawan'
+  );
+  const directHeaders = buildDirectTmdbHeaders();
+  assert.equal(directHeaders.Accept, 'application/json');
+  assert.equal(
+    directHeaders.Authorization.startsWith('Bearer eyJhbGciOiJIUzI1NiJ9.'),
+    true
+  );
+
+  // 2. Live CORS Proxy URL & Headers (https://myeammfiwahmmemkoqif.supabase.co/functions/v1/cors-proxy?target={original_url})
+  assert.equal(
+    DEFAULT_SUPABASE_CORS_PROXY_URL,
+    'https://myeammfiwahmmemkoqif.supabase.co/functions/v1/cors-proxy'
+  );
+  assert.equal(
+    getActiveCorsProxyBaseUrl(),
+    'https://myeammfiwahmmemkoqif.supabase.co/functions/v1/cors-proxy'
+  );
+  const targetStreamUrl = 'https://www.2embed.cc/embed/533535';
+  const proxiedStreamUrl = buildProxiedUrl(targetStreamUrl, DEFAULT_SUPABASE_CORS_PROXY_URL);
+  assert.equal(
+    proxiedStreamUrl,
+    `https://myeammfiwahmmemkoqif.supabase.co/functions/v1/cors-proxy?target=${encodeURIComponent(targetStreamUrl)}`
+  );
+
+  const corsHeaders = buildCorsProxyHeaders(
+    proxiedStreamUrl,
+    'test-supabase-anon-jwt'
+  );
+  assert.equal(corsHeaders.apikey, 'test-supabase-anon-jwt');
+  assert.equal(corsHeaders.Authorization, 'Bearer test-supabase-anon-jwt');
+
+  // 3. Verify supabase_schema.sql has is_cinebox_admin() without hardcoded email, drops admin_pin_hash/admin_email, and creates 5 new tables with RLS
+  const schemaSql = fs.readFileSync(path.resolve(process.cwd(), 'supabase_schema.sql'), 'utf8');
+  assert.equal(schemaSql.includes('public.is_cinebox_admin()'), true);
+  assert.equal(schemaSql.toLowerCase().includes('zulqarnainshah25@gmail.com'), false);
+  assert.equal(schemaSql.includes('CREATE TABLE IF NOT EXISTS public.watch_history'), true);
+  assert.equal(schemaSql.includes('CREATE TABLE IF NOT EXISTS public.watchlist'), true);
+  assert.equal(schemaSql.includes('CREATE TABLE IF NOT EXISTS public.audit_log'), true);
+  assert.equal(schemaSql.includes('CREATE TABLE IF NOT EXISTS public.featured_collections'), true);
+  assert.equal(schemaSql.includes('CREATE TABLE IF NOT EXISTS public.link_health'), true);
+
+  // 4. Verify hardcoded TMDB key and fake friend1234 are completely removed from source files
+  const tmdbServiceSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/tmdbService.ts'),
+    'utf8'
+  );
+  const profileViewSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/ProfileMeView.tsx'),
+    'utf8'
+  );
+  assert.equal(tmdbServiceSource.includes('3fd2be6f0c70a2a598f084ddfb75487c'), false);
+  assert.equal(profileViewSource.includes('friend1234'), false);
+
+  // 5. Verify bilingual i18n (English LTR + Urdu RTL)
+  assert.equal(getLanguageDirection('en'), 'ltr');
+  assert.equal(getLanguageDirection('ur'), 'rtl');
+  assert.equal(getTranslation('en', 'navHome'), 'Home');
+  assert.equal(getTranslation('ur', 'navHome'), 'ہوم');
+
+  // 6. Verify Android & Capacitor security hardening
+  const buildGradle = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/build.gradle'),
+    'utf8'
+  );
+  const androidManifest = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/AndroidManifest.xml'),
+    'utf8'
+  );
+  const capConfig = JSON.parse(
+    fs.readFileSync(path.resolve(process.cwd(), 'capacitor.config.json'), 'utf8')
+  );
+  assert.equal(buildGradle.includes('minifyEnabled true'), true);
+  assert.equal(buildGradle.includes('shrinkResources true'), true);
+  assert.equal(androidManifest.includes('android:allowBackup="false"'), true);
+  assert.equal(androidManifest.includes('android:usesCleartextTraffic="false"'), true);
+  assert.equal(capConfig.android.allowMixedContent, false);
+});
+
+test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admin Sync & Real VidSrc.sh AdBlocker', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    getVidSrcPlayerIframeAttributes,
+    isVidSrcAdNetworkUrl,
+    isVidSrcProviderUrl,
+    VIDSRC_AD_BLOCKLIST_DOMAINS,
+  } = await import('./streamResolver');
+  const {
+    DEFAULT_OFFICIAL_WEBSITE_URL,
+    normalizeOfficialWebsiteUrl,
+    encodeGlobalApkConfigCarrier,
+    decodeGlobalApkConfigCarrier,
+  } = await import('../services/inAppUpdateService');
+  const { DEFAULT_APP_CONFIG, updateAppConfig } = await import('../services/supabaseClient');
+
+  // 1. Streaming-Only App Verification (Downloads section & dummy movie download buttons removed)
+  const appSource = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  const profileSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/ProfileMeView.tsx'),
+    'utf8'
+  );
+
+  assert.equal(appSource.includes("activeTab === 'downloads'"), false);
+  assert.equal(appSource.includes("setActiveTab('downloads')"), false);
+  assert.equal(appSource.includes('grid-cols-4'), true);
+  assert.equal(modalSource.includes('Offline Download Manager'), false);
+  assert.equal(modalSource.includes('server-extract-download-btn'), false);
+  assert.equal(profileSource.includes('Default Offline Download Quality'), false);
+  assert.equal(profileSource.includes('Wi-Fi Only Downloads'), false);
+
+  // 2. Official Website (cineboxmovies.ai.studio -> https://cineboxmovies.ai.studio) & Admin Panel Linkage
+  assert.equal(DEFAULT_OFFICIAL_WEBSITE_URL, 'https://cineboxmovies.ai.studio');
+  assert.equal(DEFAULT_APP_CONFIG.official_website, 'https://cineboxmovies.ai.studio');
+  assert.equal(
+    normalizeOfficialWebsiteUrl('cineboxmovies.ai.studio'),
+    'https://cineboxmovies.ai.studio'
+  );
+  assert.equal(
+    normalizeOfficialWebsiteUrl('https://cineboxmovies.ai.studio/'),
+    'https://cineboxmovies.ai.studio'
+  );
+  assert.equal(
+    normalizeOfficialWebsiteUrl('https://neboxmovies.ai.studio'),
+    'https://cineboxmovies.ai.studio'
+  );
+  assert.equal(
+    normalizeOfficialWebsiteUrl('https://cinebox-movie-streaming-offline-downloader.ai.studio/'),
+    'https://cineboxmovies.ai.studio'
+  );
+  assert.equal(normalizeOfficialWebsiteUrl(''), 'https://cineboxmovies.ai.studio');
+
+  const carrier = encodeGlobalApkConfigCarrier({
+    apkUrl: 'https://drive.google.com/uc?export=download&id=test12345',
+    version: '1.0.5',
+    releaseNotes: 'Streaming only release',
+    officialWebsite: 'cineboxmovies.ai.studio',
+  });
+  const decodedCarrier = decodeGlobalApkConfigCarrier(carrier);
+  assert.ok(decodedCarrier);
+  assert.equal(decodedCarrier.officialWebsite, 'https://cineboxmovies.ai.studio');
+
+  const updatedCfg = await updateAppConfig({
+    official_website: 'cineboxmovies.ai.studio',
+  });
+  assert.equal(updatedCfg.config.official_website, 'https://cineboxmovies.ai.studio');
+
+  const adminModalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/AdminAndDeliverablesModal.tsx'),
+    'utf8'
+  );
+  assert.equal(adminModalSource.includes('admin-official-website-input'), true);
+  assert.equal(adminModalSource.includes('https://cineboxmovies.ai.studio'), true);
+
+  // 2b. Android APK Launcher Icon & Brand Logo PNG Verification
+  assert.equal(
+    fs.existsSync(
+      path.resolve(process.cwd(), 'android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png')
+    ),
+    true
+  );
+  assert.equal(
+    fs.existsSync(
+      path.resolve(process.cwd(), 'android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png')
+    ),
+    true
+  );
+  assert.equal(fs.existsSync(path.resolve(process.cwd(), 'resources/icon.png')), true);
+  assert.equal(fs.existsSync(path.resolve(process.cwd(), 'public/cinebox-app-icon.png')), true);
+
+  // 3. Real VidSrc.sh AdBlocker (Scoped strictly to vidsrc.sh — 2Embed and other providers unaffected)
+  assert.equal(isVidSrcProviderUrl('https://vidsrc.sh/embed/movie/533535?ds_lang=en'), true);
+  assert.equal(isVidSrcProviderUrl('https://player.vidsrc.sh/embed/tv/123'), true);
+  assert.equal(isVidSrcProviderUrl('https://www.2embed.cc/embed/533535'), false);
+  assert.equal(isVidSrcProviderUrl('https://www.youtube.com/embed/abc'), false);
+  assert.equal(isVidSrcProviderUrl(null), false);
+
+  assert.equal(VIDSRC_AD_BLOCKLIST_DOMAINS.length > 10, true);
+  assert.equal(isVidSrcAdNetworkUrl('https://syndication.exoclick.com/ads.js'), true);
+  assert.equal(isVidSrcAdNetworkUrl('https://cdn.popads.net/pop.js'), true);
+  assert.equal(isVidSrcAdNetworkUrl('https://vidsrc.sh/embed/movie/533535'), false);
+
+  // When VidSrc.sh is active and AdBlocker is ON -> strict sandbox without allow-popups or allow-top-navigation
+  const vidsrcProtectedAttrs = getVidSrcPlayerIframeAttributes(
+    'https://vidsrc.sh/embed/movie/533535?ds_lang=en',
+    'Deadpool - VidSrc.sh',
+    true
+  );
+  assert.equal(vidsrcProtectedAttrs.isVidSrcAdBlockerActive, true);
+  assert.equal(
+    vidsrcProtectedAttrs.sandbox,
+    'allow-scripts allow-same-origin allow-forms allow-presentation'
+  );
+  assert.equal((vidsrcProtectedAttrs.sandbox || '').includes('allow-popups'), false);
+  assert.equal((vidsrcProtectedAttrs.sandbox || '').includes('allow-top-navigation'), false);
+
+  // When AdBlocker is OFF -> no sandbox restriction
+  const vidsrcUnprotectedAttrs = getVidSrcPlayerIframeAttributes(
+    'https://vidsrc.sh/embed/movie/533535?ds_lang=en',
+    'Deadpool - VidSrc.sh',
+    false
+  );
+  assert.equal(vidsrcUnprotectedAttrs.isVidSrcAdBlockerActive, false);
+  assert.equal(vidsrcUnprotectedAttrs.sandbox, undefined);
+
+  // When Server 3 (2Embed.cc) is active -> never sandboxed even when AdBlocker is ON
+  const twoEmbedAttrs = getVidSrcPlayerIframeAttributes(
+    'https://www.2embed.cc/embed/533535',
+    'Deadpool - 2Embed',
+    true
+  );
+  assert.equal(twoEmbedAttrs.isVidSrcAdBlockerActive, false);
+  assert.equal(twoEmbedAttrs.sandbox, undefined);
+
+  // Verify UI toggle switch (role="switch"), CSS hiding rules & network request interceptor
+  const { buildVidSrcAdBlockCssRules, installVidSrcNetworkAdInterceptor } = await import(
+    './streamResolver'
+  );
+
+  // CSS hiding rules generated ONLY when Adblocker is ON and server is vidsrc.sh
+  const activeCss = buildVidSrcAdBlockCssRules(true, true);
+  assert.equal(activeCss.includes('iframe[src*="exoclick.com"]'), true);
+  assert.equal(activeCss.includes('[data-vidsrc-adblock="active"] > iframe[data-vidsrc-iframe="true"]'), true);
+  assert.equal(activeCss.includes('display: none !important;'), true);
+  assert.equal(buildVidSrcAdBlockCssRules(false, true), '');
+  assert.equal(buildVidSrcAdBlockCssRules(true, false), '');
+
+  // Network request & popup interceptor blocks ad-network fetches & window.open, while allowing normal requests
+  const interceptedEvents: Array<{ url: string; kind: string }> = [];
+  let passthroughFetchCount = 0;
+  const mockWin: any = {
+    fetch: async (url: string) => {
+      passthroughFetchCount += 1;
+      return { ok: true, status: 200, url };
+    },
+    open: (url: string) => ({ openedUrl: url }),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  const cleanupInterceptor = installVidSrcNetworkAdInterceptor({
+    enabled: true,
+    isVidSrcTarget: true,
+    targetWindow: mockWin,
+    targetDocument: null,
+    onAdBlocked: (url, kind) => {
+      interceptedEvents.push({ url, kind });
+    },
+  });
+
+  // Ad network fetch -> intercepted (returns 204, does not hit original fetch)
+  const blockedRes = await mockWin.fetch('https://syndication.exoclick.com/ads.js');
+  assert.equal(blockedRes.status, 204);
+  assert.equal(passthroughFetchCount, 0);
+  assert.equal(interceptedEvents.length, 1);
+  assert.equal(interceptedEvents[0].kind, 'fetch');
+
+  // Legitimate API fetch -> passes through untouched
+  const allowedRes = await mockWin.fetch('https://api.themoviedb.org/3/movie/533535');
+  assert.equal(allowedRes.status, 200);
+  assert.equal(passthroughFetchCount, 1);
+
+  // Popup window.open -> intercepted (returns null)
+  const popupAttempt = mockWin.open('https://cdn.popads.net/popunder');
+  assert.equal(popupAttempt, null);
+  assert.equal(interceptedEvents.length, 2);
+  assert.equal(interceptedEvents[1].kind, 'popup');
+
+  // Toggling Adblocker OFF (cleanup) restores original fetch and window.open
+  cleanupInterceptor();
+  const afterCleanupPopup = mockWin.open('https://cineboxmovies.ai.studio');
+  assert.deepEqual(afterCleanupPopup, { openedUrl: 'https://cineboxmovies.ai.studio' });
+
+  assert.equal(modalSource.includes('vidsrc-adblocker-toggle-btn'), true);
+  assert.equal(modalSource.includes('role="switch"'), true);
+  assert.equal(modalSource.includes('vidsrc-adblocker-css-rules'), true);
+  assert.equal(modalSource.includes('data-vidsrc-adblock='), true);
+  const mainActivityJava = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(mainActivityJava.includes('VIDSRC_AD_DOMAINS'), true);
+  assert.equal(mainActivityJava.includes('shouldInterceptRequest'), true);
+  assert.equal(mainActivityJava.includes('shouldOverrideUrlLoading'), true);
+});
+
+
+
 

@@ -1,4 +1,4 @@
-import { CLIENT_PROXIES, buildProxiedUrl } from './movieBoxDirectApi';
+import { CLIENT_PROXIES, buildCorsProxyHeaders, buildProxiedUrl } from './movieBoxDirectApi';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
 
 export interface ExtractedStreamCandidate {
@@ -151,6 +151,7 @@ async function fetchTextViaClientProxy(targetUrl: string): Promise<string | null
     try {
       const response = await fetch(proxiedUrl, {
         method: 'GET',
+        headers: buildCorsProxyHeaders(proxiedUrl),
         signal: controller.signal,
       });
       clearTimeout(timer);

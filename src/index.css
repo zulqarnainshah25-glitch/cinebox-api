@@ -19,6 +19,8 @@
     overflow-x: hidden;
     margin: 0;
     padding: 0;
+    border: 0;
+    outline: none;
   }
 
   h1, h2, h3, .font-display {
@@ -26,7 +28,7 @@
   }
 }
 
-/* Strictly eliminate white borders in Fullscreen on Android WebView, Mobile Chrome, and Safari */
+/* Strictly eliminate white borders & gaps in Fullscreen on Android WebView, Mobile Chrome, and Safari */
 :fullscreen,
 :-webkit-full-screen,
 :-moz-full-screen,
@@ -60,10 +62,26 @@ iframe::backdrop {
 :fullscreen iframe,
 :-webkit-full-screen iframe,
 .cinebox-player-fullscreen video,
-.cinebox-player-fullscreen iframe {
+.cinebox-player-fullscreen iframe,
+video,
+iframe {
   background-color: #000000 !important;
   border: 0 !important;
   outline: none !important;
+  box-shadow: none !important;
+}
+
+:fullscreen video,
+:-webkit-full-screen video,
+.cinebox-player-fullscreen video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+
+:fullscreen iframe,
+:-webkit-full-screen iframe,
+.cinebox-player-fullscreen iframe {
   width: 100% !important;
   height: 100% !important;
 }

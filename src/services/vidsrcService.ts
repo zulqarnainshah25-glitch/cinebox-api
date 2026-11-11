@@ -1,5 +1,5 @@
 import { sanitizeSafeUrl, stripHtmlAndScriptContent } from '../utils/securityValidator';
-import { CLIENT_PROXIES, buildProxiedUrl } from './movieBoxDirectApi';
+import { CLIENT_PROXIES, buildCorsProxyHeaders, buildProxiedUrl } from './movieBoxDirectApi';
 import {
   fetchTmdbNowPlayingMovies,
   fetchTmdbOnTheAirTvShows,
@@ -503,7 +503,10 @@ export async function fetchVidSrcLatestFeed(
       const proxiedUrl = buildProxiedUrl(endpoint, proxy.prefix);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 4000);
-      const res = await fetchFn(proxiedUrl, { signal: controller.signal });
+      const res = await fetchFn(proxiedUrl, {
+        headers: buildCorsProxyHeaders(proxiedUrl),
+        signal: controller.signal,
+      });
       clearTimeout(timer);
 
       if (!res.ok) continue;

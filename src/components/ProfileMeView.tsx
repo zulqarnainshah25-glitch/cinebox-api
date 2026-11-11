@@ -37,7 +37,12 @@ import {
   UserAppSettings,
   WatchHistoryItem,
 } from '../types/movie';
-import { loginOrRegisterUser, logoutCurrentUser } from '../services/supabaseClient';
+import {
+  loginOrRegisterUser,
+  logoutCurrentUser,
+  normalizeOfficialWebsiteUrl,
+  requestPasswordResetEmail,
+} from '../services/supabaseClient';
 import {
   buildReferralShareUrl,
   generateUniqueReferralCode,
@@ -81,23 +86,21 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [activeNoticeModal, setActiveNoticeModal] = useState<string | null>(null);
 
-  // Real Login / Register Modal State
+  // Real Login / Register / Password Reset Modal State
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
   const [authEmail, setAuthEmail] = useState<string>('');
   const [authPassword, setAuthPassword] = useState<string>('');
   const [authUsername, setAuthUsername] = useState<string>('');
   const [authError, setAuthError] = useState<string>('');
+  const [authSuccessMsg, setAuthSuccessMsg] = useState<string>('');
   const [isAuthenticating, setIsAuthenticating] = useState<boolean>(false);
 
   // Real Working App Settings Modal State
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [cacheClearedMsg, setCacheClearedMsg] = useState<string>('');
 
-  const officialSite =
-    appConfig.official_website && appConfig.official_website !== 'https://movie-box.co'
-      ? appConfig.official_website
-      : 'https://cinebox-movie-streaming-offline-downloader.ai.studio/';
+  const officialSite = normalizeOfficialWebsiteUrl(appConfig.official_website);
 
   const handleCopyWebsite = () => {
     if (navigator.clipboard) {
@@ -110,8 +113,19 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
+    setAuthSuccessMsg('');
     setIsAuthenticating(true);
     try {
+      if (authMode === 'reset') {
+        const resetRes = await requestPasswordResetEmail(authEmail);
+        if (!resetRes.ok) {
+          setAuthError(resetRes.error || 'Could not send password reset email.');
+        } else {
+          setAuthSuccessMsg(resetRes.message || 'Password reset link sent to your email.');
+        }
+        return;
+      }
+
       const res = await loginOrRegisterUser({
         email: authEmail,
         password: authPassword,
@@ -253,7 +267,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             </div>
             <div className="min-w-0">
               <div className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-2 flex-wrap">
-                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.1'})</span>
+                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.2'})</span>
                 <span className="px-2 py-0.5 rounded bg-emerald-950 border border-[#10d97b]/40 text-[10px] font-mono text-[#10d97b]">
                   Global Cloud Link
                 </span>
@@ -411,22 +425,24 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
           </div>
         </button>
 
-        {/* TV Download & Web Link */}
+        {/* Official TV & Web Link */}
         <button
           type="button"
           onClick={() =>
             setActiveNoticeModal(
-              `TV & Web Link: Open ${officialSite} on Android TV, FireStick, or Desktop browser.`
+              `Official TV & Web Portal: Open ${officialSite} on Android TV, FireStick, or Desktop browser.`
             )
           }
           className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-slate-800/40 transition-colors min-h-[54px]"
         >
           <div className="flex items-center gap-3 text-sm font-medium text-slate-100">
             <Tv className="w-5 h-5 text-slate-300" />
-            <span>TV Download &amp; Web Link</span>
+            <span>Official Website &amp; TV Portal</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold text-rose-400 tracking-wider">NEW</span>
+            <span className="text-[10px] font-bold text-[#10d97b] tracking-wider font-mono">
+              cineboxmovies.ai.studio
+            </span>
             <ChevronRight className="w-4 h-4 text-slate-400" />
           </div>
         </button>
@@ -516,7 +532,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             <span>
               {isAdminUnlocked
                 ? 'Global Admin Console (Unlocked — Bulk Upload / Users / APK)'
-                : 'Global Admin Console (Restricted — Admin PIN Only)'}
+                : 'Global Admin Console (Restricted — Supabase Admin Auth Only)'}
             </span>
           </div>
           <ChevronRight className="w-4 h-4 text-[#10d97b]" />
@@ -550,7 +566,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
       </div>
 
       {/* =====================================================================
-          REAL LOGIN & REGISTRATION MODAL (Allots Unique USR-XXXXXXXX ID)
+          REAL SUPABASE AUTH LOGIN, REGISTRATION & PASSWORD RESET MODAL
          ===================================================================== */}
       {showLoginModal && (
         <div
@@ -569,10 +585,14 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 </div>
                 <div>
                   <h2 className="text-base font-extrabold text-white">
-                    {authMode === 'login' ? 'Log in to CineBox' : 'Create CineBox Account'}
+                    {authMode === 'login'
+                      ? 'Log in to CineBox'
+                      : authMode === 'register'
+                      ? 'Create CineBox Account'
+                      : 'Reset Your Password'}
                   </h2>
                   <p className="text-[11px] text-slate-400">
-                    Allots your unique <code className="text-[#10d97b]">ID: USR-...</code> synced with Supabase
+                    Secured by Supabase Auth &amp; Least-Privilege RLS
                   </p>
                 </div>
               </div>
@@ -587,12 +607,13 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             </div>
 
             {/* Mode Switcher */}
-            <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
+            <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-slate-950 border border-slate-800">
               <button
                 type="button"
                 onClick={() => {
                   setAuthMode('login');
                   setAuthError('');
+                  setAuthSuccessMsg('');
                 }}
                 className={`py-2 rounded-lg text-xs font-bold transition-colors ${
                   authMode === 'login'
@@ -607,6 +628,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 onClick={() => {
                   setAuthMode('register');
                   setAuthError('');
+                  setAuthSuccessMsg('');
                 }}
                 className={`py-2 rounded-lg text-xs font-bold transition-colors ${
                   authMode === 'register'
@@ -614,7 +636,22 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                Register New Account
+                Register
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('reset');
+                  setAuthError('');
+                  setAuthSuccessMsg('');
+                }}
+                className={`py-2 rounded-lg text-xs font-bold transition-colors ${
+                  authMode === 'reset'
+                    ? 'bg-[#10d97b] text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Reset Password
               </button>
             </div>
 
@@ -649,22 +686,30 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs text-slate-400 mb-1">Password</label>
-                <input
-                  type="password"
-                  required
-                  data-testid="login-password-input"
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="Enter password (min 4 chars)"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:border-[#10d97b] focus:outline-none"
-                />
-              </div>
+              {authMode !== 'reset' && (
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Password (min 6 chars)</label>
+                  <input
+                    type="password"
+                    required
+                    data-testid="login-password-input"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="Enter password (min 6 chars)"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:border-[#10d97b] focus:outline-none"
+                  />
+                </div>
+              )}
 
               {authError && (
                 <p data-testid="login-error-msg" className="text-xs text-rose-400 font-bold">
                   {authError}
+                </p>
+              )}
+
+              {authSuccessMsg && (
+                <p data-testid="login-success-msg" className="text-xs text-[#10d97b] font-bold">
+                  {authSuccessMsg}
                 </p>
               )}
 
@@ -675,10 +720,12 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 className="w-full py-3 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs sm:text-sm transition-colors disabled:opacity-50"
               >
                 {isAuthenticating
-                  ? 'Signing in & Allotting USR ID...'
+                  ? 'Processing with Supabase Auth...'
                   : authMode === 'login'
-                  ? 'Log In & Load My USR ID'
-                  : 'Create Account & Get Allotted USR ID'}
+                  ? 'Log In & Sync Account'
+                  : authMode === 'register'
+                  ? 'Create Account'
+                  : 'Send Password Reset Email'}
               </button>
             </form>
           </div>
@@ -702,7 +749,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 <div>
                   <h2 className="text-base font-extrabold text-white">App &amp; APK Settings</h2>
                   <p className="text-[11px] text-slate-400">
-                    Real-time playback, download &amp; theme controls for Web &amp; Android APK
+                    Real-time playback, language (EN/اردو RTL), download &amp; theme controls
                   </p>
                 </div>
               </div>
@@ -718,6 +765,49 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             </div>
 
             <div className="space-y-3">
+              {/* 0. App Language (English LTR / Urdu RTL) */}
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="text-xs font-bold text-white">
+                  App Interface Language (English / اردو RTL)
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    data-testid="setting-lang-en-btn"
+                    onClick={() =>
+                      onUpdateUserSettings({
+                        ...userSettings,
+                        appLanguage: 'en',
+                      })
+                    }
+                    className={`py-2 px-3 rounded-xl text-xs font-bold border ${
+                      (userSettings.appLanguage || 'en') === 'en'
+                        ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
+                        : 'bg-slate-900 text-slate-300 border-slate-800'
+                    }`}
+                  >
+                    English (LTR)
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="setting-lang-ur-btn"
+                    onClick={() =>
+                      onUpdateUserSettings({
+                        ...userSettings,
+                        appLanguage: 'ur',
+                      })
+                    }
+                    className={`py-2 px-3 rounded-xl text-xs font-bold border ${
+                      userSettings.appLanguage === 'ur'
+                        ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
+                        : 'bg-slate-900 text-slate-300 border-slate-800'
+                    }`}
+                  >
+                    اردو (Urdu RTL)
+                  </button>
+                </div>
+              </div>
+
               {/* 1. Default Streaming Server */}
               <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
                 <div className="flex items-center gap-2 text-xs font-bold text-white">
@@ -757,44 +847,15 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                         : 'bg-slate-900 text-slate-300 border-slate-800'
                     }`}
                   >
-                    Server 1 (VidSrc.me)
+                    Server 1 (VidSrc.sh)
                   </button>
                 </div>
               </div>
 
-              {/* 2. Default Download Quality */}
-              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
-                <div className="text-xs font-bold text-white">
-                  2. Default Offline Download Quality
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['480p', '720p', '1080p'] as DownloadQuality[]).map((q) => (
-                    <button
-                      key={q}
-                      type="button"
-                      data-testid={`setting-quality-${q}-btn`}
-                      onClick={() =>
-                        onUpdateUserSettings({
-                          ...userSettings,
-                          defaultDownloadQuality: q,
-                        })
-                      }
-                      className={`py-2 rounded-xl text-xs font-bold border ${
-                        userSettings.defaultDownloadQuality === q
-                          ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
-                          : 'bg-slate-900 text-slate-300 border-slate-800'
-                      }`}
-                    >
-                      {q.toUpperCase()}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 3. Auto-Play Stream Toggle */}
+              {/* 2. Auto-Play Stream Toggle */}
               <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
                 <div>
-                  <div className="text-xs font-bold text-white">3. Auto-Play Video Streams</div>
+                  <div className="text-xs font-bold text-white">2. Auto-Play Video Streams</div>
                   <div className="text-[11px] text-slate-400">
                     Automatically start playback when opening a movie or episode
                   </div>
@@ -813,38 +874,11 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 />
               </div>
 
-              {/* 4. Wi-Fi Only Downloads Toggle */}
-              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <Wifi className="w-4 h-4 text-[#10d97b] shrink-0" />
-                  <div>
-                    <div className="text-xs font-bold text-white">
-                      4. Wi-Fi Only Downloads (Mobile Data Saver)
-                    </div>
-                    <div className="text-[11px] text-slate-400">
-                      Prevents accidental cellular data usage on Android APK
-                    </div>
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  data-testid="setting-wifi-only-checkbox"
-                  checked={userSettings.wifiOnlyDownloads}
-                  onChange={(e) =>
-                    onUpdateUserSettings({
-                      ...userSettings,
-                      wifiOnlyDownloads: e.target.checked,
-                    })
-                  }
-                  className="w-5 h-5 accent-[#10d97b]"
-                />
-              </div>
-
-              {/* 5. App Accent Theme Color */}
+              {/* 3. App Accent Theme Color */}
               <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
                 <div className="flex items-center gap-2 text-xs font-bold text-white">
                   <Palette className="w-4 h-4 text-[#10d97b]" />
-                  <span>5. App Accent Theme</span>
+                  <span>3. App Accent Theme</span>
                 </div>
                 <div className="grid grid-cols-3 gap-2">
                   {[

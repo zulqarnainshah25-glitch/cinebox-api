@@ -9,48 +9,40 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 2
-        versionName "1.0.1"
+        versionName "1.0.2"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
 
-    // =========================================================================
-    // SIGNATURE-SAFE RELEASE SIGNING CONFIG (FOR IN-APP APK UPDATES)
-    // Ensures every APK built locally or via GitHub Actions uses the exact same
-    // .jks keystore signature so new APKs install seamlessly over existing APKs.
-    // =========================================================================
+    // Signature-Safe Release Signing (.jks Keystore)
+    // Ensures every future update installs smoothly over the existing app without "App not installed / Package conflicts"
     signingConfigs {
         release {
-            def keystorePath = System.getenv("CM_KEYSTORE_PATH") ?: project.findProperty("RELEASE_STORE_FILE") ?: "release-keystore.jks"
-            storeFile file(keystorePath)
-            storePassword System.getenv("CM_KEYSTORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD") ?: ""
-            keyAlias System.getenv("CM_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS") ?: "cinebox_key"
-            keyPassword System.getenv("CM_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD") ?: ""
-            v1SigningEnabled true
-            v2SigningEnabled true
+            def keystorePath = System.getenv("CINEBOX_KEYSTORE_PATH") ?: "release-keystore.jks"
+            def keystoreFile = file(keystorePath)
+            if (keystoreFile.exists()) {
+                storeFile keystoreFile
+                storePassword System.getenv("CINEBOX_KEYSTORE_PASSWORD") ?: "cinebox_keystore_pass_2026"
+                keyAlias System.getenv("CINEBOX_KEY_ALIAS") ?: "cinebox_release_key"
+                keyPassword System.getenv("CINEBOX_KEY_PASSWORD") ?: "cinebox_key_pass_2026"
+            }
         }
     }
 
     buildTypes {
         release {
             signingConfig signingConfigs.release
-            minifyEnabled false
-            shrinkResources false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-        }
-        debug {
-            if (file("release-keystore.jks").exists()) {
-                signingConfig signingConfigs.release
-            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 }
 
 repositories {
-    flatDir{
+    flatDir {
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
     }
 }

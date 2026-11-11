@@ -26,18 +26,21 @@ jobs:
         run: |
           npm ci
           npm run build
-          # Preserve custom MainActivity.java (Popup Blocker) & build.gradle (Release Signing)
+          # Preserve custom MainActivity.java (Popup Blocker & System Bar Blending) & build.gradle (v1.0.2 Release Signing)
           cp android/app/src/main/java/com/cinebox/stream/MainActivity.java /tmp/MainActivity.java.bak
           cp android/app/build.gradle /tmp/build.gradle.bak
           npx cap sync android || true
           mkdir -p android/app/src/main/java/com/cinebox/stream
           cp /tmp/MainActivity.java.bak android/app/src/main/java/com/cinebox/stream/MainActivity.java
           cp /tmp/build.gradle.bak android/app/build.gradle
+          # Remove default Capacitor adaptive icon XML so Android uses the custom CineBox launcher icon
+          rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
-      - name: Verify Native WebView Popup Blocker in MainActivity.java
+      - name: Verify Native WebView Popup Blocker & v1.0.2 in Android Project
         run: |
           grep -q "setSupportMultipleWindows(true)" android/app/src/main/java/com/cinebox/stream/MainActivity.java
           grep -q "onCreateWindow" android/app/src/main/java/com/cinebox/stream/MainActivity.java
+          grep -q 'versionName "1.0.2"' android/app/build.gradle
 
       - name: Decode Persistent .jks Keystore from GitHub Secrets
         env:
@@ -45,7 +48,7 @@ jobs:
         run: |
           echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release-keystore.jks
 
-      - name: Assemble Signature-Safe Release APK
+      - name: Assemble Signature-Safe Release APK (v1.0.2)
         working-directory: ./android
         env:
           CM_KEYSTORE_PATH: release-keystore.jks
