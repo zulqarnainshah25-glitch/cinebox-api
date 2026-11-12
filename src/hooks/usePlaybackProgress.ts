@@ -145,8 +145,8 @@ export function usePlaybackProgress({
     })
       .then((res) => {
         if (!active) return;
-        if (res && res.position_seconds > 5) {
-          setSavedResumePosition(res.position_seconds);
+        if (res && res.progress_seconds > 5) {
+          setSavedResumePosition(res.progress_seconds);
           setSavedDuration(res.duration_seconds);
           setSyncSource(res.source);
         } else {
@@ -187,7 +187,7 @@ export function usePlaybackProgress({
           media_type: movie.mediaType,
           season,
           episode,
-          position_seconds: currentSeconds,
+          progress_seconds: currentSeconds,
           duration_seconds: validDur,
           title: movie.title,
           poster_url: movie.posterUrl,

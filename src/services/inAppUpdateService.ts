@@ -1,9 +1,15 @@
+import { Browser } from '@capacitor/browser';
+import { Capacitor } from '@capacitor/core';
+import { Directory, Filesystem } from '@capacitor/filesystem';
 import { AppConfigRecord } from '../types/movie';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
 import { DetectedPlatform, detectAppPlatform } from './platformTrialReferralService';
 
-export const DEFAULT_CURRENT_APP_VERSION = '1.0.2';
+export const DEFAULT_CURRENT_APP_VERSION = '1.0.3';
 export const DEFAULT_VERSION_JSON_URL = '/version.json';
+export const DEFAULT_GITHUB_REPO = 'cinebox-official/cinebox-apk';
+export const UPDATE_CHECK_THROTTLE_MS = 6 * 60 * 60 * 1000; // 6 hours (prevents exhausting GitHub 60 req/hr limit)
+export const STARTUP_UPDATE_CHECK_DEBOUNCE_MS = 3000; // 3 seconds after app mount
 export const DEFAULT_GLOBAL_APK_DOWNLOAD_URL =
   'https://drive.google.com/file/d/1CineBoxOfficialReleaseApk/view?usp=sharing';
 export const DEFAULT_GLOBAL_APK_RELEASE_NOTES =
@@ -48,10 +54,18 @@ export interface InAppUpdateCheckResult {
   currentVersion: string;
   remoteVersion: string;
   apkUrl: string;
+  releasePageUrl?: string;
   releaseNotes: string;
   platform?: DetectedPlatform;
   isGoogleDriveLink?: boolean;
-  source?: 'supabase-global-config' | 'version-json' | 'web-disabled';
+  throttledFromCache?: boolean;
+  etag?: string;
+  source?:
+    | 'supabase-global-config'
+    | 'github-releases-api'
+    | 'static-version-json-fallback'
+    | 'version-json'
+    | 'web-disabled';
   error?: string;
 }
 
@@ -147,11 +161,11 @@ export function encodeGlobalApkConfigCarrier(meta: {
 }): string {
   const safeUrl = sanitizeSafeUrl(meta.apkUrl) || '';
   const cleanVersion =
-    (meta.version || '1.0.2')
+    (meta.version || DEFAULT_CURRENT_APP_VERSION)
       .trim()
       .replace(/^v/i, '')
       .replace(/[^0-9a-zA-Z._-]/g, '')
-      .slice(0, 32) || '1.0.2';
+      .slice(0, 32) || DEFAULT_CURRENT_APP_VERSION;
   const cleanNotes = (meta.releaseNotes || '')
     .replace(/[<>]/g, '')
     .trim()
@@ -196,7 +210,7 @@ export function decodeGlobalApkConfigCarrier(rawCarrier: string | null | undefin
     const rawVer =
       typeof parsed.version === 'string' && parsed.version.trim()
         ? parsed.version.trim().replace(/^v/i, '')
-        : '1.0.2';
+        : DEFAULT_CURRENT_APP_VERSION;
     const notes =
       typeof parsed.releaseNotes === 'string'
         ? parsed.releaseNotes.replace(/[<>]/g, '').trim().slice(0, 280)
@@ -367,7 +381,7 @@ export async function checkForInAppApkUpdate(options?: {
     !isUnconfiguredPlaceholderApkUrl(options.globalAppConfig.apk_download_url)
   ) {
     const globalParsed = parseRemoteVersionManifest({
-      version: options.globalAppConfig.apk_latest_version || '1.0.2',
+      version: options.globalAppConfig.apk_latest_version || DEFAULT_CURRENT_APP_VERSION,
       apk_url: options.globalAppConfig.apk_download_url,
       release_notes:
         options.globalAppConfig.apk_release_notes ||
@@ -486,8 +500,8 @@ android {
         applicationId "com.cinebox.stream"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "1.0.2"
+        versionCode 3
+        versionName "1.0.3"
     }
 
     // IMPORTANT: Signature-Safe Release Signing Config
@@ -613,3 +627,425 @@ public class MainActivity extends BridgeActivity {
         }
     }
 }`;
+
+/**
+ * ============================================================================
+ * FIX 5: Rate-Limit-Proof GitHub Releases Auto-Update + Static version.json Fallback
+ * & Android `Directory.Cache` APK Download + Install Intent
+ * ============================================================================
+ * Why a multi-layer strategy is required:
+ * - Unauthenticated `GET https://api.github.com/repos/[owner]/[repo]/releases/latest` has a strict
+ *   60 requests/hour per IP rate limit. On mobile carrier CGNAT networks, hundreds of users share
+ *   a single public IP.
+ * - Solution:
+ *   1. **6-Hour Throttle Cache (`UPDATE_CHECK_THROTTLE_MS = 6 * 60 * 60 * 1000`):** Stores the last
+ *      check timestamp, `etag`, and release metadata in `localStorage` so each device checks at most
+ *      once every 6 hours.
+ *   2. **Conditional ETag (`If-None-Match`):** When re-checking after 6 hours, sends `If-None-Match`.
+ *      GitHub's `304 Not Modified` response does NOT count against the 60 requests/hour quota.
+ *   3. **Static `version.json` CDN Fallback (Unlimited Requests):** If `preferStaticVersionJson: true`
+ *      or if `api.github.com` returns `403` / `429` (rate limit exceeded), automatically fetches
+ *      `https://raw.githubusercontent.com/[owner]/[repo]/main/version.json` or `/version.json`,
+ *      which is served by Fastly CDN with zero API rate limits.
+ */
+const GITHUB_UPDATE_CACHE_KEY = 'cinebox_github_update_cache_v1';
+
+interface CachedGitHubUpdateRecord {
+  repo: string;
+  checkedAt: number;
+  etag?: string;
+  remoteVersion: string;
+  apkUrl: string;
+  releasePageUrl: string;
+  releaseNotes: string;
+  source: 'github-releases-api' | 'static-version-json-fallback';
+}
+
+let memoryGitHubUpdateCache: CachedGitHubUpdateRecord | null = null;
+
+function loadGitHubUpdateCache(): CachedGitHubUpdateRecord | null {
+  if (memoryGitHubUpdateCache) return memoryGitHubUpdateCache;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(GITHUB_UPDATE_CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as CachedGitHubUpdateRecord;
+        if (parsed && typeof parsed.checkedAt === 'number' && parsed.remoteVersion) {
+          memoryGitHubUpdateCache = parsed;
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function saveGitHubUpdateCache(record: CachedGitHubUpdateRecord): void {
+  memoryGitHubUpdateCache = record;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(GITHUB_UPDATE_CACHE_KEY, JSON.stringify(record));
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearUpdateCheckThrottleCache(): void {
+  memoryGitHubUpdateCache = null;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(GITHUB_UPDATE_CACHE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function resolveConfiguredGitHubRepo(overrideRepo?: string): string {
+  const raw = String(
+    overrideRepo ?? (import.meta as any).env?.VITE_GITHUB_REPO ?? DEFAULT_GITHUB_REPO
+  ).trim();
+  if (/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(raw)) {
+    return raw;
+  }
+  return DEFAULT_GITHUB_REPO;
+}
+
+export async function checkGitHubLatestReleaseUpdate(options?: {
+  repo?: string;
+  currentVersionOverride?: string;
+  nowMs?: number;
+  throttleMs?: number;
+  forceRefresh?: boolean;
+  preferStaticVersionJson?: boolean;
+  staticVersionJsonUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<InAppUpdateCheckResult> {
+  const repo = resolveConfiguredGitHubRepo(options?.repo);
+  const currentVersion = await getInstalledAppVersion(options?.currentVersionOverride);
+  const nowMs = options?.nowMs ?? Date.now();
+  const throttleMs = options?.throttleMs ?? UPDATE_CHECK_THROTTLE_MS;
+  const fetchFn = options?.fetchImpl || (typeof fetch !== 'undefined' ? fetch : undefined);
+
+  const cached = loadGitHubUpdateCache();
+
+  // 1. 6-Hour Throttle Cache Check
+  if (
+    !options?.forceRefresh &&
+    cached &&
+    cached.repo === repo &&
+    nowMs - cached.checkedAt < throttleMs
+  ) {
+    const isNewer = compareSemverVersions(cached.remoteVersion, currentVersion) > 0;
+    return {
+      checked: true,
+      updateAvailable: isNewer,
+      currentVersion,
+      remoteVersion: cached.remoteVersion,
+      apkUrl: cached.apkUrl,
+      releasePageUrl: cached.releasePageUrl,
+      releaseNotes: cached.releaseNotes,
+      etag: cached.etag,
+      throttledFromCache: true,
+      source: cached.source,
+    };
+  }
+
+  if (!fetchFn) {
+    return {
+      checked: false,
+      updateAvailable: false,
+      currentVersion,
+      remoteVersion: currentVersion,
+      apkUrl: '',
+      releaseNotes: '',
+      error: 'Fetch API unavailable.',
+    };
+  }
+
+  const fallbackStaticUrl =
+    options?.staticVersionJsonUrl ||
+    String((import.meta as any).env?.VITE_UPDATE_VERSION_JSON_URL || '').trim() ||
+    `https://raw.githubusercontent.com/${repo}/main/version.json`;
+
+  const fetchFromStaticManifest = async (): Promise<InAppUpdateCheckResult> => {
+    try {
+      const res = await fetchFn(fallbackStaticUrl, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const json = await res.json();
+      const parsed = parseRemoteVersionManifest(json);
+      if (!parsed.valid || !parsed.manifest) {
+        throw new Error(parsed.error || 'Invalid version.json');
+      }
+      const releasePageUrl = `https://github.com/${repo}/releases/latest`;
+      const record: CachedGitHubUpdateRecord = {
+        repo,
+        checkedAt: nowMs,
+        remoteVersion: parsed.manifest.version,
+        apkUrl: parsed.manifest.apk_url,
+        releasePageUrl,
+        releaseNotes: parsed.manifest.release_notes || '',
+        source: 'static-version-json-fallback',
+      };
+      saveGitHubUpdateCache(record);
+      return {
+        checked: true,
+        updateAvailable: compareSemverVersions(record.remoteVersion, currentVersion) > 0,
+        currentVersion,
+        remoteVersion: record.remoteVersion,
+        apkUrl: record.apkUrl,
+        releasePageUrl: record.releasePageUrl,
+        releaseNotes: record.releaseNotes,
+        throttledFromCache: false,
+        source: 'static-version-json-fallback',
+      };
+    } catch (err) {
+      return {
+        checked: false,
+        updateAvailable: false,
+        currentVersion,
+        remoteVersion: currentVersion,
+        apkUrl: '',
+        releaseNotes: '',
+        error: err instanceof Error ? err.message : 'Static version.json check failed',
+      };
+    }
+  };
+
+  if (options?.preferStaticVersionJson) {
+    return fetchFromStaticManifest();
+  }
+
+  // 2. Call GitHub Releases API (`GET https://api.github.com/repos/[owner]/[repo]/releases/latest`)
+  // Includes conditional `If-None-Match` ETag header so 304 responses do NOT count against the 60/hr limit
+  const githubApiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+  const reqHeaders: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+  };
+  if (cached?.etag && cached.repo === repo) {
+    reqHeaders['If-None-Match'] = cached.etag;
+  }
+
+  try {
+    const res = await fetchFn(githubApiUrl, {
+      method: 'GET',
+      headers: reqHeaders,
+    });
+
+    // 2A. 304 Not Modified (Free on GitHub API — does not consume rate limit!)
+    if (res.status === 304 && cached && cached.repo === repo) {
+      const updatedRecord: CachedGitHubUpdateRecord = {
+        ...cached,
+        checkedAt: nowMs,
+      };
+      saveGitHubUpdateCache(updatedRecord);
+      return {
+        checked: true,
+        updateAvailable: compareSemverVersions(updatedRecord.remoteVersion, currentVersion) > 0,
+        currentVersion,
+        remoteVersion: updatedRecord.remoteVersion,
+        apkUrl: updatedRecord.apkUrl,
+        releasePageUrl: updatedRecord.releasePageUrl,
+        releaseNotes: updatedRecord.releaseNotes,
+        etag: updatedRecord.etag,
+        throttledFromCache: true,
+        source: 'github-releases-api',
+      };
+    }
+
+    // 2B. If GitHub API rate-limited (403 / 429) or repo not found (404), fall back to Static version.json CDN
+    if (res.status === 403 || res.status === 429 || !res.ok) {
+      return fetchFromStaticManifest();
+    }
+
+    const data = (await res.json()) as {
+      tag_name?: string;
+      body?: string;
+      html_url?: string;
+      assets?: Array<{ name?: string; browser_download_url?: string }>;
+    };
+
+    const rawTag = String(data?.tag_name || '').trim().replace(/^v/i, '');
+    if (!rawTag || !/^\d+\.\d+(\.\d+)?/.test(rawTag)) {
+      return fetchFromStaticManifest();
+    }
+
+    const apkAsset = Array.isArray(data.assets)
+      ? data.assets.find(
+          (a) =>
+            typeof a?.browser_download_url === 'string' &&
+            a.browser_download_url.toLowerCase().endsWith('.apk')
+        )
+      : undefined;
+
+    const releasePageUrl =
+      sanitizeSafeUrl(data.html_url) || `https://github.com/${repo}/releases/latest`;
+    const apkUrl =
+      sanitizeSafeUrl(apkAsset?.browser_download_url) ||
+      `https://github.com/${repo}/releases/download/v${rawTag}/app-release.apk`;
+    const releaseNotes = String(data.body || '')
+      .replace(/[<>]/g, '')
+      .trim()
+      .slice(0, 500);
+    const responseEtag = res.headers?.get?.('etag') || cached?.etag;
+
+    const record: CachedGitHubUpdateRecord = {
+      repo,
+      checkedAt: nowMs,
+      etag: responseEtag || undefined,
+      remoteVersion: rawTag,
+      apkUrl,
+      releasePageUrl,
+      releaseNotes,
+      source: 'github-releases-api',
+    };
+    saveGitHubUpdateCache(record);
+
+    return {
+      checked: true,
+      updateAvailable: compareSemverVersions(rawTag, currentVersion) > 0,
+      currentVersion,
+      remoteVersion: rawTag,
+      apkUrl,
+      releasePageUrl,
+      releaseNotes,
+      etag: responseEtag || undefined,
+      throttledFromCache: false,
+      source: 'github-releases-api',
+    };
+  } catch {
+    // Network error reaching api.github.com -> fall back to static version.json
+    return fetchFromStaticManifest();
+  }
+}
+
+export interface ApkDownloadAndInstallResult {
+  ok: boolean;
+  platform: DetectedPlatform;
+  cacheUri?: string;
+  fileName?: string;
+  openedReleaseUrl?: string;
+  installTriggered: boolean;
+  error?: string;
+}
+
+/**
+ * Fix 5: Downloads the APK to `Directory.Cache` on Android and triggers the install intent,
+ * or opens the GitHub release / APK download page on Web.
+ * CRITICAL SECURITY RULE: Never runs silently — must only be called from an explicit user click
+ * on the "Download" button in `InAppUpdateDialog`.
+ */
+export async function downloadAndInstallApkUpdate(options: {
+  apkUrl: string;
+  version: string;
+  releasePageUrl?: string;
+  platform?: DetectedPlatform;
+  customFilesystem?: {
+    downloadFile?: (opts: {
+      url: string;
+      path: string;
+      directory: Directory;
+    }) => Promise<{ path?: string }>;
+    getUri?: (opts: { directory: Directory; path: string }) => Promise<{ uri: string }>;
+  };
+  customInstallTrigger?: (uri: string) => Promise<void>;
+  customOpenUrl?: (url: string) => Promise<void>;
+}): Promise<ApkDownloadAndInstallResult> {
+  const safeApkUrl = sanitizeSafeUrl(options.apkUrl);
+  const safeReleaseUrl = sanitizeSafeUrl(options.releasePageUrl || options.apkUrl);
+  const effectivePlatform: DetectedPlatform =
+    options.platform ??
+    (typeof window !== 'undefined' && Capacitor.isNativePlatform() ? 'Android' : 'Web');
+
+  if (!safeApkUrl || !safeApkUrl.startsWith('https://')) {
+    return {
+      ok: false,
+      platform: effectivePlatform,
+      installTriggered: false,
+      error: 'Invalid or non-HTTPS APK download URL.',
+    };
+  }
+
+  const cleanVersion = (options.version || 'latest').replace(/[^0-9a-zA-Z._-]/g, '');
+  const fileName = `CineBox-v${cleanVersion}.apk`;
+
+  // Web Platform: Link directly to the GitHub Release page or APK URL
+  if (effectivePlatform === 'Web') {
+    const targetWebUrl = safeReleaseUrl || safeApkUrl;
+    if (options.customOpenUrl) {
+      await options.customOpenUrl(targetWebUrl);
+    } else if (typeof window !== 'undefined') {
+      await Browser.open({ url: targetWebUrl }).catch(() => {});
+    }
+    return {
+      ok: true,
+      platform: 'Web',
+      openedReleaseUrl: targetWebUrl,
+      installTriggered: false,
+    };
+  }
+
+  // Android Platform: Download APK into `Directory.Cache` and trigger APK Install Intent
+  const fsPlugin = options.customFilesystem || Filesystem;
+  try {
+    if (typeof fsPlugin.downloadFile === 'function') {
+      await fsPlugin.downloadFile({
+        url: safeApkUrl,
+        path: fileName,
+        directory: Directory.Cache,
+      });
+    }
+
+    let cacheUri = `file:///data/user/0/com.cinebox.stream/cache/${fileName}`;
+    if (typeof fsPlugin.getUri === 'function') {
+      const uriRes = await fsPlugin.getUri({
+        directory: Directory.Cache,
+        path: fileName,
+      });
+      if (uriRes?.uri) {
+        cacheUri = uriRes.uri;
+      }
+    }
+
+    if (options.customInstallTrigger) {
+      await options.customInstallTrigger(cacheUri);
+    } else {
+      const capAny = (typeof window !== 'undefined' ? (window as any).Capacitor : null) || {};
+      const apkInstaller =
+        capAny?.Plugins?.ApkInstaller || capAny?.Plugins?.FileOpener;
+      if (apkInstaller && typeof apkInstaller.open === 'function') {
+        await apkInstaller.open({
+          filePath: cacheUri,
+          contentType: 'application/vnd.android.package-archive',
+        });
+      } else {
+        await Browser.open({ url: safeApkUrl });
+      }
+    }
+
+    return {
+      ok: true,
+      platform: 'Android',
+      cacheUri,
+      fileName,
+      installTriggered: true,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      platform: 'Android',
+      fileName,
+      installTriggered: false,
+      error: err instanceof Error ? err.message : 'APK download to cache failed',
+    };
+  }
+}
+

@@ -3,6 +3,7 @@ import {
   AppConfigRecord,
   AppUserRecord,
   AuditLogRow,
+  MovieItem,
   MovieLinkRecord,
   UserAppSettings,
 } from '../types/movie';
@@ -20,6 +21,7 @@ import {
 import {
   applyReferralRewardToReferrer,
   buildInitialTrialAndReferralFields,
+  buildProductionShareUrl,
   detectAppPlatform,
   generateUniqueReferralCode,
   normalizeReferralCode,
@@ -677,6 +679,21 @@ export async function signInAdminWithSupabase(
  * Sends a Supabase Auth Magic Link OTP to the admin email.
  * When clicked, the returned session is still checked for `app_metadata.role === 'admin'`.
  */
+/**
+ * Fix 3: Resolves the absolute production Auth Callback URL (`https://[your-domain]/auth/callback`)
+ * for Supabase `signInWithOtp` and `resetPasswordForEmail`.
+ * Never returns `undefined`, a relative path, `http://localhost`, or `capacitor://localhost`.
+ */
+export function getSupabaseAuthRedirectUrl(
+  callbackPath: string = '/auth/callback',
+  baseOriginOverride?: string
+): string {
+  const safePath = callbackPath && callbackPath.trim() ? callbackPath.trim() : '/auth/callback';
+  return buildProductionShareUrl(safePath, {
+    baseOriginOverride,
+  });
+}
+
 export async function sendAdminMagicLink(email: string): Promise<{
   ok: boolean;
   error: string | null;
@@ -697,8 +714,7 @@ export async function sendAdminMagicLink(email: string): Promise<{
   }
 
   try {
-    const redirectTo =
-      typeof window !== 'undefined' && window.location ? window.location.origin : undefined;
+    const redirectTo = getSupabaseAuthRedirectUrl('/auth/callback');
     const { error } = await client.auth.signInWithOtp({
       email: cleanEmail,
       options: { emailRedirectTo: redirectTo },
@@ -773,8 +789,7 @@ export async function requestPasswordResetEmail(email: string): Promise<{
   }
 
   try {
-    const redirectTo =
-      typeof window !== 'undefined' && window.location ? window.location.origin : undefined;
+    const redirectTo = getSupabaseAuthRedirectUrl('/auth/callback');
     const { error } = await client.auth.resetPasswordForEmail(cleanEmail, {
       redirectTo,
     });
@@ -1792,6 +1807,7 @@ export async function importGlobalDatabaseSnapshot(rawJson: string): Promise<{
 }
 
 const LOCAL_WATCH_HISTORY_ROWS_KEY = 'cinebox_watch_history_rows_v2';
+const LOCAL_WATCHLIST_STORAGE_KEY = 'cinebox_watchlist_v2';
 
 function getLocalWatchHistoryMap(): Record<string, any> {
   try {
@@ -1809,7 +1825,28 @@ function saveLocalWatchHistoryMap(map: Record<string, any>): void {
 }
 
 /**
- * Phase 2 (5): Syncs resume position & watch history to Supabase `watch_history` table for logged-in users,
+ * Fix 7: Resolves canonical `season` and `episode` integers for `watch_history`:
+ * - Movies (`media_type === 'movie'`) do NOT have seasons or episodes -> normalized to `season: 0, episode: 0`
+ *   (matching `season INTEGER NOT NULL DEFAULT 0, episode INTEGER NOT NULL DEFAULT 0` in PostgreSQL).
+ * - TV Shows (`media_type === 'tv'`) use `season >= 1` and `episode >= 1`.
+ */
+export function resolveWatchHistorySeasonAndEpisode(
+  mediaType: 'movie' | 'tv',
+  season?: number | null,
+  episode?: number | null
+): { season: number; episode: number } {
+  if (mediaType !== 'tv') {
+    return { season: 0, episode: 0 };
+  }
+  return {
+    season: Math.max(1, Math.round(Number(season) || 1)),
+    episode: Math.max(1, Math.round(Number(episode) || 1)),
+  };
+}
+
+/**
+ * Fix 7 & Phase 2 (5): Syncs resume position & watch history to Supabase `watch_history` table
+ * using a single `progress_seconds` column (`progress_seconds`, `duration_seconds`, `last_watched_at`),
  * while always saving to `localStorage` as an offline/guest fallback.
  */
 export async function syncWatchHistoryEntry(entry: {
@@ -1818,20 +1855,30 @@ export async function syncWatchHistoryEntry(entry: {
   media_type: 'movie' | 'tv';
   season?: number | null;
   episode?: number | null;
-  position_seconds: number;
+  progress_seconds: number;
   duration_seconds: number;
   title?: string;
   poster_url?: string;
-}): Promise<{ ok: boolean; syncedToCloud: boolean }> {
+}): Promise<{
+  ok: boolean;
+  syncedToCloud: boolean;
+  season: number;
+  episode: number;
+  progress_seconds: number;
+}> {
   const tmdbId = Number(entry.tmdb_id);
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return { ok: false, syncedToCloud: false };
+    return { ok: false, syncedToCloud: false, season: 0, episode: 0, progress_seconds: 0 };
   }
   const userId = (entry.user_id || getLoggedInUser()?.id || 'guest').trim();
-  const season = entry.media_type === 'tv' ? Math.max(1, Number(entry.season || 1)) : 1;
-  const episode = entry.media_type === 'tv' ? Math.max(1, Number(entry.episode || 1)) : 1;
-  const pos = Math.max(0, Math.round(Number(entry.position_seconds) || 0));
-  const dur = Math.max(0, Math.round(Number(entry.duration_seconds) || 0));
+  const { season, episode } = resolveWatchHistorySeasonAndEpisode(
+    entry.media_type,
+    entry.season,
+    entry.episode
+  );
+  const progressSec = Math.max(0, Math.round(Number(entry.progress_seconds) || 0));
+  const durSec = Math.max(0, Math.round(Number(entry.duration_seconds) || 0));
+  const nowIso = new Date().toISOString();
   const compositeKey = `${userId}::${entry.media_type}::${tmdbId}::S${season}::E${episode}`;
 
   const rowPayload = {
@@ -1840,11 +1887,12 @@ export async function syncWatchHistoryEntry(entry: {
     media_type: entry.media_type,
     season,
     episode,
-    position_seconds: pos,
-    duration_seconds: dur,
+    progress_seconds: progressSec,
+    duration_seconds: durSec,
     title: sanitizeDatabaseTextField(entry.title || '', 120),
     poster_url: sanitizeSafeUrl(entry.poster_url) || '',
-    updated_at: new Date().toISOString(),
+    last_watched_at: nowIso,
+    updated_at: nowIso,
   };
 
   const localMap = getLocalWatchHistoryMap();
@@ -1853,7 +1901,13 @@ export async function syncWatchHistoryEntry(entry: {
 
   const client = getSupabaseClient();
   if (!client || !entry.user_id || userId === 'guest') {
-    return { ok: true, syncedToCloud: false };
+    return {
+      ok: true,
+      syncedToCloud: false,
+      season,
+      episode,
+      progress_seconds: progressSec,
+    };
   }
 
   try {
@@ -1864,17 +1918,30 @@ export async function syncWatchHistoryEntry(entry: {
         media_type: entry.media_type,
         season,
         episode,
-        position_seconds: pos,
-        duration_seconds: dur,
+        progress_seconds: progressSec,
+        duration_seconds: durSec,
         title: rowPayload.title,
         poster_url: rowPayload.poster_url,
-        updated_at: rowPayload.updated_at,
+        last_watched_at: nowIso,
+        updated_at: nowIso,
       },
       { onConflict: 'user_id,tmdb_id,media_type,season,episode' }
     );
-    return { ok: true, syncedToCloud: !error };
+    return {
+      ok: true,
+      syncedToCloud: !error,
+      season,
+      episode,
+      progress_seconds: progressSec,
+    };
   } catch {
-    return { ok: true, syncedToCloud: false };
+    return {
+      ok: true,
+      syncedToCloud: false,
+      season,
+      episode,
+      progress_seconds: progressSec,
+    };
   }
 }
 
@@ -1885,17 +1952,22 @@ export async function getSavedWatchHistoryEntry(params: {
   season?: number | null;
   episode?: number | null;
 }): Promise<{
-  position_seconds: number;
+  progress_seconds: number;
   duration_seconds: number;
-  updated_at: string;
+  season: number;
+  episode: number;
+  last_watched_at: string;
   source: 'supabase' | 'local';
 } | null> {
   const tmdbId = Number(params.tmdb_id);
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) return null;
 
   const userId = (params.user_id || getLoggedInUser()?.id || 'guest').trim();
-  const season = params.media_type === 'tv' ? Math.max(1, Number(params.season || 1)) : 1;
-  const episode = params.media_type === 'tv' ? Math.max(1, Number(params.episode || 1)) : 1;
+  const { season, episode } = resolveWatchHistorySeasonAndEpisode(
+    params.media_type,
+    params.season,
+    params.episode
+  );
   const compositeKey = `${userId}::${params.media_type}::${tmdbId}::S${season}::E${episode}`;
   const guestKey = `guest::${params.media_type}::${tmdbId}::S${season}::E${episode}`;
 
@@ -1907,7 +1979,7 @@ export async function getSavedWatchHistoryEntry(params: {
     try {
       const { data, error } = await client
         .from('watch_history')
-        .select('position_seconds,duration_seconds,updated_at')
+        .select('progress_seconds,duration_seconds,last_watched_at,updated_at')
         .eq('user_id', userId)
         .eq('tmdb_id', tmdbId)
         .eq('media_type', params.media_type)
@@ -1915,11 +1987,13 @@ export async function getSavedWatchHistoryEntry(params: {
         .eq('episode', episode)
         .maybeSingle();
 
-      if (!error && data && typeof data.position_seconds === 'number') {
+      if (!error && data && typeof data.progress_seconds === 'number') {
         const syncedRow = {
-          position_seconds: Math.max(0, Math.round(data.position_seconds)),
+          progress_seconds: Math.max(0, Math.round(data.progress_seconds)),
           duration_seconds: Math.max(0, Math.round(Number(data.duration_seconds) || 0)),
-          updated_at: data.updated_at || new Date().toISOString(),
+          season,
+          episode,
+          last_watched_at: data.last_watched_at || data.updated_at || new Date().toISOString(),
           source: 'supabase' as const,
         };
         localMap[compositeKey] = {
@@ -1939,16 +2013,181 @@ export async function getSavedWatchHistoryEntry(params: {
     }
   }
 
-  if (localEntry && typeof localEntry.position_seconds === 'number') {
+  if (localEntry && typeof localEntry.progress_seconds === 'number') {
     return {
-      position_seconds: Math.max(0, Math.round(localEntry.position_seconds)),
+      progress_seconds: Math.max(0, Math.round(localEntry.progress_seconds)),
       duration_seconds: Math.max(0, Math.round(Number(localEntry.duration_seconds) || 0)),
-      updated_at: localEntry.updated_at || new Date().toISOString(),
+      season,
+      episode,
+      last_watched_at:
+        localEntry.last_watched_at || localEntry.updated_at || new Date().toISOString(),
       source: 'local',
     };
   }
 
   return null;
+}
+
+/**
+ * ============================================================================
+ * FIX 7: Real Watchlist Persistence (Supabase `public.watchlist` + `localStorage` Fallback)
+ * ============================================================================
+ */
+function loadLocalWatchlistItems(): MovieItem[] {
+  try {
+    const raw = safeStorageGet(LOCAL_WATCHLIST_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalWatchlistItems(items: MovieItem[]): void {
+  safeStorageSet(LOCAL_WATCHLIST_STORAGE_KEY, JSON.stringify(items));
+}
+
+export function clearLocalWatchlistForTests(): void {
+  try {
+    safeStorageSet(LOCAL_WATCHLIST_STORAGE_KEY, '[]');
+    safeStorageSet(LOCAL_WATCH_HISTORY_ROWS_KEY, '{}');
+  } catch {
+    // ignore
+  }
+}
+
+export async function fetchUserWatchlist(
+  userIdOverride?: string | null
+): Promise<{ items: MovieItem[]; source: 'supabase' | 'local' }> {
+  const localItems = loadLocalWatchlistItems();
+  const userId = (userIdOverride ?? getLoggedInUser()?.id ?? '').trim();
+  const client = getSupabaseClient();
+
+  if (!client || !userId || userId === 'guest') {
+    return { items: localItems, source: 'local' };
+  }
+
+  try {
+    const { data, error } = await client
+      .from('watchlist')
+      .select(
+        'tmdb_id,media_type,title,poster_path,poster_url,backdrop_url,release_year,rating,language,genres,added_at'
+      )
+      .eq('user_id', userId)
+      .order('added_at', { ascending: false });
+
+    if (error || !Array.isArray(data)) {
+      return { items: localItems, source: 'local' };
+    }
+
+    const cloudItems: MovieItem[] = data.map((row: any) => {
+      const poster =
+        sanitizeSafeUrl(row.poster_path) ||
+        sanitizeSafeUrl(row.poster_url) ||
+        'https://image.tmdb.org/t/p/w500/placeholder.jpg';
+      const backdrop = sanitizeSafeUrl(row.backdrop_url) || poster;
+      return {
+        id: Number(row.tmdb_id),
+        title: sanitizeDatabaseTextField(row.title || 'Saved Title', 140),
+        releaseYear: String(row.release_year || '2025').slice(0, 4),
+        rating: Number(row.rating) || 8.0,
+        language: sanitizeDatabaseTextField(row.language || 'English', 40),
+        languageBadge: 'HD',
+        category: 'trending',
+        mediaType: row.media_type === 'tv' ? 'tv' : 'movie',
+        posterUrl: poster,
+        backdropUrl: backdrop,
+        overview: '',
+        genres: Array.isArray(row.genres) ? row.genres : ['Drama'],
+        duration: '2h 00m',
+        runtime: '2h 00m',
+        cast: [],
+      };
+    });
+
+    // Merge cloud items with any local items if cloud is empty on first sync
+    if (cloudItems.length > 0) {
+      saveLocalWatchlistItems(cloudItems);
+      return { items: cloudItems, source: 'supabase' };
+    }
+    return { items: localItems, source: 'local' };
+  } catch {
+    return { items: localItems, source: 'local' };
+  }
+}
+
+export async function addWatchlistItemToSupabase(
+  movie: MovieItem,
+  userIdOverride?: string | null
+): Promise<{ ok: boolean; syncedToCloud: boolean; items: MovieItem[] }> {
+  const existing = loadLocalWatchlistItems();
+  const next = [
+    movie,
+    ...existing.filter(
+      (m) => !(m.id === movie.id && (m.mediaType || 'movie') === (movie.mediaType || 'movie'))
+    ),
+  ];
+  saveLocalWatchlistItems(next);
+
+  const userId = (userIdOverride ?? getLoggedInUser()?.id ?? '').trim();
+  const client = getSupabaseClient();
+  if (!client || !userId || userId === 'guest') {
+    return { ok: true, syncedToCloud: false, items: next };
+  }
+
+  try {
+    const safePoster = sanitizeSafeUrl(movie.posterUrl) || '';
+    const { error } = await client.from('watchlist').upsert(
+      {
+        user_id: userId,
+        tmdb_id: movie.id,
+        media_type: movie.mediaType === 'tv' ? 'tv' : 'movie',
+        title: sanitizeDatabaseTextField(movie.title, 140),
+        poster_path: safePoster,
+        poster_url: safePoster,
+        backdrop_url: sanitizeSafeUrl(movie.backdropUrl) || '',
+        release_year: String(movie.releaseYear || '2025').slice(0, 4),
+        rating: Number(movie.rating) || 8.0,
+        language: sanitizeDatabaseTextField(movie.language || 'English', 40),
+        added_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,tmdb_id,media_type' }
+    );
+    return { ok: true, syncedToCloud: !error, items: next };
+  } catch {
+    return { ok: true, syncedToCloud: false, items: next };
+  }
+}
+
+export async function removeWatchlistItemFromSupabase(
+  tmdbId: number,
+  mediaType: 'movie' | 'tv' = 'movie',
+  userIdOverride?: string | null
+): Promise<{ ok: boolean; syncedToCloud: boolean; items: MovieItem[] }> {
+  const existing = loadLocalWatchlistItems();
+  const next = existing.filter(
+    (m) => !(m.id === tmdbId && (m.mediaType || 'movie') === mediaType)
+  );
+  saveLocalWatchlistItems(next);
+
+  const userId = (userIdOverride ?? getLoggedInUser()?.id ?? '').trim();
+  const client = getSupabaseClient();
+  if (!client || !userId || userId === 'guest') {
+    return { ok: true, syncedToCloud: false, items: next };
+  }
+
+  try {
+    const { error } = await client
+      .from('watchlist')
+      .delete()
+      .eq('user_id', userId)
+      .eq('tmdb_id', tmdbId)
+      .eq('media_type', mediaType);
+    return { ok: true, syncedToCloud: !error, items: next };
+  } catch {
+    return { ok: true, syncedToCloud: false, items: next };
+  }
 }
 
 export async function fetchLinkHealthRowsForTmdb(
@@ -1974,5 +2213,217 @@ export async function fetchLinkHealthRowsForTmdb(
     return [];
   }
 }
+
+/**
+ * ============================================================================
+ * FIX 8: Hardened User Feedback Submission (Strict Email Regex, Server & Client
+ * TRIM + Length Check [3..500], Honeypot Bot Guard, and 3/Hour Rate Limiting)
+ * ============================================================================
+ */
+export type UserFeedbackType = 'bug' | 'feature' | 'other';
+
+export interface UserFeedbackInput {
+  type: UserFeedbackType;
+  message: string;
+  email?: string | null;
+  user_id?: string | null;
+  website_honeypot?: string;
+}
+
+export const STRICT_FEEDBACK_EMAIL_REGEX =
+  /^[A-Za-z0-9_%+-]+(\.[A-Za-z0-9_%+-]+)*@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,15}$/;
+
+export const FEEDBACK_RATE_LIMIT_MAX_PER_HOUR = 3;
+export const FEEDBACK_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+const FEEDBACK_RATE_LIMIT_STORAGE_KEY = 'cinebox_feedback_rate_limit_v1';
+
+function getRecentFeedbackTimestamps(nowMs: number = Date.now()): number[] {
+  try {
+    const raw = safeStorageGet(FEEDBACK_RATE_LIMIT_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((ts) => Number(ts))
+      .filter((ts) => Number.isFinite(ts) && nowMs - ts < FEEDBACK_RATE_LIMIT_WINDOW_MS);
+  } catch {
+    return [];
+  }
+}
+
+function recordFeedbackTimestamp(nowMs: number = Date.now()): void {
+  const recent = getRecentFeedbackTimestamps(nowMs);
+  recent.push(nowMs);
+  safeStorageSet(FEEDBACK_RATE_LIMIT_STORAGE_KEY, JSON.stringify(recent));
+}
+
+export function clearFeedbackRateLimitForTests(): void {
+  safeStorageSet(FEEDBACK_RATE_LIMIT_STORAGE_KEY, '[]');
+}
+
+export function validateUserFeedbackPayload(input: UserFeedbackInput): {
+  valid: boolean;
+  error: string | null;
+  sanitized: {
+    type: UserFeedbackType;
+    message: string;
+    email: string | null;
+    website_honeypot: string;
+  } | null;
+} {
+  // 1. Honeypot anti-bot check: must be empty
+  const honeypot = typeof input?.website_honeypot === 'string' ? input.website_honeypot : '';
+  if (honeypot.length > 0) {
+    return {
+      valid: false,
+      error: 'Spam submission blocked.',
+      sanitized: null,
+    };
+  }
+
+  // 2. Type validation
+  const allowedTypes: UserFeedbackType[] = ['bug', 'feature', 'other'];
+  if (!input || !allowedTypes.includes(input.type)) {
+    return {
+      valid: false,
+      error: 'Please select a valid feedback category (Bug, Feature, or Other).',
+      sanitized: null,
+    };
+  }
+
+  // 3. Message TRIM + length check (3 to 500 characters) + strip HTML/script tags
+  const rawTrimmedMessage = typeof input.message === 'string' ? input.message.trim() : '';
+  const cleanedMessage = sanitizeDatabaseTextField(rawTrimmedMessage, 600).trim();
+  if (cleanedMessage.length < 3) {
+    return {
+      valid: false,
+      error: 'Feedback message must be at least 3 characters (after trimming whitespace).',
+      sanitized: null,
+    };
+  }
+  if (rawTrimmedMessage.length > 500 || cleanedMessage.length > 500) {
+    return {
+      valid: false,
+      error: 'Feedback message cannot exceed 500 characters.',
+      sanitized: null,
+    };
+  }
+
+  // 4. Strict email regex validation when email is provided
+  const rawEmail = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+  let validatedEmail: string | null = null;
+  if (rawEmail.length > 0) {
+    if (
+      rawEmail.length < 5 ||
+      rawEmail.length > 120 ||
+      !STRICT_FEEDBACK_EMAIL_REGEX.test(rawEmail)
+    ) {
+      return {
+        valid: false,
+        error: 'Please enter a valid email address (e.g., name@domain.com).',
+        sanitized: null,
+      };
+    }
+    validatedEmail = rawEmail;
+  }
+
+  return {
+    valid: true,
+    error: null,
+    sanitized: {
+      type: input.type,
+      message: cleanedMessage,
+      email: validatedEmail,
+      website_honeypot: '',
+    },
+  };
+}
+
+export async function submitUserFeedback(
+  input: UserFeedbackInput,
+  options?: { nowMs?: number }
+): Promise<{
+  ok: boolean;
+  syncedToCloud: boolean;
+  error: string | null;
+  remainingInHour: number;
+}> {
+  const nowMs = options?.nowMs ?? Date.now();
+
+  // 1. Validate payload first (honeypot, type, trimmed message 3..500, strict email regex)
+  const validation = validateUserFeedbackPayload(input);
+  if (!validation.valid || !validation.sanitized) {
+    const recent = getRecentFeedbackTimestamps(nowMs);
+    return {
+      ok: false,
+      syncedToCloud: false,
+      error: validation.error || 'Invalid feedback submission.',
+      remainingInHour: Math.max(0, FEEDBACK_RATE_LIMIT_MAX_PER_HOUR - recent.length),
+    };
+  }
+
+  // 2. Enforce rate limit (max 3 submissions per hour)
+  const recentTimestamps = getRecentFeedbackTimestamps(nowMs);
+  if (recentTimestamps.length >= FEEDBACK_RATE_LIMIT_MAX_PER_HOUR) {
+    return {
+      ok: false,
+      syncedToCloud: false,
+      error: 'Rate limit reached: You can submit up to 3 feedback reports per hour. Please try again later.',
+      remainingInHour: 0,
+    };
+  }
+
+  const loggedIn = getLoggedInUser();
+  const rawUserId = (input.user_id ?? loggedIn?.id ?? '').trim();
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const supabaseUserId = uuidRegex.test(rawUserId) ? rawUserId : null;
+  const resolvedEmail =
+    validation.sanitized.email ||
+    (loggedIn?.email && STRICT_FEEDBACK_EMAIL_REGEX.test(loggedIn.email.trim())
+      ? loggedIn.email.trim().toLowerCase()
+      : null);
+
+  let syncedToCloud = false;
+  const client = getSupabaseClient();
+  if (client) {
+    try {
+      const { error } = await client.from('user_feedback').insert({
+        user_id: supabaseUserId,
+        type: validation.sanitized.type,
+        message: validation.sanitized.message,
+        email: resolvedEmail,
+        website_honeypot: '',
+      });
+      if (!error) {
+        syncedToCloud = true;
+      } else if (
+        error.message?.toLowerCase().includes('rate') ||
+        error.message?.toLowerCase().includes('row-level security')
+      ) {
+        return {
+          ok: false,
+          syncedToCloud: false,
+          error:
+            'Rate limit reached (max 3 feedback reports per hour). Please try again later.',
+          remainingInHour: 0,
+        };
+      }
+    } catch {
+      syncedToCloud = false;
+    }
+  }
+
+  recordFeedbackTimestamp(nowMs);
+  const updatedTimestamps = getRecentFeedbackTimestamps(nowMs);
+
+  return {
+    ok: true,
+    syncedToCloud,
+    error: null,
+    remainingInHour: Math.max(0, FEEDBACK_RATE_LIMIT_MAX_PER_HOUR - updatedTimestamps.length),
+  };
+}
+
 
 

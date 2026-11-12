@@ -1,6 +1,9 @@
-import React from 'react';
-import { Download, ShieldCheck, Sparkles, X } from 'lucide-react';
-import { InAppUpdateCheckResult } from '../services/inAppUpdateService';
+import React, { useState } from 'react';
+import { Download, Loader2, ShieldCheck, Sparkles, X } from 'lucide-react';
+import {
+  downloadAndInstallApkUpdate,
+  InAppUpdateCheckResult,
+} from '../services/inAppUpdateService';
 
 interface InAppUpdateDialogProps {
   updateInfo: InAppUpdateCheckResult;
@@ -11,9 +14,34 @@ export const InAppUpdateDialog: React.FC<InAppUpdateDialogProps> = ({
   updateInfo,
   onDismiss,
 }) => {
+  const [isDownloadingApk, setIsDownloadingApk] = useState<boolean>(false);
+  const [downloadStatusMsg, setDownloadStatusMsg] = useState<string | null>(null);
+
   if (!updateInfo.updateAvailable || !updateInfo.apkUrl) {
     return null;
   }
+
+  const handleDownloadClick = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (updateInfo.platform === 'Android' && !updateInfo.isGoogleDriveLink) {
+      e.preventDefault();
+      if (isDownloadingApk) return;
+      setIsDownloadingApk(true);
+      setDownloadStatusMsg('Downloading APK to cache...');
+      const res = await downloadAndInstallApkUpdate({
+        apkUrl: updateInfo.apkUrl,
+        version: updateInfo.remoteVersion,
+        releasePageUrl: updateInfo.releasePageUrl,
+        platform: 'Android',
+      });
+      setIsDownloadingApk(false);
+      if (res.ok) {
+        setDownloadStatusMsg('APK downloaded — launching Android installer...');
+      } else {
+        setDownloadStatusMsg(res.error || 'Opening direct download...');
+        window.open(updateInfo.apkUrl, '_blank', 'noopener,noreferrer');
+      }
+    }
+  };
 
   return (
     <div
@@ -51,10 +79,19 @@ export const InAppUpdateDialog: React.FC<InAppUpdateDialogProps> = ({
           </div>
         </div>
 
-        <p className="text-xs text-slate-300 leading-relaxed">
+        <p className="text-xs text-slate-300 leading-relaxed" data-testid="update-release-notes">
           {updateInfo.releaseNotes ||
             'A newer version of CineBox APK is ready with faster streaming, bug fixes, and signature-safe installation over your existing app.'}
         </p>
+
+        {downloadStatusMsg && (
+          <div
+            data-testid="apk-download-status-msg"
+            className="px-3 py-2 rounded-xl bg-emerald-950/70 border border-emerald-500/30 text-[11px] text-emerald-200 font-medium"
+          >
+            {downloadStatusMsg}
+          </div>
+        )}
 
         <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800/80 flex items-center gap-2 text-[11px] text-slate-300">
           <ShieldCheck className="w-4 h-4 text-[#10d97b] shrink-0" />
@@ -75,18 +112,26 @@ export const InAppUpdateDialog: React.FC<InAppUpdateDialogProps> = ({
           </button>
 
           <a
-            href={updateInfo.apkUrl}
+            href={updateInfo.releasePageUrl || updateInfo.apkUrl}
             target="_blank"
             rel="noopener noreferrer"
             data-testid="update-now-btn"
+            onClick={handleDownloadClick}
             download={`CineBox-v${updateInfo.remoteVersion}.apk`}
             className="flex-1 py-2.5 px-4 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-lg transition-colors min-h-[42px]"
           >
-            <Download className="w-4 h-4" />
-            <span>{updateInfo.isGoogleDriveLink ? 'Download APK (Google Drive)' : 'Update Now'}</span>
+            {isDownloadingApk ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>
+              {updateInfo.isGoogleDriveLink ? 'Download APK (Google Drive)' : 'Download'}
+            </span>
           </a>
         </div>
       </div>
     </div>
   );
 };
+

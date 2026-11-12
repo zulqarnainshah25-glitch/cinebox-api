@@ -149,18 +149,169 @@ export function extractReferralCodeFromLocation(
   return null;
 }
 
+export const DEFAULT_PRODUCTION_PUBLIC_DOMAIN = 'https://cineboxmovies.ai.studio';
+
 /**
- * Builds the shareable referral URL: `https://aapki-site.com/ref/{code}`
+ * Fix 2: Share Link Must Use Production URL, Not Localhost
+ *
+ * WHY THE ORIGIN MUST NOT BE REWRITTEN ON LOCALHOST:
+ * In Capacitor Android (and local Vite dev), the WebView serves bundled assets from
+ * `https://localhost`, `http://localhost`, or `capacitor://localhost`. Rewriting the WebView's
+ * internal origin (`server.hostname`) to a remote production domain breaks offline asset loading,
+ * IndexedDB/localStorage isolation, CORS preflights, and Secure Context APIs when DNS is unreachable.
+ * Therefore, the WebView origin must remain `localhost`, while public-facing Share URLs and Auth
+ * redirect links must manually construct `https://[your-domain]/[path]` using `VITE_PUBLIC_APP_URL`
+ * instead of relying on `window.location.href` or `window.location.origin`.
+ */
+export function isLocalhostOrCapacitorOrigin(rawOrigin?: string | null): boolean {
+  if (!rawOrigin || typeof rawOrigin !== 'string') return true;
+  const trimmed = rawOrigin.trim().toLowerCase();
+  if (!trimmed || trimmed === 'null') return true;
+  if (
+    trimmed.startsWith('capacitor://') ||
+    trimmed.startsWith('ionic://') ||
+    trimmed.startsWith('file://')
+  ) {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.localhost')
+    );
+  } catch {
+    return true;
+  }
+}
+
+export function resolvePublicShareOrigin(options?: {
+  baseOriginOverride?: string | null;
+  envPublicAppUrl?: string | null;
+  windowOrigin?: string | null;
+  isCapacitorNative?: boolean;
+}): string {
+  // 1. Explicit non-localhost baseOrigin override (e.g. from admin config or explicit caller)
+  if (
+    options?.baseOriginOverride &&
+    options.baseOriginOverride.trim() &&
+    !isLocalhostOrCapacitorOrigin(options.baseOriginOverride)
+  ) {
+    return options.baseOriginOverride.trim().replace(/\/+$/, '');
+  }
+
+  // 2. Read configured public domain from `VITE_PUBLIC_APP_URL` environment variable
+  const envUrl =
+    options?.envPublicAppUrl !== undefined
+      ? options.envPublicAppUrl
+      : String((import.meta as any).env?.VITE_PUBLIC_APP_URL || '').trim();
+
+  if (envUrl && envUrl.trim() && !isLocalhostOrCapacitorOrigin(envUrl)) {
+    const withProtocol = /^https?:\/\//i.test(envUrl.trim())
+      ? envUrl.trim()
+      : `https://${envUrl.trim()}`;
+    return withProtocol.replace(/\/+$/, '');
+  }
+
+  // 3. Check runtime window.location.origin
+  const runtimeOrigin =
+    options?.windowOrigin !== undefined
+      ? options.windowOrigin
+      : typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : '';
+
+  const isNative =
+    options?.isCapacitorNative !== undefined
+      ? options.isCapacitorNative
+      : detectAppPlatform() === 'Android';
+
+  // For Capacitor Android or when scheme is capacitor:// or http(s)://localhost,
+  // manually construct the URL using the public production domain instead of window.location.href
+  if (isNative || isLocalhostOrCapacitorOrigin(runtimeOrigin)) {
+    // Only fall back to window.location.origin in standard non-native browser dev when VITE_PUBLIC_APP_URL is unset
+    if (!isNative && runtimeOrigin && /^https?:\/\/localhost(:\d+)?$/i.test(runtimeOrigin) && envUrl === '') {
+      // If VITE_PUBLIC_APP_URL is explicitly empty and not on Capacitor, still prefer production URL for share links
+      // unless caller specifically passed baseOriginOverride
+      if (options?.baseOriginOverride && /^https?:\/\/localhost(:\d+)?$/i.test(options.baseOriginOverride)) {
+        return options.baseOriginOverride.replace(/\/+$/, '');
+      }
+    }
+    return DEFAULT_PRODUCTION_PUBLIC_DOMAIN;
+  }
+
+  return (runtimeOrigin || DEFAULT_PRODUCTION_PUBLIC_DOMAIN).replace(/\/+$/, '');
+}
+
+/**
+ * Constructs a public production URL (`https://[your-domain]/[path]`) for sharing movies, TV shows,
+ * or referrals. Never produces `capacitor://localhost` or `http://localhost` on Android/production.
+ */
+export function buildProductionShareUrl(
+  path: string,
+  options?: {
+    baseOriginOverride?: string | null;
+    envPublicAppUrl?: string | null;
+    windowOrigin?: string | null;
+    isCapacitorNative?: boolean;
+  }
+): string {
+  const origin = resolvePublicShareOrigin(options);
+  const cleanPath = (path || '').trim().replace(/^\/+/, '');
+  return cleanPath ? `${origin}/${cleanPath}` : origin;
+}
+
+/**
+ * Builds the shareable referral URL: `https://[your-domain]/ref/{code}`
  */
 export function buildReferralShareUrl(referralCode: string, baseOrigin?: string): string {
   const safeCode = sanitizeReferralCode(referralCode) || generateUniqueReferralCode(referralCode);
-  const rawOrigin =
-    baseOrigin ||
-    (typeof window !== 'undefined' && window.location?.origin
-      ? window.location.origin
-      : 'https://cineboxmovies.ai.studio');
-  const normalizedOrigin = rawOrigin.replace(/\/+$/, '');
-  return `${normalizedOrigin}/ref/${safeCode}`;
+  return buildProductionShareUrl(`/ref/${safeCode}`, {
+    baseOriginOverride: baseOrigin,
+  });
+}
+
+/**
+ * Shares a Movie or TV Series link using the production public domain (`VITE_PUBLIC_APP_URL`).
+ */
+export async function shareMovieOrSeriesLink(params: {
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  title: string;
+  baseOrigin?: string;
+}): Promise<{ shared: boolean; copied: boolean; shareUrl: string }> {
+  const shareUrl = buildProductionShareUrl(
+    `/?watch=${params.mediaType}-${params.tmdbId}`,
+    { baseOriginOverride: params.baseOrigin }
+  );
+  const shareData = {
+    title: `${params.title} — Watch on CineBox HD`,
+    text: `Watch "${params.title}" in Full HD on CineBox:`,
+    url: shareUrl,
+  };
+
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    try {
+      await navigator.share(shareData);
+      return { shared: true, copied: false, shareUrl };
+    } catch {
+      // User cancelled or WebView blocked navigator.share -> fallback to clipboard
+    }
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      return { shared: false, copied: true, shareUrl };
+    } catch {
+      // ignore
+    }
+  }
+
+  return { shared: false, copied: false, shareUrl };
 }
 
 /**

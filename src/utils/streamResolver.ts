@@ -874,6 +874,164 @@ export function shouldShowAudioTrackButton(
   return validTracks.length > 1;
 }
 
+export const STICKY_EMBED_SCROLL_THRESHOLD_PX = 48;
+
+export interface StickyPlayerScrollConfigInput {
+  isFullscreen: boolean;
+  hasPlaybackStarted: boolean;
+  isAndroidPlatform: boolean;
+  stickyFlagEnabled?: boolean;
+  cssStickySupported?: boolean;
+  hasBrokenStickyAncestor?: boolean;
+  playerMode?: 'direct' | 'embed' | 'pak-drama' | 'trailer' | 'blob';
+  isScrolledPastThreshold?: boolean;
+}
+
+/**
+ * Checks whether the current browser / Android WebView supports `position: sticky`
+ * (or `-webkit-sticky`) via `CSS.supports('position', 'sticky')`.
+ */
+export function supportsCssStickyPosition(
+  cssObj?: { supports?: (prop: string, val: string) => boolean } | null
+): boolean {
+  const targetCss =
+    cssObj !== undefined
+      ? cssObj
+      : typeof CSS !== 'undefined'
+      ? CSS
+      : null;
+
+  if (!targetCss || typeof targetCss.supports !== 'function') {
+    return false;
+  }
+
+  try {
+    return (
+      Boolean(targetCss.supports('position', 'sticky')) ||
+      Boolean(targetCss.supports('position', '-webkit-sticky'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Audits every ancestor between `stickyElement` and `scrollContainer` for CSS properties
+ * that silently break `position: sticky`:
+ * - `transform !== 'none'`
+ * - `filter !== 'none'`
+ * - `perspective !== 'none'`
+ * - `overflow` / `overflowX` / `overflowY` set to `hidden`, `clip`, `scroll`, or `auto`
+ */
+export function auditStickyAncestors(
+  stickyElement: HTMLElement | null | undefined,
+  scrollContainer?: HTMLElement | null
+): { hasBreakingAncestor: boolean; issues: string[] } {
+  if (!stickyElement || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+    return { hasBreakingAncestor: false, issues: [] };
+  }
+
+  const issues: string[] = [];
+  let current: HTMLElement | null = stickyElement.parentElement;
+
+  while (current && current !== scrollContainer && current !== document.body && current !== document.documentElement) {
+    try {
+      const style = window.getComputedStyle(current);
+      if (style.transform && style.transform !== 'none') {
+        issues.push(`transform:${style.transform}`);
+      }
+      if (style.filter && style.filter !== 'none') {
+        issues.push(`filter:${style.filter}`);
+      }
+      if (style.perspective && style.perspective !== 'none') {
+        issues.push(`perspective:${style.perspective}`);
+      }
+      const overflows = [style.overflow, style.overflowX, style.overflowY];
+      if (overflows.some((ov) => ov === 'hidden' || ov === 'clip' || ov === 'scroll' || ov === 'auto')) {
+        issues.push(`overflow:${style.overflow}`);
+      }
+    } catch {
+      // ignore computed style errors
+    }
+    current = current.parentElement;
+  }
+
+  return {
+    hasBreakingAncestor: issues.length > 0,
+    issues,
+  };
+}
+
+/**
+ * Fix 1: Sticky Video Player on Scroll
+ * - Returns `true` ONLY when video playback has started (`hasPlaybackStarted === true`),
+ *   the player is not in fullscreen mode (`!isFullscreen`), and the app is running on
+ *   Android/Capacitor (`isAndroidPlatform === true`) or an explicit sticky flag is enabled.
+ * - In cross-origin `embed` / `pak-drama` / `trailer` iframe modes, also requires the user to have
+ *   actually scrolled past the sticky threshold (`isScrolledPastThreshold === true`, `scrollTop > 48px`)
+ *   so clicking inside an iframe never triggers a false-positive sticky state while at the top of the page.
+ * - Leaves desktop/browser playback unchanged unless the flag is enabled.
+ */
+export function shouldEnableStickyPlayerOnScroll(
+  input: StickyPlayerScrollConfigInput
+): boolean {
+  if (input.isFullscreen) return false;
+  if (!input.hasPlaybackStarted) return false;
+  if (
+    input.playerMode &&
+    input.playerMode !== 'direct' &&
+    input.playerMode !== 'blob' &&
+    !input.isScrolledPastThreshold
+  ) {
+    return false;
+  }
+  return Boolean(input.isAndroidPlatform || input.stickyFlagEnabled);
+}
+
+/**
+ * Resolves the sticky positioning strategy:
+ * - `'css-sticky'`: Native CSS `position: sticky; top: 0; z-index: 40` when `CSS.supports('position', 'sticky')`
+ *   is true and no ancestor has breaking `transform`/`filter`/`overflow: hidden`.
+ * - `'js-fixed-fallback'`: JS-based fallback (stickybits-style) for legacy Android WebViews without
+ *   `CSS.supports('position', 'sticky')` or when an ancestor breaks CSS sticky. Uses `fixed top-0 left-0 right-0 z-40`
+ *   paired with an exact-height placeholder spacer so page content NEVER jumps.
+ * - `'none'`: Normal flow (`relative z-20`).
+ */
+export function resolveStickyPlayerPositionStrategy(
+  input: StickyPlayerScrollConfigInput
+): 'css-sticky' | 'js-fixed-fallback' | 'none' {
+  if (!shouldEnableStickyPlayerOnScroll(input)) {
+    return 'none';
+  }
+  const stickySupported =
+    input.cssStickySupported !== undefined
+      ? input.cssStickySupported
+      : supportsCssStickyPosition();
+  if (!stickySupported || input.hasBrokenStickyAncestor) {
+    return 'js-fixed-fallback';
+  }
+  return 'css-sticky';
+}
+
+/**
+ * Returns the CSS class string for the player wrapper.
+ * - Uses `sticky top-0 z-40` (CSS `position: sticky; top: 0; z-index: 40`) when native sticky mode is active.
+ * - Uses `fixed top-0 left-0 right-0 z-40 max-w-6xl mx-auto` ONLY when `resolveStickyPlayerPositionStrategy`
+ *   selects `'js-fixed-fallback'` (paired with a layout-preserving spacer element in the component).
+ */
+export function getStickyPlayerWrapperClassName(
+  input: StickyPlayerScrollConfigInput
+): string {
+  const strategy = resolveStickyPlayerPositionStrategy(input);
+  if (strategy === 'css-sticky') {
+    return 'sticky top-0 z-40 w-full bg-[#000000] shadow-2xl shadow-black/90 transition-shadow duration-200';
+  }
+  if (strategy === 'js-fixed-fallback') {
+    return 'fixed top-0 left-0 right-0 z-40 w-full max-w-6xl mx-auto bg-[#000000] shadow-2xl shadow-black/90 transition-shadow duration-200';
+  }
+  return 'relative z-20 w-full bg-[#000000]';
+}
+
 export interface FullscreenPlayerLayoutConfig {
   isFullscreen: boolean;
   areControlsVisible: boolean;

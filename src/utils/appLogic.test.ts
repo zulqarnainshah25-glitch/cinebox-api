@@ -1969,21 +1969,32 @@ test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0
     false
   );
 
-  // 3. Version Number Update (1.0.1 -> 1.0.2, versionCode 2)
-  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.2');
-  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.2');
+  // 3. Version Number Update (1.0.2 -> 1.0.3, versionCode 3)
+  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.3');
+  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.3');
+
+  const pkgJson = JSON.parse(
+    fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')
+  );
+  assert.equal(pkgJson.version, '1.0.3');
+
+  const envExample = fs.readFileSync(
+    path.resolve(process.cwd(), '.env.example'),
+    'utf8'
+  );
+  assert.equal(envExample.includes('VITE_APP_VERSION="1.0.3"'), true);
 
   const buildGradle = fs.readFileSync(
     path.resolve(process.cwd(), 'android/app/build.gradle'),
     'utf8'
   );
-  assert.equal(buildGradle.includes('versionCode 2'), true);
-  assert.equal(buildGradle.includes('versionName "1.0.2"'), true);
+  assert.equal(buildGradle.includes('versionCode 3'), true);
+  assert.equal(buildGradle.includes('versionName "1.0.3"'), true);
 
   const versionJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'public/version.json'), 'utf8')
   );
-  assert.equal(versionJson.version, '1.0.2');
+  assert.equal(versionJson.version, '1.0.3');
 
   // 4. Fullscreen Back Button (Controls-Synced Visibility & Taskbar Blending) + Borderless #000000 object-fit: contain
   const fsVisible = getFullscreenPlayerConfig(true, 'contain', true);
@@ -2583,11 +2594,13 @@ test('Phase 2 Player Refactor & Fixed Header Upgrade: Real Subtitles (.SRT/.VTT 
     user_id: 'USR-HIST-TEST',
     tmdb_id: 533535,
     media_type: 'movie',
-    position_seconds: 842,
+    progress_seconds: 842,
     duration_seconds: 7200,
     title: 'Deadpool & Wolverine',
   });
   assert.equal(syncRes.ok, true);
+  assert.equal(syncRes.season, 0);
+  assert.equal(syncRes.episode, 0);
 
   const savedEntry = await getSavedWatchHistoryEntry({
     user_id: 'USR-HIST-TEST',
@@ -2595,8 +2608,10 @@ test('Phase 2 Player Refactor & Fixed Header Upgrade: Real Subtitles (.SRT/.VTT 
     media_type: 'movie',
   });
   assert.ok(savedEntry);
-  assert.equal(savedEntry?.position_seconds, 842);
+  assert.equal(savedEntry?.progress_seconds, 842);
   assert.equal(savedEntry?.duration_seconds, 7200);
+  assert.equal(savedEntry?.season, 0);
+  assert.equal(savedEntry?.episode, 0);
 
   // 7. User-Friendly Source Labels ("Source 1", "Source 2", "Source 3"), Health Status Dots & Auto-Failover
   assert.equal(formatUserFriendlySourceLabel(0), 'Source 1');
@@ -2621,6 +2636,966 @@ test('Phase 2 Player Refactor & Fixed Header Upgrade: Real Subtitles (.SRT/.VTT 
   );
   assert.equal(nextHealthy?.id, 'hindi-multiembed');
 });
+
+test('Fix 1: Sticky Video Player on Scroll uses CSS position: sticky; top: 0; z-index: 40 (with CSS.supports check & JS spacer fallback) on Android/Capacitor after playback starts', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    shouldEnableStickyPlayerOnScroll,
+    getStickyPlayerWrapperClassName,
+    supportsCssStickyPosition,
+    resolveStickyPlayerPositionStrategy,
+  } = await import('./streamResolver');
+
+  // 1. Before playback starts -> not sticky even on Android
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: false,
+      hasPlaybackStarted: false,
+      isAndroidPlatform: true,
+    }),
+    false
+  );
+
+  // 2. On Web/Browser without flag -> not sticky even after playback starts
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: false,
+      stickyFlagEnabled: false,
+    }),
+    false
+  );
+
+  // 3. On Android/Capacitor after playback starts -> sticky enabled
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: true,
+    }),
+    true
+  );
+
+  // 4. On Browser when stickyFlagEnabled is true after playback starts -> sticky enabled
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: false,
+      stickyFlagEnabled: true,
+    }),
+    true
+  );
+
+  // 5. In Fullscreen mode -> sticky wrapper disabled
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: true,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: true,
+    }),
+    false
+  );
+
+  // 6. CSS.supports('position', 'sticky') check & JS fallback strategy
+  assert.equal(
+    supportsCssStickyPosition({ supports: (p, v) => p === 'position' && v === 'sticky' }),
+    true
+  );
+  assert.equal(
+    supportsCssStickyPosition({ supports: () => false }),
+    false
+  );
+
+  assert.equal(
+    resolveStickyPlayerPositionStrategy({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: true,
+      cssStickySupported: true,
+      hasBrokenStickyAncestor: false,
+    }),
+    'css-sticky'
+  );
+
+  assert.equal(
+    resolveStickyPlayerPositionStrategy({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: true,
+      cssStickySupported: false,
+      hasBrokenStickyAncestor: false,
+    }),
+    'js-fixed-fallback'
+  );
+
+  // 7. Verify CSS classes use `sticky top-0 z-40` when cssStickySupported is true
+  const activeStickyClass = getStickyPlayerWrapperClassName({
+    isFullscreen: false,
+    hasPlaybackStarted: true,
+    isAndroidPlatform: true,
+    cssStickySupported: true,
+    hasBrokenStickyAncestor: false,
+  });
+  assert.equal(activeStickyClass.includes('sticky'), true);
+  assert.equal(activeStickyClass.includes('top-0'), true);
+  assert.equal(activeStickyClass.includes('z-40'), true);
+  assert.equal(activeStickyClass.includes('fixed'), false);
+
+  const inactiveStickyClass = getStickyPlayerWrapperClassName({
+    isFullscreen: false,
+    hasPlaybackStarted: false,
+    isAndroidPlatform: true,
+    cssStickySupported: true,
+  });
+  assert.equal(inactiveStickyClass.includes('sticky'), false);
+  assert.equal(inactiveStickyClass.includes('relative'), true);
+
+  // 8. In Embed mode (`playerMode: 'embed'`), clicking the iframe (`hasPlaybackStarted: true`)
+  // does NOT activate sticky until `isScrolledPastThreshold: true` (scrollTop > 48px)
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: true,
+      playerMode: 'embed',
+      isScrolledPastThreshold: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldEnableStickyPlayerOnScroll({
+      isFullscreen: false,
+      hasPlaybackStarted: true,
+      isAndroidPlatform: true,
+      playerMode: 'embed',
+      isScrolledPastThreshold: true,
+    }),
+    true
+  );
+
+  // 9. Verify VideoPlayerModal.tsx renders sticky-video-player-wrapper, JS fallback spacer, and scrollTop threshold check
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('data-testid="sticky-video-player-wrapper"'), true);
+  assert.equal(modalSource.includes('data-testid="sticky-player-js-fallback-spacer"'), true);
+  assert.equal(modalSource.includes('STICKY_EMBED_SCROLL_THRESHOLD_PX'), true);
+  assert.equal(modalSource.includes('setIsEmbedIframeLoaded(true)'), true);
+  assert.equal(modalSource.includes('brightness === 100 ? undefined'), true);
+});
+
+test('Fix 2 & Fix 3: Production Share URLs (VITE_PUBLIC_APP_URL, capacitor:// / localhost rewrite protection) and Supabase Auth Redirect URLs (/auth/callback)', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    isLocalhostOrCapacitorOrigin,
+    resolvePublicShareOrigin,
+    buildProductionShareUrl,
+    buildReferralShareUrl,
+    shareMovieOrSeriesLink,
+  } = await import('../services/platformTrialReferralService');
+  const { getSupabaseAuthRedirectUrl } = await import('../services/supabaseClient');
+
+  // 1. Detect localhost and capacitor:// schemes
+  assert.equal(isLocalhostOrCapacitorOrigin('capacitor://localhost'), true);
+  assert.equal(isLocalhostOrCapacitorOrigin('http://localhost:3000'), true);
+  assert.equal(isLocalhostOrCapacitorOrigin('https://localhost'), true);
+  assert.equal(isLocalhostOrCapacitorOrigin('http://127.0.0.1:5173'), true);
+  assert.equal(isLocalhostOrCapacitorOrigin('https://cineboxmovies.ai.studio'), false);
+
+  // 2. When running on Capacitor Android (`capacitor://localhost` or `http://localhost`), construct https://[domain]/[path]
+  assert.equal(
+    buildProductionShareUrl('/ref/CBX-123456', {
+      windowOrigin: 'capacitor://localhost',
+      isCapacitorNative: true,
+      envPublicAppUrl: 'https://cineboxmovies.ai.studio',
+    }),
+    'https://cineboxmovies.ai.studio/ref/CBX-123456'
+  );
+
+  assert.equal(
+    buildProductionShareUrl('/?watch=movie-533535', {
+      windowOrigin: 'http://localhost:3000',
+      isCapacitorNative: true,
+      envPublicAppUrl: '',
+    }),
+    'https://cineboxmovies.ai.studio/?watch=movie-533535'
+  );
+
+  // 3. Custom VITE_PUBLIC_APP_URL overrides default domain
+  assert.equal(
+    resolvePublicShareOrigin({
+      envPublicAppUrl: 'https://custom-cinebox.com/',
+      windowOrigin: 'http://localhost:3000',
+    }),
+    'https://custom-cinebox.com'
+  );
+
+  // 4. Referral & Movie share links never leak localhost
+  const refUrl = buildReferralShareUrl('CBX-998877');
+  assert.equal(refUrl.startsWith('https://'), true);
+  assert.equal(refUrl.includes('localhost'), false);
+
+  const movieShareRes = await shareMovieOrSeriesLink({
+    tmdbId: 533535,
+    mediaType: 'movie',
+    title: 'Deadpool & Wolverine',
+  });
+  assert.equal(
+    movieShareRes.shareUrl,
+    'https://cineboxmovies.ai.studio/?watch=movie-533535'
+  );
+
+  // 5. Fix 3: Supabase Magic Link & Password Reset redirect URLs always use https://[your-domain]/auth/callback
+  const authRedirect = getSupabaseAuthRedirectUrl('/auth/callback');
+  assert.equal(authRedirect, 'https://cineboxmovies.ai.studio/auth/callback');
+  assert.equal(authRedirect.includes('localhost'), false);
+
+  const supaSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/supabaseClient.ts'),
+    'utf8'
+  );
+  assert.equal(
+    supaSource.includes("const redirectTo = getSupabaseAuthRedirectUrl('/auth/callback');"),
+    true
+  );
+
+  const envExampleSource = fs.readFileSync(
+    path.resolve(process.cwd(), '.env.example'),
+    'utf8'
+  );
+  assert.equal(envExampleSource.includes('VITE_PUBLIC_APP_URL='), true);
+});
+
+test('Fix 4: Source Availability & Health Check (5-Minute Cache, CapacitorHttp + Server-Side CORS Proxy for Real HTTP Status, mode: no-cors Opaque -> Yellow Unknown, Never False-Positive Green)', async () => {
+  const {
+    EMBED_HEALTH_CACHE_TTL_MS,
+    clearEmbedProviderHealthCache,
+    getCachedEmbedProviderHealth,
+    probeEmbedProviderHealthWithCache,
+  } = await import('../services/streamSourceManager');
+  const { resolveSourceHealthDotStatus } = await import('../components/player/SourcePicker');
+
+  clearEmbedProviderHealthCache();
+  assert.equal(EMBED_HEALTH_CACHE_TTL_MS, 5 * 60 * 1000);
+
+  // 1. Verify colored dot mapping: Green = likely working, Yellow = unknown, Red = failed
+  const greenDot = resolveSourceHealthDotStatus('available');
+  assert.equal(greenDot.dotColor, 'green');
+  assert.equal(greenDot.colorMeaning, 'likely working');
+  assert.equal(greenDot.label, 'OK');
+
+  const yellowUnknownDot = resolveSourceHealthDotStatus('unknown');
+  assert.equal(yellowUnknownDot.dotColor, 'yellow');
+  assert.equal(yellowUnknownDot.colorMeaning, 'unknown');
+  assert.equal(yellowUnknownDot.label, 'unknown');
+
+  const redFailedDot = resolveSourceHealthDotStatus('unavailable');
+  assert.equal(redFailedDot.dotColor, 'red');
+  assert.equal(redFailedDot.colorMeaning, 'failed');
+  assert.equal(redFailedDot.label, 'down');
+
+  const baseTime = 1_700_000_000_000;
+
+  // 2. Stage 1A: Native Android CapacitorHttp Probe (uses GET + responseType: 'text' to avoid Android HEAD FileNotFoundException)
+  const probeCapOk = await probeEmbedProviderHealthWithCache(
+    { id: 'auto-server-1', url: 'https://vidsrc.sh/embed/movie/533535?ds_lang=en' },
+    {
+      nowMs: baseTime,
+      forceRefresh: true,
+      useCapacitorNativeHttp: true,
+      customCapacitorHttp: {
+        request: async (opts) => {
+          assert.equal(opts.method, 'GET');
+          assert.equal(opts.responseType, 'text');
+          return { status: 200, data: '<html></html>' };
+        },
+      },
+    }
+  );
+  assert.equal(probeCapOk.status, 'available');
+  assert.equal(probeCapOk.dotColor, 'green');
+  assert.equal(probeCapOk.label, 'likely working');
+  assert.equal(probeCapOk.probeMode, 'capacitor-http');
+  assert.equal(probeCapOk.httpStatusCode, 200);
+
+  const probeCap500 = await probeEmbedProviderHealthWithCache(
+    { id: 'auto-server-1', url: 'https://vidsrc.sh/embed/movie/533535?ds_lang=en' },
+    {
+      nowMs: baseTime,
+      forceRefresh: true,
+      useCapacitorNativeHttp: true,
+      customCapacitorHttp: {
+        request: async (opts) => {
+          assert.equal(opts.method, 'GET');
+          assert.equal(opts.responseType, 'text');
+          return { status: 500, data: 'Error' };
+        },
+      },
+    }
+  );
+  assert.equal(probeCap500.status, 'unavailable');
+  assert.equal(probeCap500.dotColor, 'red');
+  assert.equal(probeCap500.label, 'failed');
+  assert.equal(probeCap500.probeMode, 'capacitor-http');
+  assert.equal(probeCap500.httpStatusCode, 500);
+
+  clearEmbedProviderHealthCache();
+
+  // 3. Stage 1B: Server-Side CORS Proxy Probe (returns HTTP 200 -> available / green; HTTP 500 -> unavailable / red)
+  let fetchCalls = 0;
+  const mockCorsProxyOkFetch = (async (input: RequestInfo | URL) => {
+    fetchCalls += 1;
+    const urlStr = String(input);
+    assert.equal(urlStr.includes('/functions/v1/cors-proxy?target='), true);
+    return new Response('<html>VidSrc</html>', { status: 200 });
+  }) as typeof fetch;
+
+  const probe1 = await probeEmbedProviderHealthWithCache(
+    { id: 'auto-server-1', url: 'https://vidsrc.sh/embed/movie/533535?ds_lang=en' },
+    {
+      nowMs: baseTime,
+      useCapacitorNativeHttp: false,
+      useCorsProxy: true,
+      customFetch: mockCorsProxyOkFetch,
+    }
+  );
+  assert.equal(probe1.status, 'available');
+  assert.equal(probe1.dotColor, 'green');
+  assert.equal(probe1.label, 'likely working');
+  assert.equal(probe1.probeMode, 'cors-proxy');
+  assert.equal(probe1.httpStatusCode, 200);
+  assert.equal(probe1.validationStatus, 'unverified-external');
+  assert.equal(probe1.cached, false);
+  assert.equal(fetchCalls, 1);
+
+  // 4. Within 5 minutes (e.g. +2 minutes) -> returns cached result without making a network request
+  const probe1Cached = await probeEmbedProviderHealthWithCache(
+    { id: 'auto-server-1', url: 'https://vidsrc.sh/embed/movie/550' },
+    {
+      nowMs: baseTime + 2 * 60 * 1000,
+      useCapacitorNativeHttp: false,
+      useCorsProxy: true,
+      customFetch: mockCorsProxyOkFetch,
+    }
+  );
+  assert.equal(probe1Cached.cached, true);
+  assert.equal(probe1Cached.probeMode, 'cache');
+  assert.equal(probe1Cached.status, 'available');
+  assert.equal(fetchCalls, 1); // No extra fetch!
+
+  // 5. After 5 minutes (+300,001 ms) -> cache expires and re-probes
+  assert.equal(
+    getCachedEmbedProviderHealth('https://vidsrc.sh', baseTime + 300_001),
+    null
+  );
+
+  // 6. Stage 1B Server-Side CORS Proxy catches upstream HTTP 404/500 -> marks as unavailable (Red)
+  const mockCorsProxy500Fetch = (async () => {
+    return new Response('Internal Server Error', { status: 500 });
+  }) as typeof fetch;
+
+  const probeCors500 = await probeEmbedProviderHealthWithCache(
+    { id: 'auto-server-1', url: 'https://vidsrc.sh/embed/movie/533535' },
+    {
+      nowMs: baseTime,
+      forceRefresh: true,
+      useCapacitorNativeHttp: false,
+      useCorsProxy: true,
+      customFetch: mockCorsProxy500Fetch,
+    }
+  );
+  assert.equal(probeCors500.status, 'unavailable');
+  assert.equal(probeCors500.dotColor, 'red');
+  assert.equal(probeCors500.label, 'failed');
+  assert.equal(probeCors500.httpStatusCode, 500);
+
+  // 7. Stage 2: Browser `mode: 'no-cors'` Fallback
+  // Because `no-cors` opaque responses (`status === 0`) cannot distinguish HTTP 200 from HTTP 404/500,
+  // it MUST return `status: 'unknown'` (`yellow`), NEVER a false-positive `'available'` (`green`)!
+  const mockNoCorsOpaqueFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(init?.mode, 'no-cors');
+    return {
+      type: 'opaque',
+      status: 0,
+      ok: false,
+    } as Response;
+  }) as typeof fetch;
+
+  const probe2NoCors = await probeEmbedProviderHealthWithCache(
+    { id: 'auto-server-3', url: 'https://www.2embed.cc/embed/533535' },
+    {
+      nowMs: baseTime,
+      forceRefresh: true,
+      useCapacitorNativeHttp: false,
+      useCorsProxy: false,
+      customFetch: mockNoCorsOpaqueFetch,
+    }
+  );
+  assert.equal(probe2NoCors.status, 'unknown');
+  assert.equal(probe2NoCors.dotColor, 'yellow');
+  assert.equal(probe2NoCors.label, 'unknown');
+  assert.equal(probe2NoCors.probeMode, 'no-cors');
+  assert.equal(probe2NoCors.httpStatusCode, null);
+
+  // 8. Network/DNS failure or timeout in `no-cors` -> marks as unavailable (red = failed)
+  const mockFailingFetch = (async () => {
+    throw new Error('Network unreachable');
+  }) as typeof fetch;
+
+  const probeFailed = await probeEmbedProviderHealthWithCache(
+    { id: 'broken-embed', url: 'https://down-embed.example.com/embed/1' },
+    {
+      nowMs: baseTime,
+      useCapacitorNativeHttp: false,
+      useCorsProxy: false,
+      customFetch: mockFailingFetch,
+    }
+  );
+  assert.equal(probeFailed.status, 'unavailable');
+  assert.equal(probeFailed.dotColor, 'red');
+  assert.equal(probeFailed.label, 'failed');
+});
+
+test('Fix 5: Rate-Limit-Proof GitHub Releases Auto-Update (6-Hour Throttle Cache, ETag 304 Free Revalidation, Automatic Static version.json Fallback on 403 Rate-Limit, and Android Directory.Cache APK Download + REQUEST_INSTALL_PACKAGES)', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { Directory } = await import('@capacitor/filesystem');
+  const {
+    UPDATE_CHECK_THROTTLE_MS,
+    STARTUP_UPDATE_CHECK_DEBOUNCE_MS,
+    clearUpdateCheckThrottleCache,
+    checkGitHubLatestReleaseUpdate,
+    downloadAndInstallApkUpdate,
+  } = await import('../services/inAppUpdateService');
+
+  clearUpdateCheckThrottleCache();
+  assert.equal(UPDATE_CHECK_THROTTLE_MS, 6 * 60 * 60 * 1000); // 6 hours
+  assert.equal(STARTUP_UPDATE_CHECK_DEBOUNCE_MS, 3000); // 3 seconds
+
+  const t0 = 1_700_000_000_000;
+  let apiCalls = 0;
+
+  // 1. GitHub Releases API (`GET /repos/[owner]/[repo]/releases/latest`) -> parses tag_name, release notes, APK asset, and ETag
+  const mockGitHubReleaseFetch = (async (input: RequestInfo | URL) => {
+    apiCalls += 1;
+    const urlStr = String(input);
+    assert.equal(
+      urlStr,
+      'https://api.github.com/repos/cinebox-official/cinebox-apk/releases/latest'
+    );
+    return new Response(
+      JSON.stringify({
+        tag_name: 'v1.0.5',
+        body: 'New Sticky Player & 6-Hour Rate-Limit-Safe Update Check',
+        html_url: 'https://github.com/cinebox-official/cinebox-apk/releases/tag/v1.0.5',
+        assets: [
+          {
+            name: 'CineBox-v1.0.5.apk',
+            browser_download_url:
+              'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.5/CineBox-v1.0.5.apk',
+          },
+        ],
+      }),
+      {
+        status: 200,
+        headers: { etag: 'W/"gh-release-v105"' },
+      }
+    );
+  }) as typeof fetch;
+
+  const check1 = await checkGitHubLatestReleaseUpdate({
+    repo: 'cinebox-official/cinebox-apk',
+    currentVersionOverride: '1.0.2',
+    nowMs: t0,
+    fetchImpl: mockGitHubReleaseFetch,
+  });
+  assert.equal(check1.checked, true);
+  assert.equal(check1.updateAvailable, true);
+  assert.equal(check1.remoteVersion, '1.0.5');
+  assert.equal(check1.source, 'github-releases-api');
+  assert.equal(check1.throttledFromCache, false);
+  assert.equal(check1.etag, 'W/"gh-release-v105"');
+  assert.equal(apiCalls, 1);
+
+  // 2. Within 6 hours (e.g. +2 hours) -> returns cached result immediately without hitting GitHub API!
+  const check2Cached = await checkGitHubLatestReleaseUpdate({
+    repo: 'cinebox-official/cinebox-apk',
+    currentVersionOverride: '1.0.2',
+    nowMs: t0 + 2 * 60 * 60 * 1000,
+    fetchImpl: mockGitHubReleaseFetch,
+  });
+  assert.equal(check2Cached.throttledFromCache, true);
+  assert.equal(check2Cached.updateAvailable, true);
+  assert.equal(check2Cached.remoteVersion, '1.0.5');
+  assert.equal(apiCalls, 1); // Zero extra API calls within 6 hours!
+
+  // 3. After 6 hours (+6h 1m) -> sends `If-None-Match` ETag; 304 Not Modified does not consume GitHub rate limit
+  let receivedIfNoneMatch = '';
+  const mockGitHub304Fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    apiCalls += 1;
+    const hdrs = (init?.headers || {}) as Record<string, string>;
+    receivedIfNoneMatch = hdrs['If-None-Match'] || '';
+    return new Response(null, { status: 304 });
+  }) as typeof fetch;
+
+  const check3Etag = await checkGitHubLatestReleaseUpdate({
+    repo: 'cinebox-official/cinebox-apk',
+    currentVersionOverride: '1.0.2',
+    nowMs: t0 + 6 * 60 * 60 * 1000 + 60_000,
+    fetchImpl: mockGitHub304Fetch,
+  });
+  assert.equal(receivedIfNoneMatch, 'W/"gh-release-v105"');
+  assert.equal(check3Etag.updateAvailable, true);
+  assert.equal(check3Etag.remoteVersion, '1.0.5');
+
+  // 4. When GitHub API returns 403 Rate Limit Exceeded (60 req/hr limit on CGNAT) -> automatically falls back to Static version.json CDN!
+  clearUpdateCheckThrottleCache();
+  const mockRateLimitedWithStaticFallbackFetch = (async (input: RequestInfo | URL) => {
+    const urlStr = String(input);
+    if (urlStr.includes('api.github.com')) {
+      return new Response(JSON.stringify({ message: 'API rate limit exceeded' }), {
+        status: 403,
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        version: '1.0.6',
+        apk_url:
+          'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.6/app-release.apk',
+        release_notes: 'Served via Static version.json Fastly CDN (Zero Rate Limit)',
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const check4Fallback = await checkGitHubLatestReleaseUpdate({
+    repo: 'cinebox-official/cinebox-apk',
+    currentVersionOverride: '1.0.2',
+    nowMs: t0,
+    forceRefresh: true,
+    fetchImpl: mockRateLimitedWithStaticFallbackFetch,
+  });
+  assert.equal(check4Fallback.checked, true);
+  assert.equal(check4Fallback.updateAvailable, true);
+  assert.equal(check4Fallback.remoteVersion, '1.0.6');
+  assert.equal(check4Fallback.source, 'static-version-json-fallback');
+
+  // 5. Android APK Download to `Directory.Cache` & Install Trigger (only on explicit user action)
+  let downloadedDirectory: unknown = null;
+  let downloadedPath = '';
+  let triggeredInstallUri = '';
+
+  const androidDlRes = await downloadAndInstallApkUpdate({
+    apkUrl:
+      'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.6/app-release.apk',
+    version: '1.0.6',
+    platform: 'Android',
+    customFilesystem: {
+      downloadFile: async (opts) => {
+        downloadedDirectory = opts.directory;
+        downloadedPath = opts.path;
+        return { path: opts.path };
+      },
+      getUri: async (opts) => ({
+        uri: `content://com.cinebox.stream.fileprovider/apk_cache/${opts.path}`,
+      }),
+    },
+    customInstallTrigger: async (uri) => {
+      triggeredInstallUri = uri;
+    },
+  });
+  assert.equal(androidDlRes.ok, true);
+  assert.equal(downloadedDirectory, Directory.Cache);
+  assert.equal(downloadedPath, 'CineBox-v1.0.6.apk');
+  assert.equal(
+    triggeredInstallUri,
+    'content://com.cinebox.stream.fileprovider/apk_cache/CineBox-v1.0.6.apk'
+  );
+  assert.equal(androidDlRes.installTriggered, true);
+
+  // 6. Verify AndroidManifest.xml has REQUEST_INSTALL_PACKAGES and file_paths.xml has cache-path
+  const manifestXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/AndroidManifest.xml'),
+    'utf8'
+  );
+  assert.equal(
+    manifestXml.includes('android.permission.REQUEST_INSTALL_PACKAGES'),
+    true
+  );
+  const filePathsXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/res/xml/file_paths.xml'),
+    'utf8'
+  );
+  assert.equal(filePathsXml.includes('<cache-path name="apk_cache"'), true);
+});
+
+test('Fix 6: Live Search Suggestions (useDebounce 300ms, useSearchSuggestions >= 2 Chars, Top 5-8 Items, AbortController Request Cancellation, and 10-Minute LRU Query Cache for TMDB Rate Limit Protection)', async () => {
+  const { DEFAULT_DEBOUNCE_DELAY_MS } = await import('../hooks/useDebounce');
+  const {
+    MIN_SEARCH_SUGGESTION_CHARS,
+    DEFAULT_MAX_SUGGESTIONS,
+    SEARCH_SUGGESTIONS_CACHE_TTL_MS,
+    clearSearchSuggestionsCache,
+    normalizeSuggestionQueryKey,
+    fetchTopSearchSuggestions,
+  } = await import('../hooks/useSearchSuggestions');
+
+  clearSearchSuggestionsCache();
+  assert.equal(DEFAULT_DEBOUNCE_DELAY_MS, 300);
+  assert.equal(MIN_SEARCH_SUGGESTION_CHARS, 2);
+  assert.equal(DEFAULT_MAX_SUGGESTIONS, 7);
+  assert.equal(SEARCH_SUGGESTIONS_CACHE_TTL_MS, 10 * 60 * 1000);
+
+  let tmdbSearchCallCount = 0;
+  const mockMovies = Array.from({ length: 12 }, (_, idx) => ({
+    id: 5000 + idx,
+    title: `Deadpool Vol ${idx + 1}`,
+    releaseYear: '2025',
+    rating: 8.4,
+    language: 'English',
+    languageBadge: 'EN',
+    category: 'trending' as const,
+    mediaType: (idx % 2 === 0 ? 'movie' : 'tv') as 'movie' | 'tv',
+    posterUrl: 'https://image.tmdb.org/t/p/w500/test.jpg',
+    backdropUrl: 'https://image.tmdb.org/t/p/original/test.jpg',
+    overview: 'Test overview',
+    genres: ['Action'],
+    duration: '2h 05m',
+    runtime: '2h 05m',
+    cast: [],
+  }));
+
+  const mockSearchFn = async (
+    _q: string,
+    _linksMap: Record<number, any>,
+    opts?: { signal?: AbortSignal }
+  ) => {
+    if (opts?.signal?.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+    tmdbSearchCallCount += 1;
+    return mockMovies;
+  };
+
+  // 1. Queries shorter than 2 characters ("", "d", "   ") return [] immediately without calling TMDB
+  const emptyRes = await fetchTopSearchSuggestions('', { customSearchFn: mockSearchFn });
+  assert.equal(emptyRes.suggestions.length, 0);
+  const oneCharRes = await fetchTopSearchSuggestions('d', { customSearchFn: mockSearchFn });
+  assert.equal(oneCharRes.suggestions.length, 0);
+  assert.equal(tmdbSearchCallCount, 0);
+
+  // 2. Valid query ("Deadpool") fetches from TMDB and caps results to top 5-8 items (7 by default)
+  const t0 = 1_700_000_000_000;
+  const firstFetch = await fetchTopSearchSuggestions('Deadpool', {
+    nowMs: t0,
+    customSearchFn: mockSearchFn,
+  });
+  assert.equal(firstFetch.fromCache, false);
+  assert.equal(firstFetch.aborted, false);
+  assert.equal(firstFetch.suggestions.length, 7);
+  assert.equal(tmdbSearchCallCount, 1);
+
+  // 3. Repeated query (even with different casing/spaces: "  deadpool  ") serves from cache with 0 extra TMDB calls!
+  assert.equal(normalizeSuggestionQueryKey('  DeadPool  '), 'deadpool');
+  const cachedFetch = await fetchTopSearchSuggestions('  deadpool  ', {
+    nowMs: t0 + 60_000,
+    customSearchFn: mockSearchFn,
+  });
+  assert.equal(cachedFetch.fromCache, true);
+  assert.equal(cachedFetch.suggestions.length, 7);
+  assert.equal(tmdbSearchCallCount, 1); // Zero extra TMDB API calls!
+
+  // 4. AbortController cancels in-flight TMDB requests when user types a new character
+  const abortController = new AbortController();
+  abortController.abort();
+  const abortedRes = await fetchTopSearchSuggestions('Avatar', {
+    signal: abortController.signal,
+    customSearchFn: mockSearchFn,
+  });
+  assert.equal(abortedRes.aborted, true);
+  assert.equal(abortedRes.suggestions.length, 0);
+  assert.equal(tmdbSearchCallCount, 1);
+
+  // 5. Graceful error handling when TMDB API fails
+  const failingRes = await fetchTopSearchSuggestions('Inception', {
+    customSearchFn: async () => {
+      throw new Error('TMDB network timeout');
+    },
+  });
+  assert.equal(failingRes.suggestions.length, 0);
+  assert.equal(failingRes.aborted, false);
+  assert.equal(failingRes.error, 'TMDB network timeout');
+});
+
+test('Fix 7: Real Watchlist & Watch History Persistence (Movie season=0/episode=0 vs TV season/episode, Single progress_seconds Column, and Watchlist Add/Remove/List Persistence)', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    clearLocalWatchlistForTests,
+    resolveWatchHistorySeasonAndEpisode,
+    syncWatchHistoryEntry,
+    getSavedWatchHistoryEntry,
+    fetchUserWatchlist,
+    addWatchlistItemToSupabase,
+    removeWatchlistItemFromSupabase,
+  } = await import('../services/supabaseClient');
+
+  clearLocalWatchlistForTests();
+
+  // 1. Verify Movies use season = 0, episode = 0 (no season/episode required) while TV Shows use season >= 1, episode >= 1
+  const movieSE = resolveWatchHistorySeasonAndEpisode('movie', null, null);
+  assert.equal(movieSE.season, 0);
+  assert.equal(movieSE.episode, 0);
+
+  const movieEvenIfPassedSE = resolveWatchHistorySeasonAndEpisode('movie', 2, 5);
+  assert.equal(movieEvenIfPassedSE.season, 0);
+  assert.equal(movieEvenIfPassedSE.episode, 0);
+
+  const tvSE = resolveWatchHistorySeasonAndEpisode('tv', 2, 7);
+  assert.equal(tvSE.season, 2);
+  assert.equal(tvSE.episode, 7);
+
+  // 2. Verify Movie watch_history saves & resumes with single `progress_seconds` column and season=0, episode=0
+  const movieSync = await syncWatchHistoryEntry({
+    user_id: 'USR-FIX7-1',
+    tmdb_id: 693134,
+    media_type: 'movie',
+    progress_seconds: 1425,
+    duration_seconds: 9960,
+    title: 'Dune: Part Two',
+  });
+  assert.equal(movieSync.ok, true);
+  assert.equal(movieSync.season, 0);
+  assert.equal(movieSync.episode, 0);
+  assert.equal(movieSync.progress_seconds, 1425);
+
+  const savedMovieHistory = await getSavedWatchHistoryEntry({
+    user_id: 'USR-FIX7-1',
+    tmdb_id: 693134,
+    media_type: 'movie',
+  });
+  assert.ok(savedMovieHistory);
+  assert.equal(savedMovieHistory?.progress_seconds, 1425);
+  assert.equal(savedMovieHistory?.duration_seconds, 9960);
+  assert.equal(savedMovieHistory?.season, 0);
+  assert.equal(savedMovieHistory?.episode, 0);
+
+  // 3. Verify TV Series watch_history saves & resumes per episode (Season 1 Episode 4 vs Season 1 Episode 5)
+  await syncWatchHistoryEntry({
+    user_id: 'USR-FIX7-1',
+    tmdb_id: 93405,
+    media_type: 'tv',
+    season: 1,
+    episode: 4,
+    progress_seconds: 610,
+    duration_seconds: 3200,
+    title: 'Squid Game',
+  });
+  await syncWatchHistoryEntry({
+    user_id: 'USR-FIX7-1',
+    tmdb_id: 93405,
+    media_type: 'tv',
+    season: 1,
+    episode: 5,
+    progress_seconds: 120,
+    duration_seconds: 3400,
+    title: 'Squid Game',
+  });
+
+  const savedEp4 = await getSavedWatchHistoryEntry({
+    user_id: 'USR-FIX7-1',
+    tmdb_id: 93405,
+    media_type: 'tv',
+    season: 1,
+    episode: 4,
+  });
+  const savedEp5 = await getSavedWatchHistoryEntry({
+    user_id: 'USR-FIX7-1',
+    tmdb_id: 93405,
+    media_type: 'tv',
+    season: 1,
+    episode: 5,
+  });
+  assert.equal(savedEp4?.progress_seconds, 610);
+  assert.equal(savedEp5?.progress_seconds, 120);
+
+  // 4. Verify Watchlist Add, List, and Remove Persistence
+  const sampleMovie = {
+    id: 872585,
+    title: 'Oppenheimer',
+    releaseYear: '2023',
+    rating: 8.9,
+    language: 'English',
+    languageBadge: 'EN',
+    category: 'trending' as const,
+    mediaType: 'movie' as const,
+    posterUrl: 'https://image.tmdb.org/t/p/w500/oppenheimer.jpg',
+    backdropUrl: 'https://image.tmdb.org/t/p/original/oppenheimer.jpg',
+    overview: 'Biographical thriller.',
+    genres: ['Drama', 'History'],
+    duration: '3h 00m',
+    runtime: '3h 00m',
+    cast: [],
+  };
+
+  const addRes = await addWatchlistItemToSupabase(sampleMovie, 'USR-FIX7-1');
+  assert.equal(addRes.ok, true);
+  assert.equal(addRes.items.length, 1);
+  assert.equal(addRes.items[0].id, 872585);
+
+  const listRes = await fetchUserWatchlist('USR-FIX7-1');
+  assert.equal(listRes.items.length, 1);
+  assert.equal(listRes.items[0].title, 'Oppenheimer');
+
+  const removeRes = await removeWatchlistItemFromSupabase(872585, 'movie', 'USR-FIX7-1');
+  assert.equal(removeRes.ok, true);
+  assert.equal(removeRes.items.length, 0);
+
+  // 5. Verify supabase_schema.sql uses progress_seconds (not position_seconds) and season/episode DEFAULT 0
+  const schemaSql = fs.readFileSync(path.resolve(process.cwd(), 'supabase_schema.sql'), 'utf8');
+  assert.equal(schemaSql.includes('progress_seconds INTEGER NOT NULL DEFAULT 0'), true);
+  assert.equal(schemaSql.includes('season INTEGER NOT NULL DEFAULT 0'), true);
+  assert.equal(schemaSql.includes('episode INTEGER NOT NULL DEFAULT 0'), true);
+  assert.equal(schemaSql.includes('DROP COLUMN IF EXISTS position_seconds'), true);
+});
+
+test('Fix 8: Hardened User Feedback (Server & Client TRIM + Length [3..500], Strict Email Regex, Honeypot Bot Guard, and 3/Hour Rate Limiting)', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    clearFeedbackRateLimitForTests,
+    validateUserFeedbackPayload,
+    submitUserFeedback,
+  } = await import('../services/supabaseClient');
+
+  clearFeedbackRateLimitForTests();
+
+  // 1. Rejects whitespace-only or <3 char message after TRIM
+  const tooShort = validateUserFeedbackPayload({
+    type: 'bug',
+    message: '   ab   ',
+  });
+  assert.equal(tooShort.valid, false);
+  assert.equal(tooShort.error?.includes('at least 3 characters'), true);
+
+  // 2. Rejects >500 char message
+  const tooLong = validateUserFeedbackPayload({
+    type: 'feature',
+    message: 'x'.repeat(501),
+  });
+  assert.equal(tooLong.valid, false);
+  assert.equal(tooLong.error?.includes('500 characters'), true);
+
+  // 3. Rejects invalid emails with strict regex
+  const badEmail1 = validateUserFeedbackPayload({
+    type: 'bug',
+    message: 'Subtitle sync issue on episode 3',
+    email: 'fake-email-without-domain',
+  });
+  assert.equal(badEmail1.valid, false);
+
+  const badEmail2 = validateUserFeedbackPayload({
+    type: 'bug',
+    message: 'Subtitle sync issue on episode 3',
+    email: 'test@invalid..com',
+  });
+  assert.equal(badEmail2.valid, false);
+
+  // 4. Rejects bot honeypot submissions
+  const botAttempt = validateUserFeedbackPayload({
+    type: 'other',
+    message: 'Valid looking message from a spam bot',
+    website_honeypot: 'https://spambot.example.com',
+  });
+  assert.equal(botAttempt.valid, false);
+  assert.equal(botAttempt.error, 'Spam submission blocked.');
+
+  // 5. Valid submission trims message, normalizes email, and enforces 3/hour rate limit
+  const t0 = 1_760_000_000_000;
+  const sub1 = await submitUserFeedback(
+    {
+      type: 'bug',
+      message: '   Audio lags on Source 2 after 10 minutes   ',
+      email: '  Viewer.One@Example.com ',
+    },
+    { nowMs: t0 }
+  );
+  assert.equal(sub1.ok, true);
+  assert.equal(sub1.remainingInHour, 2);
+
+  const sub2 = await submitUserFeedback(
+    {
+      type: 'feature',
+      message: 'Please add Urdu subtitles for Dune Part Two',
+      email: 'viewer.one@example.com',
+    },
+    { nowMs: t0 + 10_000 }
+  );
+  assert.equal(sub2.ok, true);
+  assert.equal(sub2.remainingInHour, 1);
+
+  const sub3 = await submitUserFeedback(
+    {
+      type: 'other',
+      message: 'Great app experience on Android TV!',
+    },
+    { nowMs: t0 + 20_000 }
+  );
+  assert.equal(sub3.ok, true);
+  assert.equal(sub3.remainingInHour, 0);
+
+  // 4th submission within the same hour is blocked by rate limiter
+  const sub4Blocked = await submitUserFeedback(
+    {
+      type: 'bug',
+      message: 'Fourth submission within the same hour',
+    },
+    { nowMs: t0 + 30_000 }
+  );
+  assert.equal(sub4Blocked.ok, false);
+  assert.equal(sub4Blocked.error?.includes('Rate limit reached'), true);
+
+  // After 1 hour + 1 second, rate limit window resets
+  const subAfterHour = await submitUserFeedback(
+    {
+      type: 'bug',
+      message: 'Submission after 1 hour window has elapsed',
+    },
+    { nowMs: t0 + 3600 * 1000 + 1000 }
+  );
+  assert.equal(subAfterHour.ok, true);
+
+  // 6. Verify SQL schema includes server-side btrim(message), strict email regex, honeypot, and rate limit RLS
+  const schemaSql = fs.readFileSync(path.resolve(process.cwd(), 'supabase_schema.sql'), 'utf8');
+  assert.equal(schemaSql.includes('CREATE TABLE IF NOT EXISTS public.user_feedback'), true);
+  assert.equal(
+    schemaSql.includes('char_length(btrim(message)) BETWEEN 3 AND 500'),
+    true
+  );
+  assert.equal(
+    schemaSql.includes(
+      "btrim(email) ~* '^[A-Za-z0-9_%+-]+(\\.[A-Za-z0-9_%+-]+)*@[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,15}$'"
+    ),
+    true
+  );
+  assert.equal(schemaSql.includes('public.check_feedback_rate_limit(user_id, email)'), true);
+  assert.equal(schemaSql.includes('website_honeypot = \'\''), true);
+});
+
+
+
+
+
+
+
+
 
 
 

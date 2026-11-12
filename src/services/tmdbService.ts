@@ -194,8 +194,15 @@ export function buildTmdbRequestUrl(
 export async function fetchTmdbJson(
   endpoint: string,
   params: Record<string, string> = {},
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal
 ): Promise<any | null> {
+  if (signal?.aborted) {
+    const abortErr = new Error('The operation was aborted.');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
+
   // 1. Direct TMDB API call first (uses VITE_TMDB_READ_ACCESS_TOKEN Bearer + VITE_TMDB_API_KEY from .env)
   const directUrl = buildDirectTmdbUrl(endpoint, params);
   if (directUrl) {
@@ -203,11 +210,15 @@ export async function fetchTmdbJson(
       const directRes = await fetchImpl(directUrl, {
         method: 'GET',
         headers: buildDirectTmdbHeaders(),
+        signal,
       });
       if (directRes.ok) {
         return await directRes.json();
       }
-    } catch {
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || signal?.aborted) {
+        throw err;
+      }
       // Direct TMDB request failed, try proxy fallback if configured
     }
   }
@@ -220,11 +231,15 @@ export async function fetchTmdbJson(
       const response = await fetchImpl(proxyRequestUrl, {
         method: 'GET',
         headers: buildTmdbProxyHeaders(anonKey),
+        signal,
       });
       if (response.ok) {
         return await response.json();
       }
-    } catch {
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || signal?.aborted) {
+        throw err;
+      }
       // Proxy fallback failed
     }
   }
@@ -234,9 +249,11 @@ export async function fetchTmdbJson(
 
 async function fetchTmdbEndpoint(
   endpoint: string,
-  params: Record<string, string> = {}
+  params: Record<string, string> = {},
+  signal?: AbortSignal,
+  fetchImpl: typeof fetch = fetch
 ): Promise<any[] | null> {
-  const data = await fetchTmdbJson(endpoint, params);
+  const data = await fetchTmdbJson(endpoint, params, fetchImpl, signal);
   return data && Array.isArray(data.results) ? data.results : null;
 }
 
@@ -507,15 +524,21 @@ export async function fetchTmdbMovieDetails(
 
 export async function searchTmdbMulti(
   query: string,
-  linksMap: Record<number, MovieLinkRecord> = {}
+  linksMap: Record<number, MovieLinkRecord> = {},
+  options?: { signal?: AbortSignal; fetchImpl?: typeof fetch }
 ): Promise<MovieItem[]> {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  const results = await fetchTmdbEndpoint('/search/multi', {
-    query: trimmed,
-    include_adult: 'false',
-  });
+  const results = await fetchTmdbEndpoint(
+    '/search/multi',
+    {
+      query: trimmed,
+      include_adult: 'false',
+    },
+    options?.signal,
+    options?.fetchImpl
+  );
 
   if (results && results.length > 0) {
     return results
@@ -664,8 +687,9 @@ export async function fetchMediaDetails(movie: MovieItem): Promise<MovieItem> {
 
 export async function searchMovies(
   query: string,
-  linksMap: Record<number, MovieLinkRecord> = {}
+  linksMap: Record<number, MovieLinkRecord> = {},
+  options?: { signal?: AbortSignal; fetchImpl?: typeof fetch }
 ): Promise<MovieItem[]> {
-  return searchTmdbMulti(query, linksMap);
+  return searchTmdbMulti(query, linksMap, options);
 }
 

@@ -12,6 +12,7 @@ import {
   Maximize2,
   RefreshCw,
   Save,
+  Share2,
   Shield,
   ShieldCheck,
   ShieldOff,
@@ -30,21 +31,32 @@ import {
 } from '../types/movie';
 import {
   AlternateLanguageStream,
+  auditStickyAncestors,
   buildVidSrcAdBlockCssRules,
   formatPlayerTimecode,
   getCleanIframeAttributes,
   getFullscreenPlayerConfig,
+  getStickyPlayerWrapperClassName,
   getVidSrcPlayerIframeAttributes,
   installVidSrcNetworkAdInterceptor,
   isVidSrcProviderUrl,
   lockScreenOrientationSafely,
   PLAYABLE_HD_STREAMS_POOL,
   resolvePlaybackPlan,
+  resolveStickyPlayerPositionStrategy,
+  shouldEnableStickyPlayerOnScroll,
+  STICKY_EMBED_SCROLL_THRESHOLD_PX,
+  supportsCssStickyPosition,
   VerifiedAudioTrack,
 } from '../utils/streamResolver';
 import {
+  detectAppPlatform,
+  shareMovieOrSeriesLink,
+} from '../services/platformTrialReferralService';
+import {
   checkStreamSourceHealth,
   evaluatePlayerAudioCapability,
+  probeEmbedProviderHealthWithCache,
   SourceAvailabilityStatus,
   switchEmbeddedAudioTrackSafely,
 } from '../services/streamSourceManager';
@@ -283,8 +295,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   }, [adBlockToast]);
 
   // Direct HTML5 & HLS Player State (No fake 596s default duration!)
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const stickyWrapperRef = useRef<HTMLDivElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
+  const [hasPlaybackStarted, setHasPlaybackStarted] = useState<boolean>(false);
+  const [isScrolledPastThreshold, setIsScrolledPastThreshold] = useState<boolean>(false);
+  const [isEmbedIframeLoaded, setIsEmbedIframeLoaded] = useState<boolean>(false);
+  const [hasBrokenStickyAncestor, setHasBrokenStickyAncestor] = useState<boolean>(false);
+  const [stickyFallbackHeight, setStickyFallbackHeight] = useState<number>(260);
+  const [shareStatusNotice, setShareStatusNotice] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -469,9 +489,31 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, []);
 
-  // Load link_health rows from Supabase on mount
+  // Fix 4: Load link_health rows from Supabase AND run 5-minute cached CORS-safe health probes for embed providers
   useEffect(() => {
     let active = true;
+
+    // 1. Run 5-minute cached health probes (cors-proxy -> no-cors fallback) for VidSrc.sh & 2Embed
+    Promise.all(
+      plan.embedServers.map((srv) =>
+        probeEmbedProviderHealthWithCache({ id: srv.id, url: srv.url })
+      )
+    )
+      .then((probeResults) => {
+        if (!active) return;
+        setSourceHealthMap((prev) => {
+          const next = { ...prev };
+          for (const res of probeResults) {
+            if (!next[res.id] || next[res.id] === 'checking') {
+              next[res.id] = res.status;
+            }
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
+
+    // 2. Merge any explicit link_health rows from Supabase
     fetchLinkHealthRowsForTmdb(movie.id)
       .then((rows) => {
         if (!active || rows.length === 0) return;
@@ -666,6 +708,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         duration: parsed.duration,
       });
 
+      if (parsed.event === 'play' || parsed.event === 'timeupdate' || parsed.currentTime > 0) {
+        setHasPlaybackStarted(true);
+      }
+
       setVidsrcWatchProgress({
         currentTime: Math.round(parsed.currentTime),
         duration: Math.round(parsed.duration),
@@ -687,6 +733,44 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [movie, selectedSeason, selectedEpisode, reportPlaybackProgress]);
 
+  // Cross-origin iframe click/focus detection (works for both VidSrc.sh and 2Embed.cc even without postMessage)
+  useEffect(() => {
+    const handleWindowBlurForIframe = () => {
+      try {
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl.tagName.toUpperCase() === 'IFRAME') {
+          setHasPlaybackStarted(true);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('blur', handleWindowBlurForIframe);
+    return () => window.removeEventListener('blur', handleWindowBlurForIframe);
+  }, []);
+
+  // Audit parent hierarchy for transform/filter/overflow:hidden & measure wrapper height for JS stickybits fallback
+  useEffect(() => {
+    const wrapperEl = stickyWrapperRef.current;
+    if (!wrapperEl) return;
+
+    const audit = auditStickyAncestors(wrapperEl, scrollContainerRef.current);
+    setHasBrokenStickyAncestor(audit.hasBreakingAncestor);
+
+    const updateHeight = () => {
+      if (wrapperEl.offsetHeight > 0) {
+        setStickyFallbackHeight(wrapperEl.offsetHeight);
+      }
+    };
+    updateHeight();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(updateHeight);
+      ro.observe(wrapperEl);
+      return () => ro.disconnect();
+    }
+  }, [playerMode, isFullscreen]);
+
   const handleRunSourceHealthChecks = async () => {
     setIsCheckingHealth(true);
     const nextMap: Record<string, SourceAvailabilityStatus> = {};
@@ -695,12 +779,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
     setSourceHealthMap({ ...nextMap });
 
-    const results = await Promise.all(
-      plan.managedSources.map((src) => checkStreamSourceHealth(src, 3500))
-    );
+    const [managedResults, embedProbeResults] = await Promise.all([
+      Promise.all(plan.managedSources.map((src) => checkStreamSourceHealth(src, 3500))),
+      Promise.all(
+        plan.embedServers.map((srv) =>
+          probeEmbedProviderHealthWithCache(
+            { id: srv.id, url: srv.url },
+            { forceRefresh: true, timeoutMs: 3500 }
+          )
+        )
+      ),
+    ]);
+
     const finalMap: Record<string, SourceAvailabilityStatus> = {};
-    for (const r of results) {
+    for (const r of managedResults) {
       finalMap[r.id] = r.availabilityStatus;
+    }
+    for (const ep of embedProbeResults) {
+      finalMap[ep.id] = ep.status;
     }
     setSourceHealthMap(finalMap);
     setIsCheckingHealth(false);
@@ -776,12 +872,17 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       if (videoEl.paused) {
         videoEl.play().catch(() => {});
         setIsPlaying(true);
+        setHasPlaybackStarted(true);
       } else {
         videoEl.pause();
         setIsPlaying(false);
       }
     } else {
-      setIsPlaying((prev) => !prev);
+      setIsPlaying((prev) => {
+        const next = !prev;
+        if (next) setHasPlaybackStarted(true);
+        return next;
+      });
     }
   };
 
@@ -990,6 +1091,43 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       : `${activeQualityLabel.toUpperCase()} ${movie.title}`;
 
   const fsConfig = getFullscreenPlayerConfig(isFullscreen, fitMode, areControlsVisible);
+  const isAndroidPlatform = detectAppPlatform() === 'Android';
+  const stickyFlagEnabled = (() => {
+    try {
+      if (String((import.meta as any).env?.VITE_ENABLE_STICKY_PLAYER || '') === 'true') {
+        return true;
+      }
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('stickyPlayer') === '1' || params.get('sticky') === '1') {
+          return true;
+        }
+        if (window.localStorage?.getItem('cinebox_sticky_player_v1') === 'true') {
+          return true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+  const cssStickySupported = supportsCssStickyPosition();
+  const stickyConfigInput = {
+    isFullscreen,
+    hasPlaybackStarted,
+    isAndroidPlatform,
+    stickyFlagEnabled,
+    cssStickySupported,
+    hasBrokenStickyAncestor,
+    playerMode,
+    isScrolledPastThreshold,
+  };
+
+  const isStickyPlayerOnScroll = shouldEnableStickyPlayerOnScroll(stickyConfigInput);
+  const stickyStrategy = resolveStickyPlayerPositionStrategy(stickyConfigInput);
+  const stickyPlayerWrapperClass = getStickyPlayerWrapperClassName(stickyConfigInput);
+
   const subtitleTracksList = sanitizeSubtitleTracksList(movieLink?.subtitles || []);
   const effectiveResumeSeconds =
     savedResumePosition > 0
@@ -1000,6 +1138,25 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   return (
     <div
+      ref={scrollContainerRef}
+      data-testid="video-player-modal-scroll-container"
+      onScroll={(e) => {
+        const scrollTop = e.currentTarget.scrollTop;
+        const pastThreshold = scrollTop > STICKY_EMBED_SCROLL_THRESHOLD_PX;
+        if (pastThreshold !== isScrolledPastThreshold) {
+          setIsScrolledPastThreshold(pastThreshold);
+        }
+        // In embed/pak-drama/trailer modes, once the iframe has loaded and the user scrolls past the threshold,
+        // activate sticky playback state without false positives on mere clicks.
+        if (
+          !hasPlaybackStarted &&
+          isEmbedIframeLoaded &&
+          playerMode !== 'direct' &&
+          pastThreshold
+        ) {
+          setHasPlaybackStarted(true);
+        }
+      }}
       className="fixed inset-0 z-50 bg-[#000000] text-slate-100 overflow-y-auto border-0 outline-none"
       style={{ backgroundColor: '#000000' }}
       role="dialog"
@@ -1013,11 +1170,39 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       )}
 
       <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#000000] border-0 outline-none">
+        {/* JS Fallback Spacer (stickybits-style) ONLY when CSS.supports('position', 'sticky') is false */}
+        {stickyStrategy === 'js-fixed-fallback' && (
+          <div
+            data-testid="sticky-player-js-fallback-spacer"
+            style={{ height: `${stickyFallbackHeight}px` }}
+            className="w-full shrink-0 bg-[#000000]"
+            aria-hidden="true"
+          />
+        )}
+
+        {/* STICKY VIDEO PLAYER WRAPPER (CSS position: sticky; top: 0; z-index: 40 on Android/Capacitor after playback starts) */}
+        <div
+          ref={stickyWrapperRef}
+          data-testid="sticky-video-player-wrapper"
+          data-sticky-active={isStickyPlayerOnScroll ? 'true' : 'false'}
+          data-sticky-strategy={stickyStrategy}
+          onTouchStartCapture={() => {
+            if (!hasPlaybackStarted) {
+              setHasPlaybackStarted(true);
+            }
+          }}
+          onPointerDownCapture={() => {
+            if (!hasPlaybackStarted) {
+              setHasPlaybackStarted(true);
+            }
+          }}
+          className={stickyPlayerWrapperClass}
+        >
         {/* TOP PLAYER HEADER FOR EMBED / PAK-DRAMA / TRAILER MODES */}
         {!isFullscreen && playerMode === 'embed' && (
           <div
             data-testid="player-top-header-bar"
-            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
+            className="flex items-center justify-between gap-2 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
           >
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <button
@@ -1204,12 +1389,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           ref={playerContainerRef}
           data-testid="video-player-surface-container"
           onClick={() => {
+            if (!hasPlaybackStarted) {
+              setHasPlaybackStarted(true);
+            }
             if (isFullscreen) {
               handleWakeOrToggleControls(false);
             }
           }}
           className={fsConfig.containerClassName}
-          style={{ filter: `brightness(${brightness}%)`, backgroundColor: '#000000' }}
+          style={{
+            filter: brightness === 100 ? undefined : `brightness(${brightness}%)`,
+            backgroundColor: '#000000',
+          }}
         >
           {isFullscreen && !areControlsVisible && (
             <div
@@ -1268,6 +1459,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 key={movie.youtubeKey}
                 src={`https://www.youtube.com/embed/${movie.youtubeKey}?autoplay=1&rel=0&modestbranding=1`}
                 title={`${movie.title} Official TMDb Video`}
+                onLoad={() => setIsEmbedIframeLoaded(true)}
                 className="w-full h-full border-0 bg-[#000000]"
                 style={{ backgroundColor: '#000000' }}
                 allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
@@ -1288,6 +1480,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   key={pakDramaStreams[activePakStreamIdx].embedUrl}
                   data-testid="pak-drama-iframe-player"
                   src={pakDramaStreams[activePakStreamIdx].embedUrl}
+                  onLoad={() => setIsEmbedIframeLoaded(true)}
                   allow="autoplay; fullscreen; picture-in-picture"
                   allowFullScreen
                   title={pakDramaStreams[activePakStreamIdx].title}
@@ -1377,6 +1570,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 data-adblock-policy={vidsrcIframeAttrs.sandbox || 'none'}
                 src={cleanIframeAttrs.src}
                 allowFullScreen={cleanIframeAttrs.allowFullScreen}
+                onLoad={() => setIsEmbedIframeLoaded(true)}
                 onError={handleTriggerAutoFailover}
                 title={cleanIframeAttrs.title}
                 className="w-full h-full border-0 bg-[#000000]"
@@ -1391,8 +1585,15 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 data-testid="native-html5-video"
                 playsInline
                 poster={movie.backdropUrl}
+                onPlay={() => {
+                  setIsPlaying(true);
+                  setHasPlaybackStarted(true);
+                }}
                 onTimeUpdate={(e) => {
                   const v = e.currentTarget;
+                  if (v.currentTime > 0 && !hasPlaybackStarted) {
+                    setHasPlaybackStarted(true);
+                  }
                   setCurrentTime(v.currentTime);
                   if (Number.isFinite(v.duration) && v.duration > 0) {
                     setDuration(v.duration);
@@ -1600,6 +1801,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               />
             </>
           )}
+        </div>
         </div>
 
         {/* ===================================================================
@@ -2095,28 +2297,61 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => onToggleWatchlist(movie)}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 min-h-[44px] shrink-0 border transition-colors ${
-                    isInWatchlist
-                      ? 'bg-[#10d97b]/15 border-[#10d97b] text-[#10d97b]'
-                      : 'bg-slate-900 border-slate-700 text-slate-200 hover:border-slate-500'
-                  }`}
-                >
-                  {isInWatchlist ? (
-                    <>
-                      <BookmarkCheck className="w-4 h-4" />
-                      <span>In Watchlist</span>
-                    </>
-                  ) : (
-                    <>
-                      <Bookmark className="w-4 h-4" />
-                      <span>+ Watchlist</span>
-                    </>
-                  )}
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="share-movie-btn"
+                    onClick={async () => {
+                      const res = await shareMovieOrSeriesLink({
+                        tmdbId: movie.id,
+                        mediaType: movie.mediaType,
+                        title: movie.title,
+                      });
+                      setShareStatusNotice(
+                        res.shared
+                          ? `Shared: ${res.shareUrl}`
+                          : `Link Copied: ${res.shareUrl}`
+                      );
+                      setTimeout(() => setShareStatusNotice(null), 3500);
+                    }}
+                    className="px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 min-h-[44px] shrink-0 bg-slate-900 border border-slate-700 text-slate-200 hover:border-[#10d97b]/60 hover:text-[#10d97b] transition-colors"
+                  >
+                    <Share2 className="w-4 h-4" />
+                    <span>Share</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onToggleWatchlist(movie)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 min-h-[44px] shrink-0 border transition-colors ${
+                      isInWatchlist
+                        ? 'bg-[#10d97b]/15 border-[#10d97b] text-[#10d97b]'
+                        : 'bg-slate-900 border-slate-700 text-slate-200 hover:border-slate-500'
+                    }`}
+                  >
+                    {isInWatchlist ? (
+                      <>
+                        <BookmarkCheck className="w-4 h-4" />
+                        <span>In Watchlist</span>
+                      </>
+                    ) : (
+                      <>
+                        <Bookmark className="w-4 h-4" />
+                        <span>+ Watchlist</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
+
+              {shareStatusNotice && (
+                <div
+                  data-testid="share-movie-status-notice"
+                  className="px-3 py-2 rounded-xl bg-emerald-950/60 border border-[#10d97b]/40 text-xs font-semibold text-[#10d97b]"
+                >
+                  {shareStatusNotice}
+                </div>
+              )}
 
               <p className="text-sm text-slate-300 leading-relaxed">{movie.overview}</p>
 

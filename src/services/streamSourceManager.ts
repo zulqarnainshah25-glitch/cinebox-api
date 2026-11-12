@@ -1,3 +1,4 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import {
   AlternateLanguageStream,
   AudioSourceType,
@@ -8,6 +9,7 @@ import {
   StreamFormat,
 } from '../types/movie';
 import { sanitizeAlternateStreamsList, sanitizeSafeUrl } from '../utils/securityValidator';
+import { buildCorsProxyHeaders, buildProxiedUrl } from './movieBoxDirectApi';
 
 export type { SourceAvailabilityStatus };
 
@@ -1142,3 +1144,364 @@ export function selectNextFallbackSource(
   );
   return candidates[0] || null;
 }
+
+/**
+ * Fix 4: Source Availability & Health Check (VidSrc.sh & 2Embed)
+ * - 5-minute TTL cache (`EMBED_HEALTH_CACHE_TTL_MS = 5 * 60 * 1000 = 300_000` ms) to avoid excessive requests.
+ * - Why `mode: 'no-cors'` MUST NOT return `'available'` (Green):
+ *   In the Fetch specification, `fetch(origin, { mode: 'no-cors' })` returns an `opaque` response
+ *   (`res.type === 'opaque'`, `res.status === 0`) for ANY HTTP response from the server, including
+ *   `404 Not Found`, `500 Internal Server Error`, or `502 Bad Gateway`. Because the status code is
+ *   inaccessible in `no-cors` mode, claiming `'available'` (Green = `likely working`) from an opaque
+ *   response produces false positives when the server is returning 4xx/5xx errors.
+ * - Three-Stage Status-Aware Probe Architecture:
+ *   1. Stage 1A — Native Android `CapacitorHttp.request` (`probeMode: 'capacitor-http'`):
+ *      On Capacitor Android (`Capacitor.isNativePlatform()`), executes a native HTTP `GET` request with
+ *      `responseType: 'text'` (avoiding `HEAD`, which triggers a known Android `HttpURLConnection` /
+ *      `CapacitorHttp` `FileNotFoundException` bug) outside the WebView CORS sandbox and reads only the
+ *      real HTTP status code (`200–399` -> `'available'` Green; `>= 400` -> `'unavailable'` Red).
+ *   2. Stage 1B — Server-Side Supabase CORS Proxy (`probeMode: 'cors-proxy'`):
+ *      Calls `cors-proxy?target={providerOrigin}` (enabled by default), which fetches the provider server-side
+ *      and returns the true upstream HTTP status code (`200–399` -> `'available'` Green; `404/5xx` -> `'unavailable'` Red).
+ *   3. Stage 2 — Browser `mode: 'no-cors'` Fallback (`probeMode: 'no-cors'`):
+ *      Used ONLY if both Stage 1A and Stage 1B are unreachable/disabled.
+ *      - If `res.type === 'opaque'` (`res.status === 0`), returns `status: 'unknown'`, `dotColor: 'yellow'`,
+ *        `label: 'unknown'` (never false-positive Green).
+ *      - If DNS/TLS/network fails or times out, returns `status: 'unavailable'`, `dotColor: 'red'`, `label: 'failed'`.
+ * - Never claims a source is "verified playable" based on TMDB metadata alone (`validationStatus: 'unverified-external'`).
+ */
+export const EMBED_HEALTH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const EMBED_HEALTH_STORAGE_KEY = 'cinebox_embed_provider_health_cache_v1';
+
+export interface CachedEmbedHealthEntry {
+  origin: string;
+  status: 'available' | 'unknown' | 'unavailable';
+  dotColor: 'green' | 'yellow' | 'red';
+  label: 'likely working' | 'unknown' | 'failed';
+  checkedAt: number;
+  latencyMs: number;
+  probeMode: 'capacitor-http' | 'cors-proxy' | 'no-cors' | 'cache';
+  httpStatusCode?: number | null;
+  validationStatus: 'unverified-external';
+}
+
+const embedHealthMemoryCache = new Map<string, CachedEmbedHealthEntry>();
+
+export function extractEmbedProviderOrigin(rawUrl: string | null | undefined): string | null {
+  const safe = sanitizeSafeUrl(rawUrl);
+  if (!safe) return null;
+  try {
+    const parsed = new URL(safe);
+    return `${parsed.protocol}//${parsed.host}`.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function loadEmbedHealthStorageMap(): Record<string, CachedEmbedHealthEntry> {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(EMBED_HEALTH_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return {};
+}
+
+function saveEmbedHealthStorageEntry(entry: CachedEmbedHealthEntry): void {
+  embedHealthMemoryCache.set(entry.origin, entry);
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const map = loadEmbedHealthStorageMap();
+      map[entry.origin] = entry;
+      window.localStorage.setItem(EMBED_HEALTH_STORAGE_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearEmbedProviderHealthCache(): void {
+  embedHealthMemoryCache.clear();
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(EMBED_HEALTH_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function getCachedEmbedProviderHealth(
+  urlOrOrigin: string,
+  nowMs: number = Date.now(),
+  ttlMs: number = EMBED_HEALTH_CACHE_TTL_MS
+): CachedEmbedHealthEntry | null {
+  const origin = extractEmbedProviderOrigin(urlOrOrigin);
+  if (!origin) return null;
+
+  const memEntry = embedHealthMemoryCache.get(origin);
+  if (memEntry && nowMs - memEntry.checkedAt < ttlMs) {
+    return { ...memEntry, probeMode: 'cache' };
+  }
+
+  const storedMap = loadEmbedHealthStorageMap();
+  const storedEntry = storedMap[origin];
+  if (storedEntry && nowMs - storedEntry.checkedAt < ttlMs) {
+    embedHealthMemoryCache.set(origin, storedEntry);
+    return { ...storedEntry, probeMode: 'cache' };
+  }
+
+  return null;
+}
+
+export async function probeEmbedProviderHealthWithCache(
+  source: { id: string; url: string },
+  options?: {
+    timeoutMs?: number;
+    nowMs?: number;
+    ttlMs?: number;
+    forceRefresh?: boolean;
+    useCorsProxy?: boolean;
+    useCapacitorNativeHttp?: boolean;
+    customCapacitorHttp?: {
+      request: (opts: {
+        url: string;
+        method?: string;
+        responseType?: 'text' | 'json' | 'blob' | 'arraybuffer' | 'document';
+        connectTimeout?: number;
+        readTimeout?: number;
+      }) => Promise<{ status: number; data?: unknown }>;
+    };
+    customFetch?: typeof fetch;
+  }
+): Promise<CachedEmbedHealthEntry & { id: string; cached: boolean }> {
+  const nowMs = options?.nowMs ?? Date.now();
+  const ttlMs = options?.ttlMs ?? EMBED_HEALTH_CACHE_TTL_MS;
+  const timeoutMs = options?.timeoutMs ?? 4000;
+  const fetchFn = options?.customFetch || fetch;
+
+  const origin = extractEmbedProviderOrigin(source.url);
+  if (!origin || !origin.startsWith('https://')) {
+    return {
+      id: source.id,
+      origin: origin || '',
+      status: 'unavailable',
+      dotColor: 'red',
+      label: 'failed',
+      checkedAt: nowMs,
+      latencyMs: 0,
+      probeMode: 'no-cors',
+      httpStatusCode: null,
+      validationStatus: 'unverified-external',
+      cached: false,
+    };
+  }
+
+  // 1. Check 5-minute TTL cache first
+  if (!options?.forceRefresh) {
+    const cached = getCachedEmbedProviderHealth(origin, nowMs, ttlMs);
+    if (cached) {
+      return {
+        ...cached,
+        id: source.id,
+        cached: true,
+      };
+    }
+  }
+
+  const startMs = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const isNativeAndroid =
+    options?.useCapacitorNativeHttp !== undefined
+      ? options.useCapacitorNativeHttp
+      : Boolean(options?.customCapacitorHttp) ||
+        (() => {
+          try {
+            return Boolean(Capacitor?.isNativePlatform?.());
+          } catch {
+            return false;
+          }
+        })();
+
+  const shouldUseCorsProxy = options?.useCorsProxy ?? true;
+
+  try {
+    // Stage 1A: Native Android CapacitorHttp probe (bypasses WebView CORS and returns true HTTP status code).
+    // Uses `method: 'GET'` + `responseType: 'text'` instead of `HEAD` because Android's HttpURLConnection
+    // in CapacitorHttp has a known `java.io.FileNotFoundException` bug on `HEAD` requests.
+    if (isNativeAndroid) {
+      try {
+        const capHttp = options?.customCapacitorHttp || CapacitorHttp;
+        if (capHttp && typeof capHttp.request === 'function') {
+          const capRes = await capHttp.request({
+            url: origin,
+            method: 'GET',
+            responseType: 'text',
+            connectTimeout: timeoutMs,
+            readTimeout: timeoutMs,
+          });
+          if (typeof capRes?.status === 'number' && capRes.status > 0) {
+            clearTimeout(timer);
+            const isOk = capRes.status >= 200 && capRes.status < 400;
+            const entry: CachedEmbedHealthEntry = {
+              origin,
+              status: isOk ? 'available' : 'unavailable',
+              dotColor: isOk ? 'green' : 'red',
+              label: isOk ? 'likely working' : 'failed',
+              checkedAt: nowMs,
+              latencyMs: Date.now() - startMs,
+              probeMode: 'capacitor-http',
+              httpStatusCode: capRes.status,
+              validationStatus: 'unverified-external',
+            };
+            saveEmbedHealthStorageEntry(entry);
+            return { ...entry, id: source.id, cached: false };
+          }
+        }
+      } catch {
+        // Fall through to Stage 1B (cors-proxy) if native HTTP plugin call failed
+      }
+    }
+
+    // Stage 1B: Server-Side Supabase CORS Proxy (`cors-proxy?target={origin}`)
+    // Inspects the real upstream HTTP status code on the server (200-399 -> Green, 4xx/5xx -> Red)
+    if (shouldUseCorsProxy) {
+      try {
+        const proxiedUrl = buildProxiedUrl(origin);
+        const proxyHeaders = buildCorsProxyHeaders(proxiedUrl);
+        const proxyRes = await fetchFn(proxiedUrl, {
+          method: 'GET',
+          headers: proxyHeaders,
+          signal: controller.signal,
+        });
+        try {
+          await proxyRes.body?.cancel?.();
+        } catch {
+          // ignore
+        }
+
+        if (proxyRes.status >= 200 && proxyRes.status < 400) {
+          clearTimeout(timer);
+          const entry: CachedEmbedHealthEntry = {
+            origin,
+            status: 'available',
+            dotColor: 'green',
+            label: 'likely working',
+            checkedAt: nowMs,
+            latencyMs: Date.now() - startMs,
+            probeMode: 'cors-proxy',
+            httpStatusCode: proxyRes.status,
+            validationStatus: 'unverified-external',
+          };
+          saveEmbedHealthStorageEntry(entry);
+          return { ...entry, id: source.id, cached: false };
+        }
+
+        // If the target provider itself returned 404/500/502/503 (not a 401/403 from Supabase proxy auth)
+        if (proxyRes.status >= 400 && proxyRes.status !== 401 && proxyRes.status !== 403) {
+          clearTimeout(timer);
+          const entry: CachedEmbedHealthEntry = {
+            origin,
+            status: 'unavailable',
+            dotColor: 'red',
+            label: 'failed',
+            checkedAt: nowMs,
+            latencyMs: Date.now() - startMs,
+            probeMode: 'cors-proxy',
+            httpStatusCode: proxyRes.status,
+            validationStatus: 'unverified-external',
+          };
+          saveEmbedHealthStorageEntry(entry);
+          return { ...entry, id: source.id, cached: false };
+        }
+      } catch (proxyErr: any) {
+        if (proxyErr?.name === 'AbortError') {
+          throw proxyErr;
+        }
+        // Fall through to Stage 2 (`mode: 'no-cors'`) if proxy was unreachable
+      }
+    }
+
+    // Stage 2: Browser `mode: 'no-cors'` Fallback
+    // CRITICAL: An opaque response (`type === 'opaque'`, `status === 0`) only proves DNS/TLS reachability;
+    // it CANNOT distinguish HTTP 200 from HTTP 404/500. Therefore, opaque responses MUST be marked
+    // as `'unknown'` (Yellow), NEVER `'available'` (Green).
+    const noCorsRes = await fetchFn(origin, {
+      method: 'GET',
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (noCorsRes.type !== 'opaque' && noCorsRes.status >= 200 && noCorsRes.status < 400) {
+      const entry: CachedEmbedHealthEntry = {
+        origin,
+        status: 'available',
+        dotColor: 'green',
+        label: 'likely working',
+        checkedAt: nowMs,
+        latencyMs: Date.now() - startMs,
+        probeMode: 'no-cors',
+        httpStatusCode: noCorsRes.status,
+        validationStatus: 'unverified-external',
+      };
+      saveEmbedHealthStorageEntry(entry);
+      return { ...entry, id: source.id, cached: false };
+    }
+
+    if (noCorsRes.type === 'opaque' || noCorsRes.status === 0) {
+      const entry: CachedEmbedHealthEntry = {
+        origin,
+        status: 'unknown',
+        dotColor: 'yellow',
+        label: 'unknown',
+        checkedAt: nowMs,
+        latencyMs: Date.now() - startMs,
+        probeMode: 'no-cors',
+        httpStatusCode: null,
+        validationStatus: 'unverified-external',
+      };
+      saveEmbedHealthStorageEntry(entry);
+      return { ...entry, id: source.id, cached: false };
+    }
+
+    const entry: CachedEmbedHealthEntry = {
+      origin,
+      status: 'unavailable',
+      dotColor: 'red',
+      label: 'failed',
+      checkedAt: nowMs,
+      latencyMs: Date.now() - startMs,
+      probeMode: 'no-cors',
+      httpStatusCode: noCorsRes.status || null,
+      validationStatus: 'unverified-external',
+    };
+    saveEmbedHealthStorageEntry(entry);
+    return { ...entry, id: source.id, cached: false };
+  } catch {
+    clearTimeout(timer);
+    const entry: CachedEmbedHealthEntry = {
+      origin,
+      status: 'unavailable',
+      dotColor: 'red',
+      label: 'failed',
+      checkedAt: nowMs,
+      latencyMs: Date.now() - startMs,
+      probeMode: 'no-cors',
+      httpStatusCode: null,
+      validationStatus: 'unverified-external',
+    };
+    saveEmbedHealthStorageEntry(entry);
+    return { ...entry, id: source.id, cached: false };
+  }
+}
+

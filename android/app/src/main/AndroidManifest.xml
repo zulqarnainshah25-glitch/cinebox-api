@@ -16,6 +16,9 @@
         android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
+    <!-- Fix 5: In-App APK Auto-Update Installation Permission (Never silent; requires user action) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:allowBackup="false"
         android:fullBackupContent="false"

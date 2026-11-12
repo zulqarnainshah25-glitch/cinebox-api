@@ -26,14 +26,19 @@ export function formatUserFriendlySourceLabel(indexZeroBased: number): string {
 }
 
 export interface SourceHealthBadgeInfo {
-  status: 'ok' | 'slow' | 'down';
-  label: 'OK' | 'slow' | 'down';
+  status: 'ok' | 'slow' | 'unknown' | 'down';
+  label: 'OK' | 'slow' | 'unknown' | 'down';
+  dotColor: 'green' | 'yellow' | 'red';
+  colorMeaning: 'likely working' | 'unknown' | 'failed';
   dotClass: string;
   badgeClass: string;
 }
 
 /**
- * Maps internal availability or `link_health` status to a clean status dot (`OK` / `slow` / `down`).
+ * Fix 4: Maps internal availability or `link_health` status to a colored status dot:
+ * - Green (`bg-emerald-400`, `OK` / `likely working`) when HTTP probe succeeded (`'available'` / `'ok'`)
+ * - Yellow (`bg-amber-400`, `unknown` / `slow`) when not yet checked (`undefined` / `'unknown'` / `'checking'`) or slow (`'timeout'` / `'slow'`)
+ * - Red (`bg-rose-500`, `down` / `failed`) when HTTP probe failed or timed out (`'unavailable'` / `'down'`)
  */
 export function resolveSourceHealthDotStatus(
   rawStatus?: SourceAvailabilityStatus | 'ok' | 'slow' | 'down' | 'unknown' | null
@@ -42,23 +47,39 @@ export function resolveSourceHealthDotStatus(
     return {
       status: 'down',
       label: 'down',
+      dotColor: 'red',
+      colorMeaning: 'failed',
       dotClass: 'bg-rose-500',
       badgeClass: 'text-rose-300 bg-rose-950/80 border-rose-500/40',
     };
   }
-  if (rawStatus === 'timeout' || rawStatus === 'checking' || rawStatus === 'slow') {
+  if (rawStatus === 'timeout' || rawStatus === 'slow') {
     return {
       status: 'slow',
       label: 'slow',
+      dotColor: 'yellow',
+      colorMeaning: 'unknown',
       dotClass: 'bg-amber-400',
       badgeClass: 'text-amber-200 bg-amber-950/80 border-amber-500/40',
     };
   }
+  if (rawStatus === 'available' || rawStatus === 'ok') {
+    return {
+      status: 'ok',
+      label: 'OK',
+      dotColor: 'green',
+      colorMeaning: 'likely working',
+      dotClass: 'bg-emerald-400',
+      badgeClass: 'text-emerald-200 bg-emerald-950/80 border-emerald-500/40',
+    };
+  }
   return {
-    status: 'ok',
-    label: 'OK',
-    dotClass: 'bg-emerald-400',
-    badgeClass: 'text-emerald-200 bg-emerald-950/80 border-emerald-500/40',
+    status: 'unknown',
+    label: 'unknown',
+    dotColor: 'yellow',
+    colorMeaning: 'unknown',
+    dotClass: 'bg-amber-400',
+    badgeClass: 'text-amber-200 bg-amber-950/80 border-amber-500/40',
   };
 }
 

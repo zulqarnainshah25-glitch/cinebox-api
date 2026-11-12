@@ -1,5 +1,5 @@
 {
-  "version": "1.0.2",
-  "apk_url": "https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.2/app-release.apk",
-  "release_notes": "v1.0.2 Update: Fixed Mobile UI & Status Bar Safe-Area, Fullscreen Exit Button with Android Taskbar Blending, Edge-to-Edge #000000 Player, and Android-Only Update Popup."
+  "version": "1.0.3",
+  "apk_url": "https://github.com/zulqarnainshah25-glitch/cinebox-api/releases/download/v1.0.3/app-release.apk",
+  "release_notes": "v1.0.3 Update: Sticky Player, Live Search, AdBlocker, Real Watchlist, aur naye features."
 }

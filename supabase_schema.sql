@@ -145,39 +145,57 @@ ON CONFLICT (id) DO NOTHING;
 -- =============================================================================
 
 -- 5A. public.watch_history (Synced Continue Watching across devices)
+-- Movies use season = 0, episode = 0 (default); TV Series use season >= 1, episode >= 1.
+-- Uses a single `progress_seconds` column for playback resume position.
 CREATE TABLE IF NOT EXISTS public.watch_history (
   id BIGSERIAL PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   tmdb_id BIGINT NOT NULL,
-  media_type TEXT NOT NULL DEFAULT 'movie', -- 'movie' | 'tv'
-  season INTEGER NOT NULL DEFAULT 1,
-  episode INTEGER NOT NULL DEFAULT 1,
+  media_type TEXT NOT NULL DEFAULT 'movie' CHECK (media_type IN ('movie', 'tv')),
+  season INTEGER NOT NULL DEFAULT 0,
+  episode INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL DEFAULT '',
   poster_url TEXT DEFAULT '',
   backdrop_url TEXT DEFAULT '',
-  current_time_seconds NUMERIC NOT NULL DEFAULT 0,
-  duration_seconds NUMERIC NOT NULL DEFAULT 0,
+  progress_seconds INTEGER NOT NULL DEFAULT 0,
+  duration_seconds INTEGER NOT NULL DEFAULT 0,
   watched_percent NUMERIC NOT NULL DEFAULT 0,
+  last_watched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (user_id, tmdb_id, media_type, season, episode)
 );
+
+-- Safe migration for existing databases
+ALTER TABLE IF EXISTS public.watch_history
+  ALTER COLUMN season SET DEFAULT 0,
+  ALTER COLUMN episode SET DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS progress_seconds INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS duration_seconds INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_watched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  DROP COLUMN IF EXISTS position_seconds;
 
 -- 5B. public.watchlist (Synced User Watchlist across devices)
 CREATE TABLE IF NOT EXISTS public.watchlist (
   id BIGSERIAL PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   tmdb_id BIGINT NOT NULL,
-  media_type TEXT NOT NULL DEFAULT 'movie',
+  media_type TEXT NOT NULL DEFAULT 'movie' CHECK (media_type IN ('movie', 'tv')),
   title TEXT NOT NULL DEFAULT '',
+  poster_path TEXT NOT NULL DEFAULT '',
   poster_url TEXT DEFAULT '',
   backdrop_url TEXT DEFAULT '',
   release_year TEXT DEFAULT '',
   rating NUMERIC DEFAULT 0,
   language TEXT DEFAULT '',
   genres JSONB DEFAULT '[]'::jsonb,
+  added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (user_id, tmdb_id, media_type)
 );
+
+ALTER TABLE IF EXISTS public.watchlist
+  ADD COLUMN IF NOT EXISTS poster_path TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS added_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 -- 5C. public.audit_log (Immutable Admin & Moderator Audit Trail)
 CREATE TABLE IF NOT EXISTS public.audit_log (
@@ -492,3 +510,185 @@ CREATE POLICY "link_health_admin_write"
   TO authenticated
   USING (public.is_cinebox_moderator_or_admin())
   WITH CHECK (public.is_cinebox_moderator_or_admin());
+
+-- =============================================================================
+-- 10F. FIX 8: HARDENED USER FEEDBACK TABLE (Anti-Spam Rate Limit, Honeypot,
+--      Strict Email Regex & Server-Side btrim(message) Length Enforcement)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.user_feedback (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  type TEXT NOT NULL CHECK (type IN ('bug', 'feature', 'other')),
+  -- Server-side TRIM and length check (3 to 500 characters after btrim)
+  message TEXT NOT NULL CHECK (char_length(btrim(message)) BETWEEN 3 AND 500),
+  -- Strict email regex validation on the database server when email is provided
+  email TEXT DEFAULT NULL CHECK (
+    email IS NULL OR (
+      char_length(btrim(email)) BETWEEN 5 AND 120
+      AND btrim(email) ~* '^[A-Za-z0-9_%+-]+(\.[A-Za-z0-9_%+-]+)*@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,15}$'
+    )
+  ),
+  -- Anti-bot Honeypot field: must always remain empty string ''
+  website_honeypot TEXT NOT NULL DEFAULT '' CHECK (website_honeypot = ''),
+  -- Captures requester IP via PostgREST request.headers for server-side rate limiting
+  client_ip TEXT NOT NULL DEFAULT 'unknown',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewed', 'closed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_feedback_created_at
+  ON public.user_feedback (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_feedback_client_ip_created
+  ON public.user_feedback (client_ip, created_at DESC);
+
+-- Helper to extract client IP from PostgREST x-forwarded-for / cf-connecting-ip header
+CREATE OR REPLACE FUNCTION public.get_request_client_ip()
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  raw_headers text;
+  headers_json json;
+  forwarded_for text;
+  cf_ip text;
+BEGIN
+  raw_headers := current_setting('request.headers', true);
+  IF raw_headers IS NULL OR raw_headers = '' THEN
+    RETURN 'unknown';
+  END IF;
+  headers_json := raw_headers::json;
+  cf_ip := btrim(COALESCE(headers_json ->> 'cf-connecting-ip', ''));
+  IF cf_ip <> '' THEN
+    RETURN cf_ip;
+  END IF;
+  forwarded_for := btrim(split_part(COALESCE(headers_json ->> 'x-forwarded-for', ''), ',', 1));
+  IF forwarded_for <> '' THEN
+    RETURN forwarded_for;
+  END IF;
+  RETURN 'unknown';
+EXCEPTION WHEN OTHERS THEN
+  RETURN 'unknown';
+END;
+$$;
+
+-- Server-side Rate-Limit Function: Max 3 feedback submissions per 1 hour per IP, user_id, or email
+CREATE OR REPLACE FUNCTION public.check_feedback_rate_limit(
+  p_user_id UUID DEFAULT NULL,
+  p_email TEXT DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  req_ip text;
+  clean_email text;
+  recent_count integer;
+BEGIN
+  req_ip := public.get_request_client_ip();
+  clean_email := NULLIF(lower(btrim(COALESCE(p_email, ''))), '');
+
+  SELECT COUNT(*)
+    INTO recent_count
+    FROM public.user_feedback f
+   WHERE f.created_at > (now() - interval '1 hour')
+     AND (
+       (req_ip <> 'unknown' AND f.client_ip = req_ip)
+       OR (p_user_id IS NOT NULL AND f.user_id = p_user_id)
+       OR (clean_email IS NOT NULL AND lower(f.email) = clean_email)
+     );
+
+  RETURN COALESCE(recent_count, 0) < 3;
+END;
+$$;
+
+-- Server-side BEFORE INSERT OR UPDATE Trigger: enforces btrim(message), normalizes email, and stamps client_ip
+CREATE OR REPLACE FUNCTION public.trg_sanitize_user_feedback()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  NEW.message := btrim(COALESCE(NEW.message, ''));
+  IF char_length(NEW.message) < 3 OR char_length(NEW.message) > 500 THEN
+    RAISE EXCEPTION 'Feedback message must be between 3 and 500 characters after trimming.';
+  END IF;
+
+  NEW.email := NULLIF(lower(btrim(COALESCE(NEW.email, ''))), '');
+  IF NEW.email IS NOT NULL AND (
+    char_length(NEW.email) < 5
+    OR char_length(NEW.email) > 120
+    OR NEW.email !~* '^[A-Za-z0-9_%+-]+(\.[A-Za-z0-9_%+-]+)*@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,15}$'
+  ) THEN
+    RAISE EXCEPTION 'Invalid email format supplied for feedback.';
+  END IF;
+
+  NEW.website_honeypot := COALESCE(NEW.website_honeypot, '');
+  IF NEW.website_honeypot <> '' THEN
+    RAISE EXCEPTION 'Spam submission rejected by honeypot.';
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    NEW.client_ip := public.get_request_client_ip();
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sanitize_user_feedback_before_write ON public.user_feedback;
+CREATE TRIGGER sanitize_user_feedback_before_write
+  BEFORE INSERT OR UPDATE ON public.user_feedback
+  FOR EACH ROW
+  EXECUTE FUNCTION public.trg_sanitize_user_feedback();
+
+ALTER TABLE public.user_feedback ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE public.user_feedback FROM anon, authenticated;
+GRANT INSERT ON TABLE public.user_feedback TO anon, authenticated;
+GRANT SELECT, UPDATE, DELETE ON TABLE public.user_feedback TO authenticated;
+
+DROP POLICY IF EXISTS "Anyone can insert feedback" ON public.user_feedback;
+DROP POLICY IF EXISTS "user_feedback_rate_limited_insert" ON public.user_feedback;
+DROP POLICY IF EXISTS "Only admins can view feedback" ON public.user_feedback;
+DROP POLICY IF EXISTS "user_feedback_admin_select" ON public.user_feedback;
+DROP POLICY IF EXISTS "user_feedback_admin_update" ON public.user_feedback;
+DROP POLICY IF EXISTS "user_feedback_admin_delete" ON public.user_feedback;
+
+CREATE POLICY "user_feedback_rate_limited_insert"
+  ON public.user_feedback FOR INSERT
+  TO authenticated, anon
+  WITH CHECK (
+    website_honeypot = ''
+    AND char_length(btrim(message)) BETWEEN 3 AND 500
+    AND (
+      email IS NULL OR (
+        char_length(btrim(email)) BETWEEN 5 AND 120
+        AND btrim(email) ~* '^[A-Za-z0-9_%+-]+(\.[A-Za-z0-9_%+-]+)*@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,15}$'
+      )
+    )
+    AND public.check_feedback_rate_limit(user_id, email)
+  );
+
+CREATE POLICY "user_feedback_admin_select"
+  ON public.user_feedback FOR SELECT
+  TO authenticated
+  USING (public.is_cinebox_admin());
+
+CREATE POLICY "user_feedback_admin_update"
+  ON public.user_feedback FOR UPDATE
+  TO authenticated
+  USING (public.is_cinebox_admin())
+  WITH CHECK (public.is_cinebox_admin());
+
+CREATE POLICY "user_feedback_admin_delete"
+  ON public.user_feedback FOR DELETE
+  TO authenticated
+  USING (public.is_cinebox_admin());
+

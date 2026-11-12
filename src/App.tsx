@@ -33,15 +33,18 @@ import {
   WatchHistoryItem,
 } from './types/movie';
 import {
+  addWatchlistItemToSupabase,
   DEFAULT_APP_CONFIG,
   fetchAllAppUsers,
   fetchAllMovieLinks,
   fetchAppConfig,
   fetchMovieLinkByTmdbId,
+  fetchUserWatchlist,
   getActiveAdminSession,
   getCurrentDeviceUserId,
   getLoggedInUser,
   getUserAppSettings,
+  removeWatchlistItemFromSupabase,
   saveUserAppSettings,
   signOutSupabaseSession,
   syncFromRemoteDecentralizedNode,
@@ -96,9 +99,15 @@ import {
 } from './services/platformTrialReferralService';
 import {
   checkForInAppApkUpdate,
+  checkGitHubLatestReleaseUpdate,
   InAppUpdateCheckResult,
   isUnconfiguredPlaceholderApkUrl,
+  STARTUP_UPDATE_CHECK_DEBOUNCE_MS,
 } from './services/inAppUpdateService';
+import {
+  MIN_SEARCH_SUGGESTION_CHARS,
+  useSearchSuggestions,
+} from './hooks/useSearchSuggestions';
 
 type BottomNavTab = 'home' | 'search' | 'watchlist' | 'me';
 
@@ -177,6 +186,20 @@ export default function App() {
   const [playingOfflineItem, setPlayingOfflineItem] = useState<DownloadItem | null>(null);
   const [activeMovieLink, setActiveMovieLink] = useState<MovieLinkRecord | null>(null);
 
+  // Fix 6: Live Search Suggestions State (300ms debounce + AbortController + 10-min LRU cache)
+  const [isSearchDropdownOpen, setIsSearchDropdownOpen] = useState<boolean>(false);
+  const {
+    suggestions: liveSearchSuggestions,
+    isLoadingSuggestions,
+    suggestionsError,
+    fromCache: suggestionsFromCache,
+    clearSuggestions,
+  } = useSearchSuggestions(searchQuery, {
+    debounceMs: 300,
+    maxResults: 7,
+    linksMap: movieLinksMap,
+  });
+
   // Downloads, Watchlist & Watch History State
   const [downloads, setDownloads] = useState<DownloadItem[]>(() => getDownloadedItems());
   const [isOfflineSimulated, setIsOfflineSimulated] = useState<boolean>(false);
@@ -254,6 +277,20 @@ export default function App() {
     }, 4200);
   };
 
+  // Fix 7: Sync user's Watchlist from Supabase when logged in (or localStorage fallback when logged out)
+  useEffect(() => {
+    let active = true;
+    fetchUserWatchlist(loggedInUser?.id)
+      .then((res) => {
+        if (!active || res.items.length === 0) return;
+        setWatchlist(res.items);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [loggedInUser?.id]);
+
   // Subscribe to Download Manager updates and clean up timers on unmount
   useEffect(() => {
     const unsubscribe = subscribeDownloads(setDownloads);
@@ -282,14 +319,23 @@ export default function App() {
     }
     setMovieLinksMap(map);
 
-    // 4. In-App Update Checker (Android APK ONLY — never shows on Website 'Web')
+    // 4. Fix 5: In-App Update Checker (Debounced 3 seconds after startup; 6-hour throttle cache + static version.json fallback)
     const currentPlat = detectAppPlatform();
     if (currentPlat === 'Android') {
-      checkForInAppApkUpdate({ platform: 'Android', globalAppConfig: cfg }).then((res) => {
-        if (res.checked && res.updateAvailable) {
-          setUpdateCheckResult(res);
-        }
-      });
+      setTimeout(() => {
+        checkForInAppApkUpdate({ platform: 'Android', globalAppConfig: cfg }).then(
+          async (res) => {
+            if (res.checked && res.updateAvailable) {
+              setUpdateCheckResult(res);
+              return;
+            }
+            const ghRes = await checkGitHubLatestReleaseUpdate();
+            if (ghRes.checked && ghRes.updateAvailable) {
+              setUpdateCheckResult({ ...ghRes, platform: 'Android' });
+            }
+          }
+        );
+      }, STARTUP_UPDATE_CHECK_DEBOUNCE_MS);
     } else {
       setUpdateCheckResult(null);
     }
@@ -527,6 +573,7 @@ export default function App() {
   // Search Movies & TV Series via TMDb Catalog
   const handleSearchSubmit = async (e?: React.FormEvent, overrideQuery?: string) => {
     e?.preventDefault();
+    setIsSearchDropdownOpen(false);
     const rawTarget = overrideQuery !== undefined ? overrideQuery : searchQuery;
     if (overrideQuery !== undefined) {
       setSearchQuery(overrideQuery);
@@ -698,12 +745,27 @@ export default function App() {
 
   const handleToggleWatchlist = (movie: MovieItem) => {
     setWatchlist((prev) => {
-      const exists = prev.some((m) => m.id === movie.id);
-      const next = exists ? prev.filter((m) => m.id !== movie.id) : [movie, ...prev];
+      const exists = prev.some(
+        (m) => m.id === movie.id && (m.mediaType || 'movie') === (movie.mediaType || 'movie')
+      );
+      const next = exists
+        ? prev.filter(
+            (m) => !(m.id === movie.id && (m.mediaType || 'movie') === (movie.mediaType || 'movie'))
+          )
+        : [movie, ...prev];
       try {
         localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next));
       } catch {
         // ignore
+      }
+      if (exists) {
+        void removeWatchlistItemFromSupabase(
+          movie.id,
+          movie.mediaType === 'tv' ? 'tv' : 'movie',
+          loggedInUser?.id
+        );
+      } else {
+        void addWatchlistItemToSupabase(movie, loggedInUser?.id);
       }
       showToast(
         exists ? `Removed ${movie.title} from Watchlist` : `Added ${movie.title} to Watchlist`
@@ -802,21 +864,42 @@ export default function App() {
             />
           </button>
 
-          {/* Enlarged, Prominent Rounded Search Bar */}
-          <form onSubmit={handleSearchSubmit} className="flex-1 max-w-4xl">
+          {/* Enlarged, Prominent Rounded Search Bar with Live Debounced Suggestions Dropdown */}
+          <form onSubmit={handleSearchSubmit} className="relative flex-1 max-w-4xl">
             <div className="flex items-center bg-[#1c2029] border border-slate-700/80 rounded-2xl px-3.5 sm:px-4 py-2 sm:py-2.5 focus-within:border-[#10d97b] focus-within:ring-1 focus-within:ring-[#10d97b]/30 transition-all shadow-inner">
               <Search className="w-4 h-4 sm:w-5 sm:h-5 text-[#10d97b] shrink-0" />
               <input
                 type="search"
                 data-testid="search-input"
                 value={searchQuery}
+                onFocus={() => setIsSearchDropdownOpen(true)}
+                onBlur={() => {
+                  setTimeout(() => setIsSearchDropdownOpen(false), 180);
+                }}
                 onChange={(e) => {
-                  setSearchQuery(e.target.value);
+                  const nextVal = e.target.value;
+                  setSearchQuery(nextVal);
+                  setIsSearchDropdownOpen(nextVal.trim().length >= MIN_SEARCH_SUGGESTION_CHARS);
                 }}
                 placeholder="Search movies, series, Hindi dubbed, Pak dramas..."
                 aria-label="Search movies and TV series"
                 className="w-full bg-transparent px-2.5 sm:px-3 text-sm sm:text-base font-medium text-slate-100 placeholder-slate-400 focus:outline-none"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  data-testid="clear-search-input-btn"
+                  aria-label="Clear search query"
+                  onClick={() => {
+                    setSearchQuery('');
+                    clearSuggestions();
+                    setIsSearchDropdownOpen(false);
+                  }}
+                  className="p-1 mr-1 text-slate-400 hover:text-white rounded-full transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 type="submit"
                 data-testid="search-submit-btn"
@@ -825,6 +908,94 @@ export default function App() {
                 Search
               </button>
             </div>
+
+            {/* Fix 6: Live Search Suggestions Dropdown (Top 5–8 Movie/TV Matches) */}
+            {isSearchDropdownOpen &&
+              searchQuery.trim().length >= MIN_SEARCH_SUGGESTION_CHARS &&
+              (isLoadingSuggestions ||
+                liveSearchSuggestions.length > 0 ||
+                Boolean(suggestionsError)) && (
+                <div
+                  data-testid="live-search-suggestions-dropdown"
+                  data-from-cache={suggestionsFromCache ? 'true' : 'false'}
+                  role="listbox"
+                  aria-label="Live search suggestions"
+                  className="absolute left-0 right-0 top-full mt-2 z-50 rounded-2xl bg-[#131722] border border-slate-700/90 shadow-2xl shadow-black/80 overflow-hidden max-h-[380px] overflow-y-auto"
+                >
+                  {isLoadingSuggestions && liveSearchSuggestions.length === 0 ? (
+                    <div
+                      data-testid="search-suggestions-loading"
+                      className="flex items-center gap-2.5 px-4 py-3.5 text-xs text-slate-300"
+                    >
+                      <Loader2 className="w-4 h-4 text-[#10d97b] animate-spin shrink-0" />
+                      <span>Searching TMDB catalog...</span>
+                    </div>
+                  ) : suggestionsError ? (
+                    <div
+                      data-testid="search-suggestions-error"
+                      className="px-4 py-3 text-xs text-amber-300"
+                    >
+                      {suggestionsError}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-800/70">
+                      {liveSearchSuggestions.map((item) => (
+                        <button
+                          key={`${item.mediaType}-${item.id}`}
+                          type="button"
+                          role="option"
+                          data-testid={`search-suggestion-item-${item.id}`}
+                          onMouseDown={(ev) => {
+                            // Prevent input blur before click handler fires
+                            ev.preventDefault();
+                          }}
+                          onClick={() => {
+                            saveQueryToRecentSearches(item.title);
+                            setIsSearchDropdownOpen(false);
+                            handleOpenMovie(item);
+                          }}
+                          className="w-full flex items-center gap-3 px-3.5 py-2.5 hover:bg-slate-800/80 text-left transition-colors"
+                        >
+                          <img
+                            src={item.posterUrl}
+                            alt={item.title}
+                            loading="lazy"
+                            className="w-9 h-12 rounded-lg object-cover bg-slate-900 shrink-0 border border-slate-800"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs sm:text-sm font-bold text-white truncate">
+                              {item.title}
+                            </p>
+                            <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-400">
+                              <span>{item.releaseYear}</span>
+                              <span>•</span>
+                              <span className="uppercase font-semibold text-[#10d97b]">
+                                {item.mediaType === 'tv' ? 'TV Series' : 'Movie'}
+                              </span>
+                              {item.language && (
+                                <>
+                                  <span>•</span>
+                                  <span className="truncate">{item.language}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          <Play className="w-4 h-4 text-[#10d97b] shrink-0" />
+                        </button>
+                      ))}
+                      <button
+                        type="submit"
+                        data-testid="search-suggestions-view-all-btn"
+                        onMouseDown={(ev) => ev.preventDefault()}
+                        onClick={() => handleSearchSubmit(undefined, searchQuery)}
+                        className="w-full px-4 py-2.5 bg-slate-900/90 hover:bg-slate-800/90 text-center text-xs font-extrabold text-[#10d97b] transition-colors"
+                      >
+                        View all results for &ldquo;{searchQuery.trim()}&rdquo;
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
           </form>
 
           {/* Right Action: Restricted Admin Console (only visible when unlocked) */}

@@ -42,6 +42,8 @@ import {
   logoutCurrentUser,
   normalizeOfficialWebsiteUrl,
   requestPasswordResetEmail,
+  submitUserFeedback,
+  UserFeedbackType,
 } from '../services/supabaseClient';
 import {
   buildReferralShareUrl,
@@ -99,6 +101,16 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
   // Real Working App Settings Modal State
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [cacheClearedMsg, setCacheClearedMsg] = useState<string>('');
+
+  // Fix 8: User Feedback Modal State
+  const [showFeedbackModal, setShowFeedbackModal] = useState<boolean>(false);
+  const [feedbackType, setFeedbackType] = useState<UserFeedbackType>('bug');
+  const [feedbackMessage, setFeedbackMessage] = useState<string>('');
+  const [feedbackEmail, setFeedbackEmail] = useState<string>('');
+  const [feedbackHoneypot, setFeedbackHoneypot] = useState<string>('');
+  const [feedbackError, setFeedbackError] = useState<string>('');
+  const [feedbackToast, setFeedbackToast] = useState<string>('');
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState<boolean>(false);
 
   const officialSite = normalizeOfficialWebsiteUrl(appConfig.official_website);
 
@@ -267,7 +279,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             </div>
             <div className="min-w-0">
               <div className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-2 flex-wrap">
-                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.2'})</span>
+                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.3'})</span>
                 <span className="px-2 py-0.5 rounded bg-emerald-950 border border-[#10d97b]/40 text-[10px] font-mono text-[#10d97b]">
                   Global Cloud Link
                 </span>
@@ -506,18 +518,22 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
 
         <button
           type="button"
-          onClick={() =>
-            setActiveNoticeModal(
-              'Feedback submitted! Broken stream report queue is monitored 24/7.'
-            )
-          }
+          data-testid="open-feedback-modal-btn"
+          onClick={() => {
+            setFeedbackError('');
+            setFeedbackToast('');
+            setShowFeedbackModal(true);
+          }}
           className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-slate-800/40 transition-colors min-h-[54px]"
         >
           <div className="flex items-center gap-3 text-sm font-medium text-slate-100">
             <MessageSquareWarning className="w-5 h-5 text-slate-300" />
-            <span>Feedback</span>
+            <span>Send Feedback</span>
           </div>
-          <ChevronRight className="w-4 h-4 text-slate-400" />
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span>Bug / Feature / Report</span>
+            <ChevronRight className="w-4 h-4 text-slate-400" />
+          </div>
         </button>
 
         {/* Restricted Admin Command Center (Requires Admin PIN) */}
@@ -938,6 +954,176 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             >
               Save &amp; Close Settings
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          FIX 8: HARDENED USER FEEDBACK MODAL (Type, Trimmed 3..500 Message,
+          Strict Email Validation, Honeypot Anti-Bot Field & 3/Hour Rate Limit)
+         ===================================================================== */}
+      {showFeedbackModal && (
+        <div
+          data-testid="user-feedback-modal"
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-md rounded-3xl bg-[#141822] border border-slate-700/80 p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-[#10d97b]/15 border border-[#10d97b]/40 text-[#10d97b] flex items-center justify-center">
+                  <MessageSquareWarning className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-extrabold text-white">Send Feedback</h2>
+                  <p className="text-[11px] text-slate-400">
+                    Report broken links, bugs, or request new features (Max 3/hour)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="close-feedback-modal-btn"
+                onClick={() => setShowFeedbackModal(false)}
+                aria-label="Close feedback modal"
+                className="p-1.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              data-testid="user-feedback-form"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setFeedbackError('');
+                setFeedbackToast('');
+                setIsSubmittingFeedback(true);
+                try {
+                  const res = await submitUserFeedback({
+                    type: feedbackType,
+                    message: feedbackMessage,
+                    email: loggedInUser?.email || feedbackEmail,
+                    user_id: loggedInUser?.id || null,
+                    website_honeypot: feedbackHoneypot,
+                  });
+                  if (!res.ok) {
+                    setFeedbackError(res.error || 'Could not submit feedback.');
+                  } else {
+                    setFeedbackMessage('');
+                    setFeedbackToast('Thank you for your feedback!');
+                  }
+                } finally {
+                  setIsSubmittingFeedback(false);
+                }
+              }}
+              className="space-y-3.5"
+            >
+              {/* Hidden Honeypot Anti-Bot Input (Must remain empty) */}
+              <input
+                type="text"
+                name="website_honeypot"
+                tabIndex={-1}
+                autoComplete="off"
+                value={feedbackHoneypot}
+                onChange={(e) => setFeedbackHoneypot(e.target.value)}
+                className="hidden"
+                aria-hidden="true"
+              />
+
+              {/* Feedback Category Selector */}
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                  Feedback Category
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'bug', label: 'Bug Report' },
+                      { id: 'feature', label: 'Feature Request' },
+                      { id: 'other', label: 'Other' },
+                    ] as const
+                  ).map((cat) => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      data-testid={`feedback-type-${cat.id}-btn`}
+                      onClick={() => setFeedbackType(cat.id)}
+                      className={`py-2 px-2.5 rounded-xl text-xs font-bold border transition-colors ${
+                        feedbackType === cat.id
+                          ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
+                          : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      {cat.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Guest Email Input (Validated by Strict Regex) */}
+              {!loggedInUser && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1">
+                    Your Email (Optional — Strict Format Validated)
+                  </label>
+                  <input
+                    type="email"
+                    data-testid="feedback-email-input"
+                    value={feedbackEmail}
+                    onChange={(e) => setFeedbackEmail(e.target.value)}
+                    placeholder="name@example.com"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:border-[#10d97b] focus:outline-none"
+                  />
+                </div>
+              )}
+
+              {/* Feedback Message Textarea (Required, 3 to 500 characters after TRIM) */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-bold text-slate-300">
+                    Your Message (Required)
+                  </label>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    {feedbackMessage.trim().length}/500
+                  </span>
+                </div>
+                <textarea
+                  required
+                  rows={4}
+                  maxLength={500}
+                  data-testid="feedback-message-textarea"
+                  value={feedbackMessage}
+                  onChange={(e) => setFeedbackMessage(e.target.value)}
+                  placeholder="Describe the issue, broken stream link, or feature idea (3–500 characters)..."
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:border-[#10d97b] focus:outline-none resize-none"
+                />
+              </div>
+
+              {feedbackError && (
+                <p data-testid="feedback-error-msg" className="text-xs text-rose-400 font-bold">
+                  {feedbackError}
+                </p>
+              )}
+
+              {feedbackToast && (
+                <div
+                  data-testid="feedback-success-toast"
+                  className="p-2.5 rounded-xl bg-[#10d97b]/15 border border-[#10d97b]/40 text-[#10d97b] text-xs font-bold flex items-center gap-2"
+                >
+                  <Check className="w-4 h-4 shrink-0" />
+                  <span>{feedbackToast}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                data-testid="submit-feedback-btn"
+                disabled={isSubmittingFeedback}
+                className="w-full py-2.5 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs transition-colors disabled:opacity-50"
+              >
+                {isSubmittingFeedback ? 'Submitting Feedback...' : 'Submit Feedback'}
+              </button>
+            </form>
           </div>
         </div>
       )}
