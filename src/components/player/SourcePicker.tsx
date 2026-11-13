@@ -122,6 +122,49 @@ export function findNextHealthyEmbedSource(
   return null;
 }
 
+export interface SourceButtonState {
+  isDisabled: boolean;
+  healthDot: SourceHealthBadgeInfo;
+  buttonClassName: string;
+}
+
+/**
+ * Computes compact styling and disabled/grey-out state for Source 1-4 buttons.
+ * Any source with a Red dot (`healthDot.status === 'down'`) is disabled and greyed out.
+ */
+export function getSourceButtonState(
+  rawStatus?: SourceAvailabilityStatus | 'ok' | 'slow' | 'down' | 'unknown' | null,
+  isSelected: boolean = false
+): SourceButtonState {
+  const healthDot = resolveSourceHealthDotStatus(rawStatus);
+  const isDisabled = healthDot.status === 'down';
+
+  const baseClasses =
+    'px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors min-h-[32px] inline-flex items-center gap-1.5 min-w-0 border';
+
+  if (isDisabled) {
+    return {
+      isDisabled: true,
+      healthDot,
+      buttonClassName: `${baseClasses} bg-slate-900/50 text-slate-500 border-slate-800/80 opacity-45 grayscale cursor-not-allowed`,
+    };
+  }
+
+  if (isSelected) {
+    return {
+      isDisabled: false,
+      healthDot,
+      buttonClassName: `${baseClasses} bg-[#10d97b] text-slate-950 border-[#10d97b] shadow-sm`,
+    };
+  }
+
+  return {
+    isDisabled: false,
+    healthDot,
+    buttonClassName: `${baseClasses} bg-slate-800/90 text-slate-100 border-slate-700/80 hover:bg-slate-700`,
+  };
+}
+
 export interface SourcePickerProps {
   movieId: number;
   mediaType: 'movie' | 'tv';
@@ -265,33 +308,44 @@ export const SourcePicker: React.FC<SourcePickerProps> = ({
         </div>
       )}
 
-      {/* User-Friendly Source Buttons ("Source 1", "Source 2", "Source 3" + Health Status Dot) */}
-      <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2">
+      {/* Compact Source Buttons ("Source 1", "Source 2", "Source 3", "Source 4" + Health Dot; Red down sources disabled) */}
+      <div className="flex flex-wrap items-center gap-1.5">
         {embedServers.map((srv, idx) => {
           const isSelected = playerMode === 'embed' && selectedEmbedId === srv.id;
           const friendlyLabel = formatUserFriendlySourceLabel(idx);
-          const healthDot = resolveSourceHealthDotStatus(sourceHealthMap[srv.id]);
+          const { isDisabled, healthDot, buttonClassName } = getSourceButtonState(
+            sourceHealthMap[srv.id],
+            isSelected
+          );
 
           return (
             <button
               key={srv.id}
               type="button"
+              disabled={isDisabled}
+              aria-disabled={isDisabled}
               data-testid={`embed-server-btn-${srv.id}`}
               data-source-friendly-label={friendlyLabel}
-              onClick={() => onSelectEmbedServer(srv.id)}
-              className={`px-3 sm:px-3.5 py-2 rounded-xl text-xs font-bold transition-colors min-h-[40px] flex items-center justify-between sm:justify-start gap-2 min-w-0 border ${
-                isSelected
-                  ? 'bg-[#10d97b] text-slate-950 border-[#10d97b] shadow-sm'
-                  : 'bg-slate-800/90 text-slate-100 border-slate-700/80 hover:bg-slate-700'
-              }`}
+              data-source-down={isDisabled ? 'true' : 'false'}
+              title={
+                isDisabled
+                  ? `${friendlyLabel} is currently down (${healthDot.label})`
+                  : `${friendlyLabel} — ${srv.providerName || srv.label}`
+              }
+              onClick={() => {
+                if (!isDisabled) {
+                  onSelectEmbedServer(srv.id);
+                }
+              }}
+              className={buttonClassName}
             >
               <span className="truncate">{friendlyLabel}</span>
               <span
                 data-testid={`source-health-dot-${srv.id}`}
-                className="inline-flex items-center gap-1 text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-black/25"
+                className="inline-flex items-center gap-1 text-[9px] font-extrabold px-1 py-0.5 rounded bg-black/25 leading-none"
                 title={`Source Health: ${healthDot.label}`}
               >
-                <span className={`w-2 h-2 rounded-full shrink-0 ${healthDot.dotClass}`} />
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${healthDot.dotClass}`} />
                 <span>{healthDot.label}</span>
               </span>
             </button>

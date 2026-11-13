@@ -7,8 +7,10 @@ import { DetectedPlatform, detectAppPlatform } from './platformTrialReferralServ
 
 export const DEFAULT_CURRENT_APP_VERSION = '1.0.3';
 export const DEFAULT_VERSION_JSON_URL = '/version.json';
-export const DEFAULT_GITHUB_REPO = 'cinebox-official/cinebox-apk';
-export const UPDATE_CHECK_THROTTLE_MS = 6 * 60 * 60 * 1000; // 6 hours (prevents exhausting GitHub 60 req/hr limit)
+export const DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL =
+  'https://script.google.com/macros/s/AKfycbxFNwn6R_Msl86xQeDY25OGSEZcUl-9hAukbxzWbSLT__wZ9oF6L_XMLCHRLOTgm9QqVg/exec';
+export const DEFAULT_GITHUB_REPO = 'zulqarnainshah25-glitch/cinebox-api';
+export const UPDATE_CHECK_THROTTLE_MS = 6 * 60 * 60 * 1000; // 6 hours throttle cache
 export const STARTUP_UPDATE_CHECK_DEBOUNCE_MS = 3000; // 3 seconds after app mount
 export const DEFAULT_GLOBAL_APK_DOWNLOAD_URL =
   'https://drive.google.com/file/d/1CineBoxOfficialReleaseApk/view?usp=sharing';
@@ -16,7 +18,7 @@ export const DEFAULT_GLOBAL_APK_RELEASE_NOTES =
   'Latest CineBox Android APK (Google Drive Global Download, Native WebView Popup Blocker & Signature-Safe Update).';
 export const DEFAULT_OFFICIAL_WEBSITE_URL = 'https://cineboxmovies.ai.studio';
 export const GITHUB_VERSION_JSON_EXAMPLE_URL =
-  'https://raw.githubusercontent.com/cinebox-official/cinebox-apk/main/version.json';
+  DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL;
 
 export const CINEBOX_APK_META_PREFIX = 'CINEBOX_APK_META::';
 
@@ -61,6 +63,7 @@ export interface InAppUpdateCheckResult {
   throttledFromCache?: boolean;
   etag?: string;
   source?:
+    | 'google-apps-script'
     | 'supabase-global-config'
     | 'github-releases-api'
     | 'static-version-json-fallback'
@@ -652,13 +655,17 @@ const GITHUB_UPDATE_CACHE_KEY = 'cinebox_github_update_cache_v1';
 
 interface CachedGitHubUpdateRecord {
   repo: string;
+  endpointUrl?: string;
   checkedAt: number;
   etag?: string;
   remoteVersion: string;
   apkUrl: string;
   releasePageUrl: string;
   releaseNotes: string;
-  source: 'github-releases-api' | 'static-version-json-fallback';
+  source:
+    | 'google-apps-script'
+    | 'github-releases-api'
+    | 'static-version-json-fallback';
 }
 
 let memoryGitHubUpdateCache: CachedGitHubUpdateRecord | null = null;
@@ -714,8 +721,22 @@ export function resolveConfiguredGitHubRepo(overrideRepo?: string): string {
   return DEFAULT_GITHUB_REPO;
 }
 
+export function resolveGoogleAppsScriptVersionUrl(overrideUrl?: string): string {
+  const raw = String(
+    overrideUrl ??
+      (import.meta as any).env?.VITE_GOOGLE_APPS_SCRIPT_VERSION_URL ??
+      DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL
+  ).trim();
+  const safe = sanitizeSafeUrl(raw);
+  if (safe && safe.startsWith('https://')) {
+    return safe;
+  }
+  return DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL;
+}
+
 export async function checkGitHubLatestReleaseUpdate(options?: {
   repo?: string;
+  versionCheckUrl?: string;
   currentVersionOverride?: string;
   nowMs?: number;
   throttleMs?: number;
@@ -725,6 +746,7 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
   fetchImpl?: typeof fetch;
 }): Promise<InAppUpdateCheckResult> {
   const repo = resolveConfiguredGitHubRepo(options?.repo);
+  const gasVersionUrl = resolveGoogleAppsScriptVersionUrl(options?.versionCheckUrl);
   const currentVersion = await getInstalledAppVersion(options?.currentVersionOverride);
   const nowMs = options?.nowMs ?? Date.now();
   const throttleMs = options?.throttleMs ?? UPDATE_CHECK_THROTTLE_MS;
@@ -769,7 +791,7 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
   const fallbackStaticUrl =
     options?.staticVersionJsonUrl ||
     String((import.meta as any).env?.VITE_UPDATE_VERSION_JSON_URL || '').trim() ||
-    `https://raw.githubusercontent.com/${repo}/main/version.json`;
+    DEFAULT_VERSION_JSON_URL;
 
   const fetchFromStaticManifest = async (): Promise<InAppUpdateCheckResult> => {
     try {
@@ -785,9 +807,10 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
       if (!parsed.valid || !parsed.manifest) {
         throw new Error(parsed.error || 'Invalid version.json');
       }
-      const releasePageUrl = `https://github.com/${repo}/releases/latest`;
+      const releasePageUrl = parsed.manifest.apk_url;
       const record: CachedGitHubUpdateRecord = {
         repo,
+        endpointUrl: fallbackStaticUrl,
         checkedAt: nowMs,
         remoteVersion: parsed.manifest.version,
         apkUrl: parsed.manifest.apk_url,
@@ -824,23 +847,28 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
     return fetchFromStaticManifest();
   }
 
-  // 2. Call GitHub Releases API (`GET https://api.github.com/repos/[owner]/[repo]/releases/latest`)
-  // Includes conditional `If-None-Match` ETag header so 304 responses do NOT count against the 60/hr limit
-  const githubApiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+  // 2. Call Deployed Google Apps Script Web App URL (`DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL`)
+  // Expects JSON format: `{ "version": "1.0.3", "apk_url": "https://...", "release_notes": "..." }`
+  // Uses `redirect: 'follow'` because Google Apps Script `/macros/s/.../exec` 302-redirects to `script.googleusercontent.com`.
   const reqHeaders: Record<string, string> = {
-    Accept: 'application/vnd.github+json',
+    Accept: 'application/json',
   };
   if (cached?.etag && cached.repo === repo) {
     reqHeaders['If-None-Match'] = cached.etag;
   }
 
   try {
-    const res = await fetchFn(githubApiUrl, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const res = await fetchFn(gasVersionUrl, {
       method: 'GET',
+      redirect: 'follow',
       headers: reqHeaders,
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
-    // 2A. 304 Not Modified (Free on GitHub API — does not consume rate limit!)
+    // 2A. 304 Not Modified
     if (res.status === 304 && cached && cached.repo === repo) {
       const updatedRecord: CachedGitHubUpdateRecord = {
         ...cached,
@@ -857,22 +885,54 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
         releaseNotes: updatedRecord.releaseNotes,
         etag: updatedRecord.etag,
         throttledFromCache: true,
-        source: 'github-releases-api',
+        source: updatedRecord.source,
       };
     }
 
-    // 2B. If GitHub API rate-limited (403 / 429) or repo not found (404), fall back to Static version.json CDN
+    // 2B. If Google Apps Script returns an HTTP error (403/429/500), fall back to Static `/version.json`
     if (res.status === 403 || res.status === 429 || !res.ok) {
       return fetchFromStaticManifest();
     }
 
-    const data = (await res.json()) as {
-      tag_name?: string;
-      body?: string;
-      html_url?: string;
-      assets?: Array<{ name?: string; browser_download_url?: string }>;
-    };
+    const data = (await res.json()) as Record<string, any>;
+    const responseEtag = res.headers?.get?.('etag') || cached?.etag;
 
+    // 2C. Parse Primary `{ version, apk_url, release_notes }` JSON from Google Apps Script
+    const manifestParsed = parseRemoteVersionManifest(data);
+    if (manifestParsed.valid && manifestParsed.manifest) {
+      const remoteVersion = manifestParsed.manifest.version;
+      const apkUrl = manifestParsed.manifest.apk_url;
+      const releaseNotes = manifestParsed.manifest.release_notes || '';
+      const releasePageUrl = apkUrl;
+
+      const record: CachedGitHubUpdateRecord = {
+        repo,
+        endpointUrl: gasVersionUrl,
+        checkedAt: nowMs,
+        etag: responseEtag || undefined,
+        remoteVersion,
+        apkUrl,
+        releasePageUrl,
+        releaseNotes,
+        source: 'google-apps-script',
+      };
+      saveGitHubUpdateCache(record);
+
+      return {
+        checked: true,
+        updateAvailable: compareSemverVersions(remoteVersion, currentVersion) > 0,
+        currentVersion,
+        remoteVersion,
+        apkUrl,
+        releasePageUrl,
+        releaseNotes,
+        etag: responseEtag || undefined,
+        throttledFromCache: false,
+        source: 'google-apps-script',
+      };
+    }
+
+    // 2D. Backward-compatible fallback if payload uses GitHub `{ tag_name, body, assets }` shape
     const rawTag = String(data?.tag_name || '').trim().replace(/^v/i, '');
     if (!rawTag || !/^\d+\.\d+(\.\d+)?/.test(rawTag)) {
       return fetchFromStaticManifest();
@@ -880,7 +940,7 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
 
     const apkAsset = Array.isArray(data.assets)
       ? data.assets.find(
-          (a) =>
+          (a: any) =>
             typeof a?.browser_download_url === 'string' &&
             a.browser_download_url.toLowerCase().endsWith('.apk')
         )
@@ -895,10 +955,10 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
       .replace(/[<>]/g, '')
       .trim()
       .slice(0, 500);
-    const responseEtag = res.headers?.get?.('etag') || cached?.etag;
 
     const record: CachedGitHubUpdateRecord = {
       repo,
+      endpointUrl: gasVersionUrl,
       checkedAt: nowMs,
       etag: responseEtag || undefined,
       remoteVersion: rawTag,
@@ -922,7 +982,7 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
       source: 'github-releases-api',
     };
   } catch {
-    // Network error reaching api.github.com -> fall back to static version.json
+    // Network error / timeout reaching Google Apps Script -> fall back to static version.json
     return fetchFromStaticManifest();
   }
 }

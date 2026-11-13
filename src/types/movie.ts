@@ -89,7 +89,7 @@ export interface UserProfile {
 }
 
 export interface UserAppSettings {
-  defaultServer: 'auto-server-3' | 'auto-server-1';
+  defaultServer: 'auto-server-vidfast' | 'auto-server-1' | 'auto-server-vidlink' | 'auto-server-3';
   defaultDownloadQuality: DownloadQuality;
   autoPlayVideo: boolean;
   wifiOnlyDownloads: boolean;

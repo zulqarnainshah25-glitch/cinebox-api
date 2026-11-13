@@ -111,7 +111,7 @@ export function buildVidSrcEmbedUrl(params: {
 }
 
 /**
- * Builds the 2Embed fallback URL when VidSrc.sh fails or returns 404:
+ * Builds the 2Embed fallback URL (Source 4):
  * - Movie: `https://www.2embed.cc/embed/{tmdb_id}`
  * - TV: `https://www.2embed.cc/embedtv/{tmdb_id}&s={season}&e={episode}`
  */
@@ -128,6 +128,46 @@ export function build2EmbedFallbackUrl(params: {
     return `https://www.2embed.cc/embedtv/${safeId}&s=${safeSeason}&e=${safeEpisode}`;
   }
   return `https://www.2embed.cc/embed/${safeId}`;
+}
+
+/**
+ * Builds the VidLink.pro Embed URL (Source 2) with exact theme & playback parameters:
+ * - Movie: `https://vidlink.pro/movie/{tmdb_id}?primaryColor=10d97b&secondaryColor=000000&iconColor=ffffff&autoplay=true&nextbutton=true`
+ * - TV: `https://vidlink.pro/tv/{tmdb_id}/{season}/{episode}?primaryColor=10d97b&autoplay=true&nextbutton=true`
+ */
+export function buildVidLinkEmbedUrl(params: {
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  season?: number;
+  episode?: number;
+}): string {
+  const safeId = Math.max(1, Math.floor(Number(params.tmdbId) || 1));
+  if (params.mediaType === 'tv') {
+    const safeSeason = Math.max(1, Math.floor(Number(params.season) || 1));
+    const safeEpisode = Math.max(1, Math.floor(Number(params.episode) || 1));
+    return `https://vidlink.pro/tv/${safeId}/${safeSeason}/${safeEpisode}?primaryColor=10d97b&autoplay=true&nextbutton=true`;
+  }
+  return `https://vidlink.pro/movie/${safeId}?primaryColor=10d97b&secondaryColor=000000&iconColor=ffffff&autoplay=true&nextbutton=true`;
+}
+
+/**
+ * Builds the VidFast Embed URL (Source 3 — Preferred Default with Original Audio & Rapid/Blaze servers):
+ * - Movie: `https://vidfast.vc/movie/{tmdb_id}?theme=10d97b&autoPlay=true&title=true&poster=true`
+ * - TV: `https://vidfast.vc/tv/{tmdb_id}/{season}/{episode}?theme=10d97b&autoPlay=true&nextButton=true&autoNext=true`
+ */
+export function buildVidFastEmbedUrl(params: {
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  season?: number;
+  episode?: number;
+}): string {
+  const safeId = Math.max(1, Math.floor(Number(params.tmdbId) || 1));
+  if (params.mediaType === 'tv') {
+    const safeSeason = Math.max(1, Math.floor(Number(params.season) || 1));
+    const safeEpisode = Math.max(1, Math.floor(Number(params.episode) || 1));
+    return `https://vidfast.vc/tv/${safeId}/${safeSeason}/${safeEpisode}?theme=10d97b&autoPlay=true&nextButton=true&autoNext=true`;
+  }
+  return `https://vidfast.vc/movie/${safeId}?theme=10d97b&autoPlay=true&title=true&poster=true`;
 }
 
 /**
@@ -609,6 +649,197 @@ export function parseVidSrcPlayerEventMessage(
     mediaType: inner.mediaType === 'tv' || parsed.mediaType === 'tv' ? 'tv' : 'movie',
     season: Number.isFinite(season) && season > 0 ? Math.floor(season) : undefined,
     episode: Number.isFinite(episode) && episode > 0 ? Math.floor(episode) : undefined,
+  };
+}
+
+export const VIDLINK_ALLOWED_ORIGIN = 'https://vidlink.pro';
+
+export const VIDFAST_ALLOWED_ORIGINS: readonly string[] = Object.freeze([
+  'https://vidfast.pro',
+  'https://vidfast.in',
+  'https://vidfast.io',
+  'https://vidfast.me',
+  'https://vidfast.net',
+  'https://vidfast.pm',
+  'https://vidfast.xyz',
+  'https://vidfast.vc',
+  'https://vidfast.bz',
+]);
+
+export interface EmbedMediaDataPayload {
+  provider: 'vidlink' | 'vidfast';
+  type: 'MEDIA_DATA';
+  tmdbId: number;
+  mediaType: 'movie' | 'tv';
+  title?: string;
+  watched: number;
+  duration: number;
+  watchedPercent: number;
+  season?: number;
+  episode?: number;
+}
+
+/**
+ * Strictly validates `postMessage` origin for VidLink (`https://vidlink.pro`) and all 9 VidFast domains.
+ */
+export function isAllowedMediaDataOrigin(
+  eventOrigin?: string | null
+): 'vidlink' | 'vidfast' | null {
+  if (!eventOrigin || typeof eventOrigin !== 'string') return null;
+  const normalized = eventOrigin.trim().toLowerCase().replace(/\/+$/, '');
+  if (normalized === VIDLINK_ALLOWED_ORIGIN) return 'vidlink';
+  if (VIDFAST_ALLOWED_ORIGINS.includes(normalized)) return 'vidfast';
+  return null;
+}
+
+/**
+ * Parses and validates `MEDIA_DATA` postMessage events from VidLink (`https://vidlink.pro`)
+ * and VidFast (`VIDFAST_ALLOWED_ORIGINS`) so watch progress syncs safely to Supabase `watch_history`.
+ */
+export function parseEmbedMediaDataMessage(
+  rawEventData: unknown,
+  eventOrigin?: string | null,
+  fallbackContext?: {
+    tmdbId?: number;
+    mediaType?: 'movie' | 'tv';
+    season?: number;
+    episode?: number;
+  }
+): EmbedMediaDataPayload | null {
+  const provider = isAllowedMediaDataOrigin(eventOrigin);
+  if (!provider) {
+    return null;
+  }
+
+  let parsed: any = rawEventData;
+  if (typeof rawEventData === 'string') {
+    try {
+      parsed = JSON.parse(rawEventData);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+
+  if (parsed.type !== 'MEDIA_DATA') {
+    return null;
+  }
+
+  const rawData = parsed.data;
+  if (!rawData || typeof rawData !== 'object' || Array.isArray(rawData)) {
+    return null;
+  }
+
+  // Support both direct media objects (`{ id, type, progress: { watched, duration } }`)
+  // and TMDB-keyed storage maps (`{ "550": { id: 550, progress: { watched, duration } } }`).
+  let entry: Record<string, any> | null = null;
+  if (
+    (rawData.progress && typeof rawData.progress === 'object') ||
+    rawData.id !== undefined ||
+    rawData.tmdbId !== undefined ||
+    rawData.watched !== undefined
+  ) {
+    entry = rawData;
+  } else if (
+    fallbackContext?.tmdbId &&
+    rawData[String(fallbackContext.tmdbId)] &&
+    typeof rawData[String(fallbackContext.tmdbId)] === 'object'
+  ) {
+    entry = rawData[String(fallbackContext.tmdbId)];
+  } else {
+    const firstValid = Object.values(rawData).find(
+      (val) =>
+        val &&
+        typeof val === 'object' &&
+        !Array.isArray(val) &&
+        ((val as any).progress || (val as any).id !== undefined)
+    );
+    if (firstValid) {
+      entry = firstValid as Record<string, any>;
+    }
+  }
+
+  if (!entry) {
+    return null;
+  }
+
+  const tmdbIdNum = Number(entry.id ?? entry.tmdbId ?? entry.tmdb_id ?? fallbackContext?.tmdbId);
+  if (!Number.isFinite(tmdbIdNum) || tmdbIdNum <= 0) {
+    return null;
+  }
+
+  const rawMediaType = String(entry.type ?? entry.mediaType ?? fallbackContext?.mediaType ?? 'movie')
+    .trim()
+    .toLowerCase();
+  const mediaType: 'movie' | 'tv' = rawMediaType === 'tv' ? 'tv' : 'movie';
+
+  const rawSeason = Number(
+    entry.last_season_watched ?? entry.season ?? fallbackContext?.season
+  );
+  const rawEpisode = Number(
+    entry.last_episode_watched ?? entry.episode ?? fallbackContext?.episode
+  );
+  const season =
+    Number.isFinite(rawSeason) && rawSeason > 0 ? Math.floor(rawSeason) : undefined;
+  const episode =
+    Number.isFinite(rawEpisode) && rawEpisode > 0 ? Math.floor(rawEpisode) : undefined;
+
+  let progressObj =
+    entry.progress && typeof entry.progress === 'object' ? entry.progress : null;
+
+  if (
+    mediaType === 'tv' &&
+    (!progressObj || Number(progressObj.watched ?? 0) <= 0) &&
+    entry.show_progress &&
+    typeof entry.show_progress === 'object' &&
+    season &&
+    episode
+  ) {
+    const epKey = `s${season}e${episode}`;
+    const epEntry = entry.show_progress[epKey];
+    if (epEntry?.progress && typeof epEntry.progress === 'object') {
+      progressObj = epEntry.progress;
+    }
+  }
+
+  const watched = Number(
+    progressObj?.watched ?? entry.watched ?? entry.currentTime ?? entry.position ?? 0
+  );
+  const duration = Number(
+    progressObj?.duration ?? entry.duration ?? entry.totalDuration ?? 0
+  );
+
+  // Reject NaN, negative timestamps, or absurdly large values (> 24 hours)
+  if (!Number.isFinite(watched) || watched < 0 || watched > 86400) {
+    return null;
+  }
+  const safeDuration =
+    Number.isFinite(duration) && duration > 0 && duration <= 86400 ? duration : 0;
+
+  const watchedPercent =
+    safeDuration > 0
+      ? Math.min(100, Math.max(1, Math.round((watched / safeDuration) * 100)))
+      : 0;
+
+  const cleanTitle =
+    typeof entry.title === 'string' && entry.title.trim()
+      ? stripHtmlAndScriptContent(entry.title, 120)
+      : undefined;
+
+  return {
+    provider,
+    type: 'MEDIA_DATA',
+    tmdbId: Math.floor(tmdbIdNum),
+    mediaType,
+    title: cleanTitle || undefined,
+    watched: Math.round(watched * 10) / 10,
+    duration: Math.round(safeDuration * 10) / 10,
+    watchedPercent,
+    season,
+    episode,
   };
 }
 

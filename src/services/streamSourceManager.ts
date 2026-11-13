@@ -765,7 +765,11 @@ export function buildCentralizedManagedSources(params: {
 
     const providerName =
       srv.providerName ||
-      (srv.id.includes('2embed') || srv.id === 'auto-server-3'
+      (srv.id.includes('vidfast')
+        ? 'VidFast'
+        : srv.id.includes('vidlink')
+        ? 'VidLink.pro'
+        : srv.id.includes('2embed') || srv.id === 'auto-server-3'
         ? '2Embed'
         : srv.id.includes('vidsrc-icu')
         ? 'VidSrc.icu'

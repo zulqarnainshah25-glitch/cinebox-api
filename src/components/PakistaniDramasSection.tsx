@@ -139,18 +139,6 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
       {/* Channel Filter Pills + Drama Search Bar */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-          <button
-            type="button"
-            data-testid="pak-channel-btn-ALL"
-            onClick={() => setSelectedChannel('ALL')}
-            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
-              selectedChannel === 'ALL'
-                ? 'bg-white text-slate-950 font-bold'
-                : 'bg-[#171b24] text-slate-300 hover:bg-slate-800'
-            }`}
-          >
-            All Channels
-          </button>
           {OFFICIAL_PAK_DRAMA_CHANNELS.map((ch) => {
             const active = selectedChannel === ch.key;
             return (

@@ -11,8 +11,17 @@ import {
   resolveAlternateLanguageStreams,
   VerifiedAudioTrack,
 } from '../services/streamSourceManager';
+import {
+  build2EmbedFallbackUrl,
+  buildVidFastEmbedUrl,
+  buildVidLinkEmbedUrl,
+  buildVidSrcEmbedUrl,
+} from '../services/vidsrcService';
 
 export type { AlternateLanguageStream, EmbedServerOption, VerifiedAudioTrack };
+
+export const PREFERRED_EMBED_SERVER_ID = 'auto-server-vidfast';
+export const CONTROLS_AUTO_HIDE_MS = 3000;
 
 export const FALLBACK_TEST_MP4_720P =
   'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
@@ -114,8 +123,11 @@ export function removeRecentSearchQuery(existing: string[], queryToRemove: strin
 }
 
 /**
- * Builds active Auto-Embed fallback servers for Movies (`movie`) and TV Series (`tv`).
- * Uses honest provider labels without falsely claiming cross-origin providers guarantee dual audio.
+ * Builds active Auto-Embed servers for Movies (`movie`) and TV Series (`tv`):
+ * - Source 1: VidSrc.sh (`auto-server-1`)
+ * - Source 2: VidLink.pro (`auto-server-vidlink`)
+ * - Source 3: VidFast (`auto-server-vidfast` — Preferred Default with Original Audio & Rapid/Blaze)
+ * - Source 4: 2Embed (`auto-server-3`)
  */
 export function buildEmbedServerList(
   tmdbId: number,
@@ -141,93 +153,63 @@ export function buildEmbedServerList(
     });
   }
 
-  if (mediaType === 'tv') {
-    servers.push(
-      {
-        id: 'auto-server-3',
-        label: `Server 3 (2Embed S${safeSeason}:E${safeEpisode})`,
-        url: `https://www.2embed.cc/embedtv/${safeTmdbId}&s=${safeSeason}&e=${safeEpisode}`,
-        isCustom: false,
-        providerName: '2Embed',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'auto-server-1',
-        label: `Server 1 (VidSrc.sh S${safeSeason}:E${safeEpisode})`,
-        url: `https://vidsrc.sh/embed/tv/${safeTmdbId}/${safeSeason}/${safeEpisode}?ds_lang=en`,
-        isCustom: false,
-        providerName: 'VidSrc.sh',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'hindi-multiembed',
-        label: `Server 2 (MultiEmbed S${safeSeason}:E${safeEpisode})`,
-        url: `https://multiembed.mov/?video_id=${safeTmdbId}&tmdb=1&s=${safeSeason}&e=${safeEpisode}`,
-        isCustom: false,
-        providerName: 'MultiEmbed',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'hindi-autoembed',
-        label: `Server 4 (AutoEmbed S${safeSeason}:E${safeEpisode})`,
-        url: `https://player.autoembed.cc/embed/tv/${safeTmdbId}/${safeSeason}/${safeEpisode}`,
-        isCustom: false,
-        providerName: 'AutoEmbed',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'hindi-vidsrc-icu',
-        label: `Server 5 (VidSrc.icu S${safeSeason}:E${safeEpisode})`,
-        url: `https://vidsrc.icu/embed/tv/${safeTmdbId}/${safeSeason}/${safeEpisode}`,
-        isCustom: false,
-        providerName: 'VidSrc.icu',
-        audioType: 'provider-controlled',
-      }
-    );
-  } else {
-    servers.push(
-      {
-        id: 'auto-server-3',
-        label: 'Server 3 (2Embed.cc)',
-        url: `https://www.2embed.cc/embed/${safeTmdbId}`,
-        isCustom: false,
-        providerName: '2Embed',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'auto-server-1',
-        label: 'Server 1 (VidSrc.sh)',
-        url: `https://vidsrc.sh/embed/movie/${safeTmdbId}?ds_lang=en`,
-        isCustom: false,
-        providerName: 'VidSrc.sh',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'hindi-multiembed',
-        label: 'Server 2 (MultiEmbed)',
-        url: `https://multiembed.mov/?video_id=${safeTmdbId}&tmdb=1`,
-        isCustom: false,
-        providerName: 'MultiEmbed',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'hindi-autoembed',
-        label: 'Server 4 (AutoEmbed)',
-        url: `https://player.autoembed.cc/embed/movie/${safeTmdbId}`,
-        isCustom: false,
-        providerName: 'AutoEmbed',
-        audioType: 'provider-controlled',
-      },
-      {
-        id: 'hindi-vidsrc-icu',
-        label: 'Server 5 (VidSrc.icu)',
-        url: `https://vidsrc.icu/embed/movie/${safeTmdbId}`,
-        isCustom: false,
-        providerName: 'VidSrc.icu',
-        audioType: 'provider-controlled',
-      }
-    );
-  }
+  const epTag = mediaType === 'tv' ? ` S${safeSeason}:E${safeEpisode}` : '';
+
+  servers.push(
+    {
+      id: 'auto-server-1',
+      label: `Source 1 (VidSrc.sh${epTag})`,
+      url: buildVidSrcEmbedUrl({
+        tmdbId: safeTmdbId,
+        mediaType,
+        season: safeSeason,
+        episode: safeEpisode,
+        dsLang: 'en',
+      }),
+      isCustom: false,
+      providerName: 'VidSrc.sh',
+      audioType: 'provider-controlled',
+    },
+    {
+      id: 'auto-server-vidlink',
+      label: `Source 2 (VidLink.pro${epTag})`,
+      url: buildVidLinkEmbedUrl({
+        tmdbId: safeTmdbId,
+        mediaType,
+        season: safeSeason,
+        episode: safeEpisode,
+      }),
+      isCustom: false,
+      providerName: 'VidLink.pro',
+      audioType: 'provider-controlled',
+    },
+    {
+      id: 'auto-server-vidfast',
+      label: `Source 3 (VidFast${epTag})`,
+      url: buildVidFastEmbedUrl({
+        tmdbId: safeTmdbId,
+        mediaType,
+        season: safeSeason,
+        episode: safeEpisode,
+      }),
+      isCustom: false,
+      providerName: 'VidFast',
+      audioType: 'provider-controlled',
+    },
+    {
+      id: 'auto-server-3',
+      label: `Source 4 (2Embed${epTag})`,
+      url: build2EmbedFallbackUrl({
+        tmdbId: safeTmdbId,
+        mediaType,
+        season: safeSeason,
+        episode: safeEpisode,
+      }),
+      isCustom: false,
+      providerName: '2Embed',
+      audioType: 'provider-controlled',
+    }
+  );
 
   return servers;
 }
@@ -1045,11 +1027,12 @@ export interface FullscreenPlayerLayoutConfig {
   videoObjectFitClass: string;
   bottomControlsSafePaddingClass: string;
   exitButtonClassName: string;
+  topRightControlsClassName: string;
 }
 
 /**
  * Computes fullscreen player container classes, pure #000000 borderless background,
- * top-left/top-right Exit Fullscreen button state synced with player controls & Android taskbar blending,
+ * top-left Back/Exit Fullscreen button & top-right Adblocker/Fullscreen controls synced with auto-hide,
  * and mobile navigation-bar safe-area padding.
  */
 export function getFullscreenPlayerConfig(
@@ -1072,7 +1055,13 @@ export function getFullscreenPlayerConfig(
     ? 'px-4 sm:px-6 pb-[max(1.25rem,calc(env(safe-area-inset-bottom,16px)+12px))] pt-3 bg-gradient-to-t from-black via-black/80 to-transparent'
     : 'px-3 sm:px-4 pb-[max(0.875rem,calc(env(safe-area-inset-bottom,10px)+6px))] pt-2.5 bg-gradient-to-t from-black/95 via-black/75 to-transparent';
 
-  const exitButtonClassName = `fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 min-h-[40px] ${
+  const exitButtonClassName = `fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 min-h-[36px] ${
+    areControlsVisible
+      ? 'opacity-100 pointer-events-auto translate-y-0'
+      : 'opacity-0 pointer-events-none -translate-y-2'
+  }`;
+
+  const topRightControlsClassName = `fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] right-[max(0.75rem,env(safe-area-inset-right,12px))] z-[10000] flex items-center gap-1.5 sm:gap-2 transition-all duration-200 ${
     areControlsVisible
       ? 'opacity-100 pointer-events-auto translate-y-0'
       : 'opacity-0 pointer-events-none -translate-y-2'
@@ -1091,6 +1080,7 @@ export function getFullscreenPlayerConfig(
     videoObjectFitClass,
     bottomControlsSafePaddingClass,
     exitButtonClassName,
+    topRightControlsClassName,
   };
 }
 

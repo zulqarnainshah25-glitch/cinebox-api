@@ -143,33 +143,58 @@ test('Validation: validateMovieLinkInput rejects invalid tmdb_id or malicious UR
   assert.equal(valid.sanitized?.tmdb_id, 533535);
 });
 
-test('Hybrid Player: resolvePlaybackPlan defaults to Server 3 (2Embed) and hides sandbox-blocked Server 2 & Server 4', () => {
+test('Hybrid Player: resolvePlaybackPlan builds all 4 integrated sources (VidSrc.sh, VidLink.pro, VidFast preferred, 2Embed)', () => {
   const moviePlan = resolvePlaybackPlan(550, null, 'movie');
   assert.equal(moviePlan.preferredMode, 'embed');
   assert.equal(moviePlan.directVideoUrl, null);
   assert.equal(typeof moviePlan.testFallbackMp4Url, 'string');
   assert.ok(moviePlan.testFallbackMp4Url.startsWith('https://'));
-  // Server 3 (2Embed), Server 1 (VidSrc.sh), and 3 Hindi/Dual-Audio servers are returned
-  assert.equal(moviePlan.embedServers.length, 5);
-  assert.equal(moviePlan.embedServers[0].id, 'auto-server-3');
-  assert.equal(moviePlan.embedServers[0].url, 'https://www.2embed.cc/embed/550');
-  assert.equal(moviePlan.embedServers[1].id, 'auto-server-1');
-  assert.equal(moviePlan.embedServers[1].url, 'https://vidsrc.sh/embed/movie/550?ds_lang=en');
-  assert.equal(moviePlan.embedServers[2].id, 'hindi-multiembed');
-  assert.equal(moviePlan.embedServers[3].id, 'hindi-autoembed');
-  assert.equal(moviePlan.embedServers[4].id, 'hindi-vidsrc-icu');
+  // Source 1 (VidSrc.sh), Source 2 (VidLink.pro), Source 3 (VidFast), Source 4 (2Embed)
+  assert.equal(moviePlan.embedServers.length, 4);
+  assert.equal(moviePlan.embedServers[0].id, 'auto-server-1');
+  assert.equal(moviePlan.embedServers[0].url, 'https://vidsrc.sh/embed/movie/550?ds_lang=en');
+  assert.equal(moviePlan.embedServers[1].id, 'auto-server-vidlink');
+  assert.equal(
+    moviePlan.embedServers[1].url,
+    'https://vidlink.pro/movie/550?primaryColor=10d97b&secondaryColor=000000&iconColor=ffffff&autoplay=true&nextbutton=true'
+  );
+  assert.equal(moviePlan.embedServers[2].id, 'auto-server-vidfast');
+  assert.equal(
+    moviePlan.embedServers[2].url,
+    'https://vidfast.vc/movie/550?theme=10d97b&autoPlay=true&title=true&poster=true'
+  );
+  assert.equal(moviePlan.embedServers[3].id, 'auto-server-3');
+  assert.equal(moviePlan.embedServers[3].url, 'https://www.2embed.cc/embed/550');
 
   const tvPlanDefault = resolvePlaybackPlan(1399, null, 'tv', 1, 1);
   assert.equal(tvPlanDefault.preferredMode, 'embed');
-  assert.equal(tvPlanDefault.embedServers.length, 5);
-  assert.equal(tvPlanDefault.embedServers[0].id, 'auto-server-3');
-  assert.equal(tvPlanDefault.embedServers[0].url, 'https://www.2embed.cc/embedtv/1399&s=1&e=1');
-  assert.equal(tvPlanDefault.embedServers[1].id, 'auto-server-1');
-  assert.equal(tvPlanDefault.embedServers[1].url, 'https://vidsrc.sh/embed/tv/1399/1/1?ds_lang=en');
+  assert.equal(tvPlanDefault.embedServers.length, 4);
+  assert.equal(tvPlanDefault.embedServers[0].id, 'auto-server-1');
+  assert.equal(tvPlanDefault.embedServers[0].url, 'https://vidsrc.sh/embed/tv/1399/1/1?ds_lang=en');
+  assert.equal(tvPlanDefault.embedServers[1].id, 'auto-server-vidlink');
+  assert.equal(
+    tvPlanDefault.embedServers[1].url,
+    'https://vidlink.pro/tv/1399/1/1?primaryColor=10d97b&autoplay=true&nextbutton=true'
+  );
+  assert.equal(tvPlanDefault.embedServers[2].id, 'auto-server-vidfast');
+  assert.equal(
+    tvPlanDefault.embedServers[2].url,
+    'https://vidfast.vc/tv/1399/1/1?theme=10d97b&autoPlay=true&nextButton=true&autoNext=true'
+  );
+  assert.equal(tvPlanDefault.embedServers[3].id, 'auto-server-3');
+  assert.equal(tvPlanDefault.embedServers[3].url, 'https://www.2embed.cc/embedtv/1399&s=1&e=1');
 
   const tvPlanS2E5 = buildEmbedServerList(1399, 'tv', 2, 5);
-  assert.equal(tvPlanS2E5[0].url, 'https://www.2embed.cc/embedtv/1399&s=2&e=5');
-  assert.equal(tvPlanS2E5[1].url, 'https://vidsrc.sh/embed/tv/1399/2/5?ds_lang=en');
+  assert.equal(tvPlanS2E5[0].url, 'https://vidsrc.sh/embed/tv/1399/2/5?ds_lang=en');
+  assert.equal(
+    tvPlanS2E5[1].url,
+    'https://vidlink.pro/tv/1399/2/5?primaryColor=10d97b&autoplay=true&nextbutton=true'
+  );
+  assert.equal(
+    tvPlanS2E5[2].url,
+    'https://vidfast.vc/tv/1399/2/5?theme=10d97b&autoPlay=true&nextButton=true&autoNext=true'
+  );
+  assert.equal(tvPlanS2E5[3].url, 'https://www.2embed.cc/embedtv/1399&s=2&e=5');
 
   const hlsPlan = resolvePlaybackPlan(
     533535,
@@ -184,7 +209,7 @@ test('Hybrid Player: resolvePlaybackPlan defaults to Server 3 (2Embed) and hides
     'movie'
   );
   assert.equal(hlsPlan.preferredMode, 'direct-hls');
-  assert.equal(hlsPlan.embedServers.length, 6);
+  assert.equal(hlsPlan.embedServers.length, 5);
   assert.equal(hlsPlan.embedServers[0].isCustom, true);
 });
 
@@ -2026,32 +2051,43 @@ test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0
   assert.equal(mainActivityJava.includes('BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE'), true);
 });
 
-test('Rollback MovieBox Direct API Integration: Restores Server 3 (2Embed.cc) and Server 1 (VidSrc.sh) as default iframe servers, removes movie-api-vercel.onrender.com, and keeps Admin/Trial/Referral intact', async () => {
+test('Rollback MovieBox Direct API Integration: Verifies 4 integrated iframe sources (VidSrc.sh, VidLink.pro, VidFast, 2Embed.cc), removes movie-api-vercel.onrender.com, and keeps Admin/Trial/Referral intact', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
 
-  // 1. Default embed servers start with Server 3 (2Embed.cc) and Server 1 (VidSrc.sh)
+  // 1. Default embed servers include VidSrc.sh, VidLink.pro, VidFast (preferred), and 2Embed.cc
   const moviePlan = resolvePlaybackPlan(872906, null, 'movie');
-  assert.equal(moviePlan.embedServers.length >= 2, true);
-  assert.equal(moviePlan.embedServers[0].id, 'auto-server-3');
-  assert.equal(moviePlan.embedServers[0].label, 'Server 3 (2Embed.cc)');
-  assert.equal(moviePlan.embedServers[0].url, 'https://www.2embed.cc/embed/872906');
-  assert.equal(moviePlan.embedServers[1].id, 'auto-server-1');
-  assert.equal(moviePlan.embedServers[1].label, 'Server 1 (VidSrc.sh)');
-  assert.equal(moviePlan.embedServers[1].url, 'https://vidsrc.sh/embed/movie/872906?ds_lang=en');
-
-  // 2. Clean iframe attributes load Server 3 and Server 1 without restrictive sandbox
-  const server3Iframe = getCleanIframeAttributes(
-    moviePlan.embedServers[0].url,
-    'Jawan - Server 3 (2Embed.cc)'
+  assert.equal(moviePlan.embedServers.length, 4);
+  assert.equal(moviePlan.embedServers[0].id, 'auto-server-1');
+  assert.equal(moviePlan.embedServers[0].url, 'https://vidsrc.sh/embed/movie/872906?ds_lang=en');
+  assert.equal(moviePlan.embedServers[1].id, 'auto-server-vidlink');
+  assert.equal(
+    moviePlan.embedServers[1].url,
+    'https://vidlink.pro/movie/872906?primaryColor=10d97b&secondaryColor=000000&iconColor=ffffff&autoplay=true&nextbutton=true'
   );
-  assert.equal(server3Iframe.src, 'https://www.2embed.cc/embed/872906');
-  assert.equal(server3Iframe.allowFullScreen, true);
-  assert.equal('sandbox' in server3Iframe, false);
+  assert.equal(moviePlan.embedServers[2].id, 'auto-server-vidfast');
+  assert.equal(
+    moviePlan.embedServers[2].url,
+    'https://vidfast.vc/movie/872906?theme=10d97b&autoPlay=true&title=true&poster=true'
+  );
+  assert.equal(moviePlan.embedServers[3].id, 'auto-server-3');
+  assert.equal(moviePlan.embedServers[3].url, 'https://www.2embed.cc/embed/872906');
+
+  // 2. Clean iframe attributes load servers without restrictive sandbox
+  const vidfastIframe = getCleanIframeAttributes(
+    moviePlan.embedServers[2].url,
+    'Jawan - Source 3 (VidFast)'
+  );
+  assert.equal(
+    vidfastIframe.src,
+    'https://vidfast.vc/movie/872906?theme=10d97b&autoPlay=true&title=true&poster=true'
+  );
+  assert.equal(vidfastIframe.allowFullScreen, true);
+  assert.equal('sandbox' in vidfastIframe, false);
 
   const server1Iframe = getCleanIframeAttributes(
-    moviePlan.embedServers[1].url,
-    'Jawan - Server 1 (VidSrc.sh)'
+    moviePlan.embedServers[0].url,
+    'Jawan - Source 1 (VidSrc.sh)'
   );
   assert.equal(server1Iframe.src, 'https://vidsrc.sh/embed/movie/872906?ds_lang=en');
   assert.equal(server1Iframe.allowFullScreen, true);
@@ -2072,8 +2108,12 @@ test('Rollback MovieBox Direct API Integration: Restores Server 3 (2Embed.cc) an
   assert.equal(directApiSource.includes('movie-api-vercel.onrender.com'), false);
   assert.equal(modalSource.includes('Server 1 (MovieBox Direct)'), false);
   assert.equal(modalSource.includes('switch-to-blob-player-btn'), false);
-  assert.equal(modalSource.includes('test-native-player-btn'), false);
-  assert.equal(modalSource.includes('prominent-open-new-tab-btn'), true);
+  const sourcePickerSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/player/SourcePicker.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('open-in-new-tab-btn'), true);
+  assert.equal(sourcePickerSource.includes('prominent-open-new-tab-btn'), true);
 });
 
 test('Phase 1 Security & Live Supabase Edge Functions (tmdb-proxy & cors-proxy): verifies headers, URLs, schema RLS, i18n RTL, and Android hardening', async () => {
@@ -3061,11 +3101,12 @@ test('Fix 4: Source Availability & Health Check (5-Minute Cache, CapacitorHttp +
   assert.equal(probeFailed.label, 'failed');
 });
 
-test('Fix 5: Rate-Limit-Proof GitHub Releases Auto-Update (6-Hour Throttle Cache, ETag 304 Free Revalidation, Automatic Static version.json Fallback on 403 Rate-Limit, and Android Directory.Cache APK Download + REQUEST_INSTALL_PACKAGES)', async () => {
+test('Fix 5: Google Apps Script Web App Auto-Update (Fetches { version, apk_url, release_notes } from script.google.com, 6-Hour Throttle Cache, ETag 304, Static version.json Fallback, and Android Directory.Cache APK Download + REQUEST_INSTALL_PACKAGES)', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { Directory } = await import('@capacitor/filesystem');
   const {
+    DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL,
     UPDATE_CHECK_THROTTLE_MS,
     STARTUP_UPDATE_CHECK_DEBOUNCE_MS,
     clearUpdateCheckThrottleCache,
@@ -3074,69 +3115,69 @@ test('Fix 5: Rate-Limit-Proof GitHub Releases Auto-Update (6-Hour Throttle Cache
   } = await import('../services/inAppUpdateService');
 
   clearUpdateCheckThrottleCache();
+  assert.equal(
+    DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL,
+    'https://script.google.com/macros/s/AKfycbxFNwn6R_Msl86xQeDY25OGSEZcUl-9hAukbxzWbSLT__wZ9oF6L_XMLCHRLOTgm9QqVg/exec'
+  );
   assert.equal(UPDATE_CHECK_THROTTLE_MS, 6 * 60 * 60 * 1000); // 6 hours
   assert.equal(STARTUP_UPDATE_CHECK_DEBOUNCE_MS, 3000); // 3 seconds
 
   const t0 = 1_700_000_000_000;
   let apiCalls = 0;
 
-  // 1. GitHub Releases API (`GET /repos/[owner]/[repo]/releases/latest`) -> parses tag_name, release notes, APK asset, and ETag
-  const mockGitHubReleaseFetch = (async (input: RequestInfo | URL) => {
+  // 1. Google Apps Script Web App URL -> parses { version, apk_url, release_notes }
+  const mockGoogleAppsScriptFetch = (async (input: RequestInfo | URL) => {
     apiCalls += 1;
     const urlStr = String(input);
     assert.equal(
       urlStr,
-      'https://api.github.com/repos/cinebox-official/cinebox-apk/releases/latest'
+      'https://script.google.com/macros/s/AKfycbxFNwn6R_Msl86xQeDY25OGSEZcUl-9hAukbxzWbSLT__wZ9oF6L_XMLCHRLOTgm9QqVg/exec'
     );
     return new Response(
       JSON.stringify({
-        tag_name: 'v1.0.5',
-        body: 'New Sticky Player & 6-Hour Rate-Limit-Safe Update Check',
-        html_url: 'https://github.com/cinebox-official/cinebox-apk/releases/tag/v1.0.5',
-        assets: [
-          {
-            name: 'CineBox-v1.0.5.apk',
-            browser_download_url:
-              'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.5/CineBox-v1.0.5.apk',
-          },
-        ],
+        version: '1.0.5',
+        apk_url:
+          'https://github.com/zulqarnainshah25-glitch/cinebox-api/releases/download/v1.0.5/app-release.apk',
+        release_notes: 'v1.0.5 Update via Google Apps Script Web App JSON',
       }),
       {
         status: 200,
-        headers: { etag: 'W/"gh-release-v105"' },
+        headers: { etag: 'W/"gas-release-v105"' },
       }
     );
   }) as typeof fetch;
 
   const check1 = await checkGitHubLatestReleaseUpdate({
-    repo: 'cinebox-official/cinebox-apk',
-    currentVersionOverride: '1.0.2',
+    currentVersionOverride: '1.0.3',
     nowMs: t0,
-    fetchImpl: mockGitHubReleaseFetch,
+    fetchImpl: mockGoogleAppsScriptFetch,
   });
   assert.equal(check1.checked, true);
   assert.equal(check1.updateAvailable, true);
   assert.equal(check1.remoteVersion, '1.0.5');
-  assert.equal(check1.source, 'github-releases-api');
+  assert.equal(
+    check1.apkUrl,
+    'https://github.com/zulqarnainshah25-glitch/cinebox-api/releases/download/v1.0.5/app-release.apk'
+  );
+  assert.equal(check1.source, 'google-apps-script');
   assert.equal(check1.throttledFromCache, false);
-  assert.equal(check1.etag, 'W/"gh-release-v105"');
+  assert.equal(check1.etag, 'W/"gas-release-v105"');
   assert.equal(apiCalls, 1);
 
-  // 2. Within 6 hours (e.g. +2 hours) -> returns cached result immediately without hitting GitHub API!
+  // 2. Within 6 hours (e.g. +2 hours) -> returns cached result immediately without extra network calls!
   const check2Cached = await checkGitHubLatestReleaseUpdate({
-    repo: 'cinebox-official/cinebox-apk',
-    currentVersionOverride: '1.0.2',
+    currentVersionOverride: '1.0.3',
     nowMs: t0 + 2 * 60 * 60 * 1000,
-    fetchImpl: mockGitHubReleaseFetch,
+    fetchImpl: mockGoogleAppsScriptFetch,
   });
   assert.equal(check2Cached.throttledFromCache, true);
   assert.equal(check2Cached.updateAvailable, true);
   assert.equal(check2Cached.remoteVersion, '1.0.5');
   assert.equal(apiCalls, 1); // Zero extra API calls within 6 hours!
 
-  // 3. After 6 hours (+6h 1m) -> sends `If-None-Match` ETag; 304 Not Modified does not consume GitHub rate limit
+  // 3. After 6 hours (+6h 1m) -> sends `If-None-Match` ETag; 304 Not Modified reuses cached manifest
   let receivedIfNoneMatch = '';
-  const mockGitHub304Fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  const mockGas304Fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
     apiCalls += 1;
     const hdrs = (init?.headers || {}) as Record<string, string>;
     receivedIfNoneMatch = hdrs['If-None-Match'] || '';
@@ -3144,41 +3185,37 @@ test('Fix 5: Rate-Limit-Proof GitHub Releases Auto-Update (6-Hour Throttle Cache
   }) as typeof fetch;
 
   const check3Etag = await checkGitHubLatestReleaseUpdate({
-    repo: 'cinebox-official/cinebox-apk',
-    currentVersionOverride: '1.0.2',
+    currentVersionOverride: '1.0.3',
     nowMs: t0 + 6 * 60 * 60 * 1000 + 60_000,
-    fetchImpl: mockGitHub304Fetch,
+    fetchImpl: mockGas304Fetch,
   });
-  assert.equal(receivedIfNoneMatch, 'W/"gh-release-v105"');
+  assert.equal(receivedIfNoneMatch, 'W/"gas-release-v105"');
   assert.equal(check3Etag.updateAvailable, true);
   assert.equal(check3Etag.remoteVersion, '1.0.5');
 
-  // 4. When GitHub API returns 403 Rate Limit Exceeded (60 req/hr limit on CGNAT) -> automatically falls back to Static version.json CDN!
+  // 4. When Google Apps Script returns an error (403/500) -> automatically falls back to Static version.json!
   clearUpdateCheckThrottleCache();
-  const mockRateLimitedWithStaticFallbackFetch = (async (input: RequestInfo | URL) => {
+  const mockGasErrorWithStaticFallbackFetch = (async (input: RequestInfo | URL) => {
     const urlStr = String(input);
-    if (urlStr.includes('api.github.com')) {
-      return new Response(JSON.stringify({ message: 'API rate limit exceeded' }), {
-        status: 403,
-      });
+    if (urlStr.includes('script.google.com')) {
+      return new Response('Service Unavailable', { status: 503 });
     }
     return new Response(
       JSON.stringify({
         version: '1.0.6',
         apk_url:
-          'https://github.com/cinebox-official/cinebox-apk/releases/download/v1.0.6/app-release.apk',
-        release_notes: 'Served via Static version.json Fastly CDN (Zero Rate Limit)',
+          'https://github.com/zulqarnainshah25-glitch/cinebox-api/releases/download/v1.0.6/app-release.apk',
+        release_notes: 'Served via Static version.json Fallback',
       }),
       { status: 200 }
     );
   }) as typeof fetch;
 
   const check4Fallback = await checkGitHubLatestReleaseUpdate({
-    repo: 'cinebox-official/cinebox-apk',
-    currentVersionOverride: '1.0.2',
+    currentVersionOverride: '1.0.3',
     nowMs: t0,
     forceRefresh: true,
-    fetchImpl: mockRateLimitedWithStaticFallbackFetch,
+    fetchImpl: mockGasErrorWithStaticFallbackFetch,
   });
   assert.equal(check4Fallback.checked, true);
   assert.equal(check4Fallback.updateAvailable, true);
@@ -3588,6 +3625,262 @@ test('Fix 8: Hardened User Feedback (Server & Client TRIM + Length [3..500], Str
   assert.equal(schemaSql.includes('public.check_feedback_rate_limit(user_id, email)'), true);
   assert.equal(schemaSql.includes('website_honeypot = \'\''), true);
 });
+
+test('YouTube Data API v3 Resilience: 30-Minute Quota-Saving Cache, Official YouTube Channel RSS XML Feed Fallback, and Verified Official Pakistani Drama Catalog when VITE_YOUTUBE_API_KEY is unset', async () => {
+  const {
+    YOUTUBE_DRAMA_CACHE_TTL_MS,
+    VERIFIED_OFFICIAL_PAK_DRAMA_EPISODES,
+    clearYouTubeDramaCache,
+    parseYouTubeRssXmlFeed,
+    fetchPakistaniDramasFromYouTube,
+  } = await import('../services/youtubeDramaService');
+
+  clearYouTubeDramaCache();
+  assert.equal(YOUTUBE_DRAMA_CACHE_TTL_MS, 30 * 60 * 1000);
+  assert.equal(VERIFIED_OFFICIAL_PAK_DRAMA_EPISODES.length >= 8, true);
+
+  // 1. Verify Official YouTube Channel RSS/Atom XML parser extracts videoId, title, channel, and views with 0 API quota
+  const sampleRssXml = `<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/">
+      <entry>
+        <yt:videoId>9bZkp7q19f0</yt:videoId>
+        <yt:channelId>UC6-F5tO8uklgE9Zy8IvbdFw</yt:channelId>
+        <title>Ishq Murshid - Episode 29 [CC] - HUM TV</title>
+        <published>2025-02-10T16:00:00+00:00</published>
+        <author><name>HUM TV</name></author>
+        <media:group>
+          <media:description>Watch Ishq Murshid Episode 29 in Full HD.</media:description>
+          <media:community><media:statistics views="19500000"/></media:community>
+        </media:group>
+      </entry>
+    </feed>`;
+
+  const rssParsed = parseYouTubeRssXmlFeed(sampleRssXml, 'HUM TV', 'UC6-F5tO8uklgE9Zy8IvbdFw');
+  assert.equal(rssParsed.length, 1);
+  assert.equal(rssParsed[0].videoId, '9bZkp7q19f0');
+  assert.equal(rssParsed[0].title, 'Ishq Murshid - Episode 29 [CC] - HUM TV');
+  assert.equal(rssParsed[0].viewCountFormatted, '19.5M views');
+  assert.equal(rssParsed[0].embedUrl, 'https://www.youtube.com/embed/9bZkp7q19f0?autoplay=1');
+
+  // 2. When VITE_YOUTUBE_API_KEY is not set and RSS proxy fails -> automatically returns Verified Official Pakistani Drama episodes!
+  const failingNetworkFetch = (async () =>
+    new Response('Offline', { status: 503 })) as unknown as typeof fetch;
+
+  const fallbackAll = await fetchPakistaniDramasFromYouTube(
+    { channelKey: 'ALL', sortOrder: 'viewCount', forceRefresh: true },
+    failingNetworkFetch
+  );
+  assert.equal(fallbackAll.ok, true);
+  assert.equal(fallbackAll.source, 'verified-official-catalog');
+  assert.equal(fallbackAll.items.length >= 8, true);
+  assert.equal(fallbackAll.items[0].title.includes('Tere Bin'), true); // Highest views (86.4M) sorted first
+
+  // 3. Repeated call uses the 30-minute memory cache (`source: 'cache'`)
+  const cachedAll = await fetchPakistaniDramasFromYouTube(
+    { channelKey: 'ALL', sortOrder: 'viewCount', forceRefresh: false },
+    failingNetworkFetch
+  );
+  assert.equal(cachedAll.ok, true);
+  assert.equal(cachedAll.source, 'cache');
+  assert.equal(cachedAll.items.length, fallbackAll.items.length);
+
+  // 4. Channel & Search filtering work on the fallback catalog
+  const humOnly = await fetchPakistaniDramasFromYouTube(
+    { channelKey: 'HUM_TV', query: 'Parizaad', forceRefresh: true },
+    failingNetworkFetch
+  );
+  assert.equal(humOnly.ok, true);
+  assert.equal(humOnly.items.length, 1);
+  assert.equal(humOnly.items[0].channelTitle, 'HUM TV');
+  assert.equal(humOnly.items[0].title.includes('Parizaad'), true);
+});
+
+test('Final Integration: 4 Specific Streaming Sources (VidSrc.sh, VidLink.pro, VidFast preferred, 2Embed), VidLink/VidFast MEDIA_DATA Progress Tracking, and Player UI Fixes', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  const {
+    buildVidSrcEmbedUrl,
+    buildVidLinkEmbedUrl,
+    buildVidFastEmbedUrl,
+    build2EmbedFallbackUrl,
+    VIDLINK_ALLOWED_ORIGIN,
+    VIDFAST_ALLOWED_ORIGINS,
+    isAllowedMediaDataOrigin,
+    parseEmbedMediaDataMessage,
+  } = await import('../services/vidsrcService');
+  const {
+    PREFERRED_EMBED_SERVER_ID,
+    CONTROLS_AUTO_HIDE_MS,
+    getFullscreenPlayerConfig,
+  } = await import('./streamResolver');
+  const { getSourceButtonState } = await import('../components/player/SourcePicker');
+
+  // 1. Exact URLs & Query Parameters for all 4 Sources (Movie & TV)
+  assert.equal(PREFERRED_EMBED_SERVER_ID, 'auto-server-vidfast');
+  assert.equal(CONTROLS_AUTO_HIDE_MS, 3000);
+
+  // Source 1: VidSrc.sh (?ds_lang=en)
+  assert.equal(
+    buildVidSrcEmbedUrl({ tmdbId: 533535, mediaType: 'movie', dsLang: 'en' }),
+    'https://vidsrc.sh/embed/movie/533535?ds_lang=en'
+  );
+  assert.equal(
+    buildVidSrcEmbedUrl({ tmdbId: 94997, mediaType: 'tv', season: 2, episode: 4, dsLang: 'en' }),
+    'https://vidsrc.sh/embed/tv/94997/2/4?ds_lang=en'
+  );
+
+  // Source 2: VidLink.pro
+  assert.equal(
+    buildVidLinkEmbedUrl({ tmdbId: 533535, mediaType: 'movie' }),
+    'https://vidlink.pro/movie/533535?primaryColor=10d97b&secondaryColor=000000&iconColor=ffffff&autoplay=true&nextbutton=true'
+  );
+  assert.equal(
+    buildVidLinkEmbedUrl({ tmdbId: 94997, mediaType: 'tv', season: 2, episode: 4 }),
+    'https://vidlink.pro/tv/94997/2/4?primaryColor=10d97b&autoplay=true&nextbutton=true'
+  );
+
+  // Source 3: VidFast (Preferred Default)
+  assert.equal(
+    buildVidFastEmbedUrl({ tmdbId: 533535, mediaType: 'movie' }),
+    'https://vidfast.vc/movie/533535?theme=10d97b&autoPlay=true&title=true&poster=true'
+  );
+  assert.equal(
+    buildVidFastEmbedUrl({ tmdbId: 94997, mediaType: 'tv', season: 2, episode: 4 }),
+    'https://vidfast.vc/tv/94997/2/4?theme=10d97b&autoPlay=true&nextButton=true&autoNext=true'
+  );
+
+  // Source 4: 2Embed
+  assert.equal(
+    build2EmbedFallbackUrl({ tmdbId: 533535, mediaType: 'movie' }),
+    'https://www.2embed.cc/embed/533535'
+  );
+  assert.equal(
+    build2EmbedFallbackUrl({ tmdbId: 94997, mediaType: 'tv', season: 2, episode: 4 }),
+    'https://www.2embed.cc/embedtv/94997&s=2&e=4'
+  );
+
+  // 2. Origin Allowlist & Security Validation for MEDIA_DATA postMessages
+  assert.equal(VIDLINK_ALLOWED_ORIGIN, 'https://vidlink.pro');
+  assert.equal(VIDFAST_ALLOWED_ORIGINS.length, 9);
+  for (const domain of [
+    'https://vidfast.pro',
+    'https://vidfast.in',
+    'https://vidfast.io',
+    'https://vidfast.me',
+    'https://vidfast.net',
+    'https://vidfast.pm',
+    'https://vidfast.xyz',
+    'https://vidfast.vc',
+    'https://vidfast.bz',
+  ]) {
+    assert.equal(isAllowedMediaDataOrigin(domain), 'vidfast');
+  }
+  assert.equal(isAllowedMediaDataOrigin('https://vidlink.pro'), 'vidlink');
+
+  // Untrusted / spoofed / insecure origins MUST be rejected
+  assert.equal(isAllowedMediaDataOrigin('http://vidlink.pro'), null);
+  assert.equal(isAllowedMediaDataOrigin('https://vidfast.vc.attacker.com'), null);
+  assert.equal(isAllowedMediaDataOrigin('https://evil.example.com'), null);
+  assert.equal(isAllowedMediaDataOrigin(null), null);
+
+  // 3. Parse VidLink MEDIA_DATA movie event + XSS sanitization
+  const vidlinkEvent = parseEmbedMediaDataMessage(
+    {
+      type: 'MEDIA_DATA',
+      data: {
+        id: 533535,
+        type: 'movie',
+        title: '<script>alert(1)</script>Deadpool & Wolverine',
+        progress: { watched: 1245.4, duration: 7680 },
+      },
+    },
+    'https://vidlink.pro'
+  );
+  assert.ok(vidlinkEvent);
+  assert.equal(vidlinkEvent?.provider, 'vidlink');
+  assert.equal(vidlinkEvent?.tmdbId, 533535);
+  assert.equal(vidlinkEvent?.mediaType, 'movie');
+  assert.equal(vidlinkEvent?.watched, 1245.4);
+  assert.equal(vidlinkEvent?.duration, 7680);
+  assert.equal(vidlinkEvent?.title?.includes('<script'), false);
+
+  // 4. Parse VidFast MEDIA_DATA TV event (both direct & TMDB-keyed map shapes)
+  const vidfastTvEvent = parseEmbedMediaDataMessage(
+    JSON.stringify({
+      type: 'MEDIA_DATA',
+      data: {
+        '94997': {
+          id: 94997,
+          type: 'tv',
+          last_season_watched: 2,
+          last_episode_watched: 6,
+          progress: { watched: 620, duration: 3400 },
+        },
+      },
+    }),
+    'https://vidfast.vc',
+    { tmdbId: 94997, mediaType: 'tv' }
+  );
+  assert.ok(vidfastTvEvent);
+  assert.equal(vidfastTvEvent?.provider, 'vidfast');
+  assert.equal(vidfastTvEvent?.tmdbId, 94997);
+  assert.equal(vidfastTvEvent?.mediaType, 'tv');
+  assert.equal(vidfastTvEvent?.season, 2);
+  assert.equal(vidfastTvEvent?.episode, 6);
+  assert.equal(vidfastTvEvent?.watched, 620);
+
+  // Spoofed origin or invalid negative/NaN timestamps rejected
+  assert.equal(
+    parseEmbedMediaDataMessage(
+      { type: 'MEDIA_DATA', data: { id: 533535, progress: { watched: 100, duration: 1000 } } },
+      'https://evil-vidfast.vc'
+    ),
+    null
+  );
+  assert.equal(
+    parseEmbedMediaDataMessage(
+      { type: 'MEDIA_DATA', data: { id: 533535, progress: { watched: -50, duration: 1000 } } },
+      'https://vidfast.vc'
+    ),
+    null
+  );
+
+  // 5. Compact Source Buttons + Red Dot Down Sources Disabled & Greyed Out
+  const downBtn = getSourceButtonState('unavailable', false);
+  assert.equal(downBtn.isDisabled, true);
+  assert.equal(downBtn.healthDot.dotColor, 'red');
+  assert.equal(downBtn.buttonClassName.includes('opacity-45'), true);
+  assert.equal(downBtn.buttonClassName.includes('cursor-not-allowed'), true);
+
+  const okBtn = getSourceButtonState('available', true);
+  assert.equal(okBtn.isDisabled, false);
+  assert.equal(okBtn.healthDot.dotColor, 'green');
+  assert.equal(okBtn.buttonClassName.includes('min-h-[32px]'), true);
+
+  // 6. Fullscreen Top-Left Back Button & Top-Right Adblocker/Exit Controls synced with auto-hide
+  const fsVisible = getFullscreenPlayerConfig(true, 'contain', true);
+  assert.equal(fsVisible.exitButtonClassName.includes('left-['), true);
+  assert.equal(fsVisible.topRightControlsClassName.includes('right-['), true);
+  assert.equal(fsVisible.topRightControlsClassName.includes('opacity-100'), true);
+
+  const fsHidden = getFullscreenPlayerConfig(true, 'contain', false);
+  assert.equal(fsHidden.topRightControlsClassName.includes('opacity-0'), true);
+
+  // 7. Verify VideoPlayerModal.tsx structural requirements
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('useState<boolean>(true)'), true); // Adblocker default ON
+  assert.equal(modalSource.includes('CONTROLS_AUTO_HIDE_MS'), true); // 3s auto-hide
+  assert.equal(modalSource.includes('data-testid="below-video-controls-bar"'), true);
+  assert.equal(modalSource.includes('data-testid="fullscreen-top-right-controls"'), true);
+  assert.equal(modalSource.includes('data-testid="fullscreen-adblocker-toggle-btn"'), true);
+  assert.equal(modalSource.includes('data-testid="fullscreen-exit-back-btn"'), true);
+  assert.equal(modalSource.includes('parseEmbedMediaDataMessage'), true);
+});
+
 
 
 

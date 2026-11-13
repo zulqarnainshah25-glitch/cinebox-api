@@ -10,6 +10,7 @@ import {
   Info,
   Loader2,
   Maximize2,
+  Minimize2,
   RefreshCw,
   Save,
   Share2,
@@ -19,7 +20,6 @@ import {
   Sparkles,
   Tv,
   Volume2,
-  X,
 } from 'lucide-react';
 import {
   AppConfigRecord,
@@ -33,6 +33,7 @@ import {
   AlternateLanguageStream,
   auditStickyAncestors,
   buildVidSrcAdBlockCssRules,
+  CONTROLS_AUTO_HIDE_MS,
   formatPlayerTimecode,
   getCleanIframeAttributes,
   getFullscreenPlayerConfig,
@@ -42,6 +43,7 @@ import {
   isVidSrcProviderUrl,
   lockScreenOrientationSafely,
   PLAYABLE_HD_STREAMS_POOL,
+  PREFERRED_EMBED_SERVER_ID,
   resolvePlaybackPlan,
   resolveStickyPlayerPositionStrategy,
   shouldEnableStickyPlayerOnScroll,
@@ -66,14 +68,17 @@ import {
   searchPakDramaOrHindiStreams,
 } from '../services/hindiAndPakDramaService';
 import {
-  buildVidSrcEmbedUrl,
   fetchVidSrcContentInfo,
   getVidSrcSavedProgress,
+  parseEmbedMediaDataMessage,
   parseVidSrcPlayerEventMessage,
   saveVidSrcPlayerProgress,
   VidSrcContentInfoResult,
 } from '../services/vidsrcService';
-import { fetchLinkHealthRowsForTmdb } from '../services/supabaseClient';
+import {
+  fetchLinkHealthRowsForTmdb,
+  syncWatchHistoryEntry,
+} from '../services/supabaseClient';
 import {
   getSavedSubtitlePreferences,
   sanitizeSubtitleTracksList,
@@ -193,7 +198,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     offlineDownload ? 'direct' : isPakDrama ? 'pak-drama' : 'embed'
   );
   const [selectedEmbedId, setSelectedEmbedId] = useState<string>(
-    movieLink?.stream_url ? 'custom-supabase' : 'auto-server-3'
+    movieLink?.stream_url ? 'custom-supabase' : PREFERRED_EMBED_SERVER_ID
   );
   const [selectedAltStreamUrl, setSelectedAltStreamUrl] = useState<string | null>(
     plan.directVideoUrl
@@ -259,30 +264,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [isSavingLink, setIsSavingLink] = useState<boolean>(false);
   const [linkSaveMessage, setLinkSaveMessage] = useState<string | null>(null);
 
-  // Real VidSrc.sh AdBlocker State
-  const [isVidSrcAdBlockerEnabled, setIsVidSrcAdBlockerEnabled] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem('cinebox_vidsrc_adblocker_v1');
-      return saved === null ? true : saved === 'true';
-    } catch {
-      return true;
-    }
-  });
+  // AdBlocker always defaults to ON when opening the player; user can toggle OFF anytime
+  const [isVidSrcAdBlockerEnabled, setIsVidSrcAdBlockerEnabled] = useState<boolean>(true);
   const [blockedAdsCount, setBlockedAdsCount] = useState<number>(0);
   const [adBlockToast, setAdBlockToast] = useState<string | null>(null);
 
   const handleToggleVidSrcAdBlocker = () => {
     setIsVidSrcAdBlockerEnabled((prev) => {
       const next = !prev;
-      try {
-        localStorage.setItem('cinebox_vidsrc_adblocker_v1', String(next));
-      } catch {
-        // ignore
-      }
       setAdBlockToast(
         next
-          ? '🛡️ VidSrc.sh AdBlocker Enabled — Popup Ads Blocked'
-          : '⚠️ VidSrc.sh AdBlocker Disabled'
+          ? '🛡️ AdBlocker Enabled — Popup & Redirect Ads Blocked'
+          : '⚠️ AdBlocker Disabled'
       );
       return next;
     });
@@ -405,7 +398,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     controlsHideTimerRef.current = setTimeout(() => {
       setAreControlsVisible(false);
       controlsHideTimerRef.current = null;
-    }, 3500);
+    }, CONTROLS_AUTO_HIDE_MS);
   };
 
   const handleWakeOrToggleControls = (forceShow: boolean = false) => {
@@ -425,6 +418,28 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       return next;
     });
   };
+
+  // Auto-hide controls after 3 seconds whenever playback is active (mobile & fullscreen)
+  useEffect(() => {
+    const shouldAutoHide =
+      playerMode === 'direct' ? isPlaying : true;
+    if (!shouldAutoHide) {
+      if (controlsHideTimerRef.current) {
+        clearTimeout(controlsHideTimerRef.current);
+        controlsHideTimerRef.current = null;
+      }
+      setAreControlsVisible(true);
+      return;
+    }
+    setAreControlsVisible(true);
+    scheduleControlsAutoHide();
+    return () => {
+      if (controlsHideTimerRef.current) {
+        clearTimeout(controlsHideTimerRef.current);
+        controlsHideTimerRef.current = null;
+      }
+    };
+  }, [movie.id, playerMode, selectedEmbedId, selectedSeason, selectedEpisode, isPlaying, isFullscreen]);
 
   // Sync fullscreen & orientation
   useEffect(() => {
@@ -590,7 +605,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setPlayerMode(
       offlineDownload ? 'direct' : pakDetected ? 'pak-drama' : 'embed'
     );
-    setSelectedEmbedId(movieLink?.stream_url ? 'custom-supabase' : 'auto-server-3');
+    setSelectedEmbedId(
+      movieLink?.stream_url ? 'custom-supabase' : PREFERRED_EMBED_SERVER_ID
+    );
     setSelectedAltStreamUrl(nextPlan.directVideoUrl);
     setSelectedSeason(1);
     setSelectedEpisode(1);
@@ -645,7 +662,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setIsLoadingVidsrcInfo(false);
 
     if (!result.ok && !movieLink?.stream_url) {
-      setSelectedEmbedId((prev) => (prev === 'auto-server-1' ? 'auto-server-3' : prev));
+      setSelectedEmbedId((prev) =>
+        prev === 'auto-server-1' ? PREFERRED_EMBED_SERVER_ID : prev
+      );
     }
   };
 
@@ -674,7 +693,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         setVidsrcInfoState(res);
         setIsLoadingVidsrcInfo(false);
         if (!res.ok && !movieLink?.stream_url) {
-          setSelectedEmbedId((prev) => (prev === 'auto-server-1' ? 'auto-server-3' : prev));
+          setSelectedEmbedId((prev) =>
+            prev === 'auto-server-1' ? PREFERRED_EMBED_SERVER_ID : prev
+          );
         }
       })
       .catch(() => {
@@ -686,9 +707,66 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [movie.id, movie.mediaType, selectedSeason, selectedEpisode, movieLink?.stream_url]);
 
-  // Listen for VidSrc.sh iframe PLAYER_EVENT messages and sync to Watch History + Supabase
+  // Listen for VidSrc.sh (PLAYER_EVENT) & VidLink/VidFast (MEDIA_DATA) postMessages and sync to Supabase watch_history
   useEffect(() => {
     const handlePostMessage = (event: MessageEvent) => {
+      // 1. VidLink (https://vidlink.pro) & VidFast (9 allowed domains) MEDIA_DATA tracking
+      const mediaData = parseEmbedMediaDataMessage(event.data, event.origin, {
+        tmdbId: movie.id,
+        mediaType: movie.mediaType,
+        season: selectedSeason,
+        episode: selectedEpisode,
+      });
+
+      if (mediaData) {
+        const resolvedSeason =
+          mediaData.season || (movie.mediaType === 'tv' ? selectedSeason : 1);
+        const resolvedEpisode =
+          mediaData.episode || (movie.mediaType === 'tv' ? selectedEpisode : 1);
+
+        saveVidSrcPlayerProgress({
+          tmdbId: mediaData.tmdbId,
+          mediaType: mediaData.mediaType,
+          season: resolvedSeason,
+          episode: resolvedEpisode,
+          currentTime: mediaData.watched,
+          duration: mediaData.duration,
+        });
+
+        if (mediaData.watched > 0) {
+          setHasPlaybackStarted(true);
+        }
+
+        setVidsrcWatchProgress({
+          currentTime: Math.round(mediaData.watched),
+          duration: Math.round(mediaData.duration),
+          watchedPercent: mediaData.watchedPercent,
+          updatedAt: Date.now(),
+        });
+
+        if (
+          mediaData.tmdbId === movie.id &&
+          resolvedSeason === selectedSeason &&
+          resolvedEpisode === selectedEpisode
+        ) {
+          reportPlaybackProgress(mediaData.watched, mediaData.duration);
+        } else if (mediaData.watched >= 5) {
+          void syncWatchHistoryEntry({
+            user_id: activeUserId,
+            tmdb_id: mediaData.tmdbId,
+            media_type: mediaData.mediaType,
+            season: mediaData.mediaType === 'tv' ? resolvedSeason : 0,
+            episode: mediaData.mediaType === 'tv' ? resolvedEpisode : 0,
+            progress_seconds: mediaData.watched,
+            duration_seconds: mediaData.duration,
+            title: mediaData.title || movie.title,
+            poster_url: movie.posterUrl,
+          });
+        }
+        return;
+      }
+
+      // 2. VidSrc.sh PLAYER_EVENT tracking
       const parsed = parseVidSrcPlayerEventMessage(event.data, event.origin);
       if (!parsed) return;
 
@@ -731,7 +809,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return () => {
       window.removeEventListener('message', handlePostMessage);
     };
-  }, [movie, selectedSeason, selectedEpisode, reportPlaybackProgress]);
+  }, [activeUserId, movie, selectedSeason, selectedEpisode, reportPlaybackProgress]);
 
   // Cross-origin iframe click/focus detection (works for both VidSrc.sh and 2Embed.cc even without postMessage)
   useEffect(() => {
@@ -1076,10 +1154,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   useEffect(() => {
     const cleanup = installVidSrcNetworkAdInterceptor({
       enabled: playerMode === 'embed' && isVidSrcAdBlockerEnabled,
-      isVidSrcTarget: isCurrentServerVidSrc,
+      isVidSrcTarget: playerMode === 'embed',
       onAdBlocked: (_blockedUrl, kind) => {
         setBlockedAdsCount((c) => c + 1);
-        setAdBlockToast(`🛡️ VidSrc.sh Ad Blocked (${kind})`);
+        setAdBlockToast(`🛡️ Ad Blocked (${kind})`);
       },
     });
     return cleanup;
@@ -1198,192 +1276,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           }}
           className={stickyPlayerWrapperClass}
         >
-        {/* TOP PLAYER HEADER FOR EMBED / PAK-DRAMA / TRAILER MODES */}
-        {!isFullscreen && playerMode === 'embed' && (
-          <div
-            data-testid="player-top-header-bar"
-            className="flex items-center justify-between gap-2 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
-          >
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <button
-                type="button"
-                data-testid="close-player-btn"
-                onClick={onClose}
-                aria-label="Back to catalog"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-white transition-colors shrink-0"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <div className="min-w-0 flex-1">
-                <span className="text-xs sm:text-sm font-bold text-white truncate block">
-                  {displayPlayerTitle}
-                </span>
-                <span className="text-[10px] sm:text-[11px] font-semibold text-[#10d97b] truncate block">
-                  Playing on {activeFriendlySourceName} · Popup &amp; Ad Protection Active
-                </span>
-              </div>
-            </div>
-
-            <div className="relative flex items-center gap-1.5 sm:gap-2 shrink-0">
-              {plan.alternateLanguageStreams.length > 0 && (
-                <button
-                  type="button"
-                  data-testid="switch-to-verified-direct-audio-btn"
-                  onClick={() => {
-                    setSelectedAltStreamUrl(plan.alternateLanguageStreams[0].url);
-                    setPlayerMode('direct');
-                  }}
-                  className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-[#10d97b]/50 text-[#10d97b] text-[11px] sm:text-xs font-extrabold flex items-center gap-1.5 min-h-[36px] transition-colors"
-                >
-                  <Volume2 className="w-3.5 h-3.5" />
-                  <span>Direct Stream ({plan.alternateLanguageStreams.length} Lang)</span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                role="switch"
-                aria-checked={isVidSrcAdBlockerEnabled}
-                aria-label="Adblocker toggle switch for VidSrc.sh"
-                data-testid="vidsrc-adblocker-toggle-btn"
-                onClick={handleToggleVidSrcAdBlocker}
-                className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold shadow-md flex items-center gap-2 min-h-[36px] transition-all active:scale-95 border ${
-                  isVidSrcAdBlockerEnabled
-                    ? 'bg-emerald-950/95 hover:bg-emerald-900 border-[#10d97b] text-[#10d97b]'
-                    : 'bg-slate-800/90 hover:bg-slate-700 border-slate-600 text-slate-300'
-                }`}
-              >
-                {isVidSrcAdBlockerEnabled ? (
-                  <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
-                ) : (
-                  <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                )}
-                <span>Adblocker</span>
-                <span
-                  aria-hidden="true"
-                  className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
-                    isVidSrcAdBlockerEnabled ? 'bg-[#10d97b]' : 'bg-slate-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-3 w-3 transform rounded-full bg-slate-950 transition-transform ${
-                      isVidSrcAdBlockerEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
-                    }`}
-                  />
-                </span>
-                {blockedAdsCount > 0 && (
-                  <span
-                    data-testid="vidsrc-blocked-ads-badge"
-                    className="px-1.5 py-0.5 rounded-full bg-[#10d97b] text-slate-950 text-[10px] font-black leading-none"
-                  >
-                    {blockedAdsCount}
-                  </span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                data-testid="enter-fullscreen-btn"
-                onClick={handleToggleFullscreen}
-                aria-label="Enter Fullscreen"
-                className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] sm:text-xs font-extrabold flex items-center gap-1.5 min-h-[36px] transition-transform active:scale-95"
-              >
-                <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
-                <span>Fullscreen</span>
-              </button>
-
-              <a
-                href={activeEmbedServer?.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-testid="open-in-new-tab-btn"
-                className="inline-flex px-2.5 sm:px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] sm:text-xs font-extrabold shadow-lg shadow-[#10d97b]/25 items-center gap-1.5 min-h-[36px] transition-transform active:scale-95"
-              >
-                <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
-                <span>Open in New Tab</span>
-              </a>
-            </div>
-          </div>
-        )}
-
-        {!isFullscreen && playerMode === 'pak-drama' && (
-          <div
-            data-testid="player-top-header-bar"
-            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
-          >
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <button
-                type="button"
-                data-testid="close-player-btn"
-                onClick={onClose}
-                aria-label="Back to catalog"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-white transition-colors shrink-0"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <div className="min-w-0 flex-1">
-                <span className="text-xs sm:text-sm font-bold text-white truncate block">
-                  {pakDramaStreams[activePakStreamIdx]?.title || displayPlayerTitle}
-                </span>
-                <span className="text-[10px] sm:text-[11px] font-semibold text-[#10d97b] truncate block">
-                  Pak Drama &amp; Hindi Stream ·{' '}
-                  {pakDramaStreams[activePakStreamIdx]
-                    ? `Duration: ${pakDramaStreams[activePakStreamIdx].durationFormatted}`
-                    : 'Searching Full Episode / Hindi Stream...'}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                data-testid="enter-fullscreen-btn"
-                onClick={handleToggleFullscreen}
-                aria-label="Enter Fullscreen"
-                className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] sm:text-xs font-extrabold flex items-center gap-1.5 min-h-[36px]"
-              >
-                <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
-                <span>Fullscreen</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {!isFullscreen && playerMode === 'trailer' && movie.youtubeKey && (
-          <div
-            data-testid="player-top-header-bar"
-            className="sticky top-0 z-30 flex items-center justify-between gap-2 px-3 sm:px-4 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-2 bg-[#000000] border-0"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <button
-                type="button"
-                data-testid="close-player-btn"
-                onClick={onClose}
-                aria-label="Back to catalog"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-white transition-colors shrink-0"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <span className="text-xs sm:text-sm font-bold text-white truncate">
-                {movie.youtubeTitle || `${movie.title} — Official TMDb Video`}
-              </span>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedEmbedId('auto-server-3');
-                setPlayerMode('embed');
-              }}
-              className="px-3 py-1.5 rounded-lg bg-[#10d97b] text-slate-950 text-xs font-bold transition-colors shrink-0"
-            >
-              Back to Source 1
-            </button>
-          </div>
-        )}
-
         {/* ===================================================================
-            HYBRID VIDEO PLAYER SURFACE
+            HYBRID VIDEO PLAYER SURFACE (ONLY Back & Title Overlaid on Video; Auto-Hide 3s)
            =================================================================== */}
         <div
           ref={playerContainerRef}
@@ -1392,9 +1286,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             if (!hasPlaybackStarted) {
               setHasPlaybackStarted(true);
             }
-            if (isFullscreen) {
-              handleWakeOrToggleControls(false);
-            }
+            handleWakeOrToggleControls(playerMode !== 'direct');
           }}
           className={fsConfig.containerClassName}
           style={{
@@ -1402,7 +1294,40 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             backgroundColor: '#000000',
           }}
         >
-          {isFullscreen && !areControlsVisible && (
+          {/* Normal Mode Top Overlay: ONLY Back Button & Title (auto-hides after 3s) */}
+          {!isFullscreen && playerMode !== 'direct' && (
+            <div
+              data-testid="player-top-header-bar"
+              onClick={(e) => e.stopPropagation()}
+              className={`absolute top-0 left-0 right-0 z-30 flex items-center gap-2.5 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-4 bg-gradient-to-b from-black/85 via-black/45 to-transparent transition-all duration-200 ${
+                areControlsVisible
+                  ? 'opacity-100 pointer-events-auto translate-y-0'
+                  : 'opacity-0 pointer-events-none -translate-y-2'
+              }`}
+            >
+              <button
+                type="button"
+                data-testid="close-player-btn"
+                onClick={onClose}
+                aria-label="Back to catalog"
+                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors shrink-0 backdrop-blur-sm"
+              >
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+              <div className="min-w-0 flex-1">
+                <span className="text-xs sm:text-sm font-bold text-white truncate block drop-shadow">
+                  {playerMode === 'pak-drama'
+                    ? pakDramaStreams[activePakStreamIdx]?.title || displayPlayerTitle
+                    : playerMode === 'trailer'
+                    ? movie.youtubeTitle || `${movie.title} — Official Trailer`
+                    : displayPlayerTitle}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Tap-to-wake top strip when controls auto-hide in iframe/fullscreen modes */}
+          {!areControlsVisible && (isFullscreen || playerMode !== 'direct') && (
             <div
               data-testid="fullscreen-top-wake-strip"
               onClick={(e) => {
@@ -1413,11 +1338,14 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 e.stopPropagation();
                 handleWakeOrToggleControls(true);
               }}
-              className="fixed top-0 left-0 right-0 h-14 z-[9999] bg-transparent cursor-pointer"
-              aria-label="Tap to show fullscreen controls and exit button"
+              className={`top-0 left-0 right-0 h-14 bg-transparent cursor-pointer ${
+                isFullscreen ? 'fixed z-[9999]' : 'absolute z-30'
+              }`}
+              aria-label="Tap to show player controls"
             />
           )}
 
+          {/* Fullscreen Overlay: Top-Left Back Button + Top-Right Adblocker & Fullscreen Exit */}
           {fsConfig.showAlwaysVisibleExitButton && (
             <>
               <button
@@ -1427,29 +1355,55 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   e.stopPropagation();
                   handleExitFullscreen();
                 }}
-                aria-label="Exit Fullscreen"
+                aria-label="Back / Exit Fullscreen"
                 className={fsConfig.exitButtonClassName}
               >
                 <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />
-                <span>Back / Exit Fullscreen</span>
+                <span>Back</span>
               </button>
 
-              <button
-                type="button"
-                data-testid="fullscreen-exit-corner-x-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleExitFullscreen();
-                }}
-                aria-label="Close Fullscreen"
-                className={`fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] right-[max(0.75rem,env(safe-area-inset-right,12px))] z-[10000] w-10 h-10 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white flex items-center justify-center shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 ${
-                  areControlsVisible
-                    ? 'opacity-100 pointer-events-auto translate-y-0'
-                    : 'opacity-0 pointer-events-none -translate-y-2'
-                }`}
+              <div
+                data-testid="fullscreen-top-right-controls"
+                onClick={(e) => e.stopPropagation()}
+                className={fsConfig.topRightControlsClassName}
               >
-                <X className="w-5 h-5 text-white" />
-              </button>
+                {playerMode === 'embed' && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isVidSrcAdBlockerEnabled}
+                    aria-label="Fullscreen Adblocker Toggle"
+                    data-testid="fullscreen-adblocker-toggle-btn"
+                    onClick={() => {
+                      handleToggleVidSrcAdBlocker();
+                      scheduleControlsAutoHide();
+                    }}
+                    className={`px-2.5 py-1.5 rounded-full text-[11px] font-extrabold shadow-2xl backdrop-blur-md flex items-center gap-1.5 min-h-[36px] border transition-all active:scale-95 ${
+                      isVidSrcAdBlockerEnabled
+                        ? 'bg-emerald-950/90 border-[#10d97b] text-[#10d97b]'
+                        : 'bg-black/85 border-white/20 text-slate-300'
+                    }`}
+                  >
+                    {isVidSrcAdBlockerEnabled ? (
+                      <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
+                    ) : (
+                      <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    )}
+                    <span>Adblocker {isVidSrcAdBlockerEnabled ? 'ON' : 'OFF'}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="fullscreen-exit-corner-x-btn"
+                  onClick={handleExitFullscreen}
+                  aria-label="Exit Fullscreen"
+                  className="px-2.5 py-1.5 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white text-[11px] font-extrabold flex items-center gap-1.5 shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 min-h-[36px]"
+                >
+                  <Minimize2 className="w-3.5 h-3.5 text-[#10d97b]" />
+                  <span>Exit</span>
+                </button>
+              </div>
             </>
           )}
 
@@ -1802,13 +1756,134 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </>
           )}
         </div>
+
+        {/* CLEAN BELOW-VIDEO CONTROL BAR (Adblocker, Fullscreen, Open in New Tab moved below video) */}
+        {!isFullscreen && playerMode !== 'direct' && (
+          <div
+            data-testid="below-video-controls-bar"
+            className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-5 py-2 bg-[#0b0f19] border-b border-slate-800/80"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-[11px] font-semibold text-[#10d97b] truncate">
+                {playerMode === 'embed'
+                  ? `${activeFriendlySourceName} · ${activeEmbedServer?.providerName || 'Stream'}`
+                  : playerMode === 'pak-drama'
+                  ? `Pak Drama${
+                      pakDramaStreams[activePakStreamIdx]?.durationFormatted
+                        ? ` · ${pakDramaStreams[activePakStreamIdx].durationFormatted}`
+                        : ''
+                    }`
+                  : 'Official Trailer'}
+              </span>
+
+              {playerMode === 'embed' && plan.alternateLanguageStreams.length > 0 && (
+                <button
+                  type="button"
+                  data-testid="switch-to-verified-direct-audio-btn"
+                  onClick={() => {
+                    setSelectedAltStreamUrl(plan.alternateLanguageStreams[0].url);
+                    setPlayerMode('direct');
+                  }}
+                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-[#10d97b]/50 text-[#10d97b] text-[11px] font-bold flex items-center gap-1"
+                >
+                  <Volume2 className="w-3 h-3" />
+                  <span>Direct ({plan.alternateLanguageStreams.length})</span>
+                </button>
+              )}
+
+              {playerMode === 'trailer' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedEmbedId(PREFERRED_EMBED_SERVER_ID);
+                    setPlayerMode('embed');
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-[#10d97b] text-slate-950 text-[11px] font-bold"
+                >
+                  Back to Movie
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
+              {playerMode === 'embed' && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isVidSrcAdBlockerEnabled}
+                  aria-label="Adblocker toggle switch"
+                  data-testid="vidsrc-adblocker-toggle-btn"
+                  onClick={handleToggleVidSrcAdBlocker}
+                  className={`px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold shadow-sm flex items-center gap-1.5 min-h-[34px] transition-all active:scale-95 border ${
+                    isVidSrcAdBlockerEnabled
+                      ? 'bg-emerald-950/95 hover:bg-emerald-900 border-[#10d97b] text-[#10d97b]'
+                      : 'bg-slate-800/90 hover:bg-slate-700 border-slate-600 text-slate-300'
+                  }`}
+                >
+                  {isVidSrcAdBlockerEnabled ? (
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
+                  ) : (
+                    <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  )}
+                  <span>Adblocker</span>
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                      isVidSrcAdBlockerEnabled ? 'bg-[#10d97b]' : 'bg-slate-600'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-slate-950 transition-transform ${
+                        isVidSrcAdBlockerEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </span>
+                  {blockedAdsCount > 0 && (
+                    <span
+                      data-testid="vidsrc-blocked-ads-badge"
+                      className="px-1.5 py-0.5 rounded-full bg-[#10d97b] text-slate-950 text-[10px] font-black leading-none"
+                    >
+                      {blockedAdsCount}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              <button
+                type="button"
+                data-testid="enter-fullscreen-btn"
+                onClick={handleToggleFullscreen}
+                aria-label="Enter Fullscreen"
+                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] font-extrabold flex items-center gap-1.5 min-h-[34px] transition-transform active:scale-95"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
+                <span>Fullscreen</span>
+              </button>
+
+              <a
+                href={
+                  playerMode === 'pak-drama' && pakDramaStreams[activePakStreamIdx]?.embedUrl
+                    ? pakDramaStreams[activePakStreamIdx].embedUrl
+                    : activeEmbedServer?.url
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="open-in-new-tab-btn"
+                className="inline-flex px-2.5 sm:px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] font-extrabold shadow-md shadow-[#10d97b]/20 items-center gap-1.5 min-h-[34px] transition-transform active:scale-95"
+              >
+                <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>Open in New Tab</span>
+              </a>
+            </div>
+          </div>
+        )}
         </div>
 
         {/* ===================================================================
-            BELOW-PLAYER CONTROLS: VIDSRC METADATA, SOURCE PICKER, EPISODES
+            BELOW-PLAYER CONTROLS: METADATA, SOURCE PICKER, EPISODES
            =================================================================== */}
         <div className="flex-1 px-3 sm:px-6 py-4 sm:py-5 pb-16 space-y-4 sm:space-y-5">
-          {/* VidSrc.sh Content Info & Watch Progress Resume Bar */}
+          {/* Stream Status & Watch Progress Resume Bar */}
           <div
             data-testid="vidsrc-integration-panel"
             className="p-3 sm:p-3.5 rounded-2xl bg-[#111622] border border-slate-800/90 space-y-2.5"
@@ -1819,76 +1894,22 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   Stream Status
                 </span>
                 <span className="text-xs font-bold text-slate-200">
-                  Active: {playerMode === 'embed' ? activeFriendlySourceName : 'Direct Stream'}
+                  Active:{' '}
+                  {playerMode === 'embed'
+                    ? `${activeFriendlySourceName} (${activeEmbedServer?.providerName || 'Stream'})`
+                    : playerMode === 'pak-drama'
+                    ? 'Pak Drama / Urdu'
+                    : playerMode === 'trailer'
+                    ? 'Official Trailer'
+                    : 'Direct Stream'}
                 </span>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  data-testid="switch-vidsrc-sh-btn"
-                  onClick={() => {
-                    setSelectedEmbedId('auto-server-1');
-                    setPlayerMode('embed');
-                  }}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition-colors ${
-                    playerMode === 'embed' && selectedEmbedId === 'auto-server-1'
-                      ? 'bg-[#10d97b] text-slate-950'
-                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-                  }`}
-                >
-                  Source 2 (EN Subtitles)
-                </button>
-
-                <button
-                  type="button"
-                  data-testid="switch-2embed-fallback-btn"
-                  onClick={() => {
-                    setSelectedEmbedId('auto-server-3');
-                    setPlayerMode('embed');
-                  }}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition-colors ${
-                    playerMode === 'embed' && selectedEmbedId === 'auto-server-3'
-                      ? 'bg-[#10d97b] text-slate-950'
-                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-                  }`}
-                >
-                  Source 1 (Primary)
-                </button>
-
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={isVidSrcAdBlockerEnabled}
-                  data-testid="vidsrc-panel-adblocker-switch"
-                  onClick={handleToggleVidSrcAdBlocker}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold flex items-center gap-1.5 border transition-colors ${
-                    isVidSrcAdBlockerEnabled
-                      ? 'bg-emerald-950/90 border-[#10d97b] text-[#10d97b]'
-                      : 'bg-slate-800 border-slate-700 text-slate-300'
-                  }`}
-                >
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Adblocker: {isVidSrcAdBlockerEnabled ? 'ON' : 'OFF'}</span>
-                </button>
-
-                <a
-                  href={buildVidSrcEmbedUrl({
-                    tmdbId: movie.id,
-                    mediaType: movie.mediaType,
-                    season: selectedSeason,
-                    episode: selectedEpisode,
-                    dsLang: 'en',
-                  })}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  data-testid="prominent-open-new-tab-btn"
-                  className="px-2.5 py-1 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-[#10d97b]/50 text-[#10d97b] text-[11px] font-bold flex items-center gap-1"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                  <span>Open in New Tab</span>
-                </a>
-              </div>
+              <span className="text-[11px] font-semibold text-slate-400">
+                {isVidSrcAdBlockerEnabled
+                  ? '🛡️ Ad & Popup Protection ON'
+                  : '⚠️ Adblocker OFF'}
+              </span>
             </div>
 
             {isLoadingVidsrcInfo && (
@@ -1935,7 +1956,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <div className="flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                   <div className="text-xs font-bold text-amber-200">
-                    Source 2 unavailable (404) — Automatic Failover to Source 1 Active
+                    Source 1 (VidSrc.sh) unavailable (404) — Preferred Source 3 (VidFast) Active
                   </div>
                 </div>
                 <button

@@ -510,7 +510,13 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <span>
               {userSettings.defaultDownloadQuality.toUpperCase()} ·{' '}
-              {userSettings.defaultServer === 'auto-server-3' ? 'Server 3' : 'Server 1'}
+              {userSettings.defaultServer === 'auto-server-1'
+                ? 'Source 1 (VidSrc)'
+                : userSettings.defaultServer === 'auto-server-vidlink'
+                ? 'Source 2 (VidLink)'
+                : userSettings.defaultServer === 'auto-server-3'
+                ? 'Source 4 (2Embed)'
+                : 'Source 3 (VidFast)'}
             </span>
             <ChevronRight className="w-4 h-4" />
           </div>
@@ -833,20 +839,20 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    data-testid="setting-server-3-btn"
+                    data-testid="setting-server-vidfast-btn"
                     onClick={() =>
                       onUpdateUserSettings({
                         ...userSettings,
-                        defaultServer: 'auto-server-3',
+                        defaultServer: 'auto-server-vidfast',
                       })
                     }
                     className={`py-2 px-3 rounded-xl text-xs font-bold border ${
-                      userSettings.defaultServer === 'auto-server-3'
+                      userSettings.defaultServer === 'auto-server-vidfast' || !userSettings.defaultServer
                         ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
                         : 'bg-slate-900 text-slate-300 border-slate-800'
                     }`}
                   >
-                    Server 3 (2Embed.cc)
+                    Source 3 (VidFast ★)
                   </button>
                   <button
                     type="button"
@@ -863,7 +869,41 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                         : 'bg-slate-900 text-slate-300 border-slate-800'
                     }`}
                   >
-                    Server 1 (VidSrc.sh)
+                    Source 1 (VidSrc.sh)
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="setting-server-vidlink-btn"
+                    onClick={() =>
+                      onUpdateUserSettings({
+                        ...userSettings,
+                        defaultServer: 'auto-server-vidlink',
+                      })
+                    }
+                    className={`py-2 px-3 rounded-xl text-xs font-bold border ${
+                      userSettings.defaultServer === 'auto-server-vidlink'
+                        ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
+                        : 'bg-slate-900 text-slate-300 border-slate-800'
+                    }`}
+                  >
+                    Source 2 (VidLink)
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="setting-server-3-btn"
+                    onClick={() =>
+                      onUpdateUserSettings({
+                        ...userSettings,
+                        defaultServer: 'auto-server-3',
+                      })
+                    }
+                    className={`py-2 px-3 rounded-xl text-xs font-bold border ${
+                      userSettings.defaultServer === 'auto-server-3'
+                        ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
+                        : 'bg-slate-900 text-slate-300 border-slate-800'
+                    }`}
+                  >
+                    Source 4 (2Embed)
                   </button>
                 </div>
               </div>
