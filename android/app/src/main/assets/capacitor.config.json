@@ -1,0 +1,15 @@
+{
+	"appId": "com.cinebox.stream",
+	"appName": "CineBox",
+	"webDir": "dist",
+	"bundledWebRuntime": false,
+	"server": {
+		"url": "https://cineboxmovies.ai.studio/",
+		"cleartext": true
+	},
+	"plugins": {
+		"Filesystem": {
+			"iosDocumentPickerEnabled": true
+		}
+	}
+}
