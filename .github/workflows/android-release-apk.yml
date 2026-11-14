@@ -52,7 +52,6 @@ jobs:
           cp /tmp/cinebox_android_bak/build.gradle android/app/build.gradle
           cp /tmp/cinebox_android_bak/proguard-rules.pro android/app/proguard-rules.pro
           cp /tmp/cinebox_android_bak/values/*.xml android/app/src/main/res/values/
-          cp /tmp/cinebox_android_bak/drawable/splash.xml android/app/src/main/res/drawable/splash.xml
           # Remove default Capacitor adaptive icon XML so Android uses the custom CineBox launcher icon
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
