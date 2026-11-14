@@ -23,8 +23,16 @@ allprojects {
         google()
         mavenCentral()
     }
+    
+    // 👇 YEH BLOCK ADD KAREIN (Syntax Fixed)
+    configurations.all {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'com.android.tools.build' && details.requested.name == 'gradle') {
+                details.useVersion '8.13.0'
+            }
+        }
+    }
 }
-
 task clean(type: Delete) {
     delete rootProject.buildDir
 }
