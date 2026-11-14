@@ -24,7 +24,7 @@ jobs:
 
       - name: Install Dependencies & Sync Capacitor Android
         run: |
-          npm ci
+          npm install --legacy-peer-deps
           npm run build
           # Remove any stale com.example.app sources or committed Gradle build caches
           rm -rf android/app/src/main/java/com/example android/app/build android/.gradle
