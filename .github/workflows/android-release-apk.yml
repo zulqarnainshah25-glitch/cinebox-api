@@ -24,15 +24,20 @@ jobs:
 
       - name: Install Dependencies & Sync Capacitor Android
         run: |
-          npm install --legacy-peer-deps
+          if [ -f package-lock.json ]; then
+            npm ci || npm install
+          else
+            npm install
+          fi
+          test -f node_modules/@capacitor/android/capacitor/build.gradle
           npm run build
-          
-          # Clean stale cache
+          # Remove any stale com.example.app sources or committed Gradle build caches
           rm -rf android/app/src/main/java/com/example android/app/build android/.gradle
-          
-          # Backup custom files
-          mkdir -p /tmp/cinebox_android_bak/values
+          # Preserve custom Java/Kotlin, Gradle, Manifest, and Resource files across cap sync
+          mkdir -p /tmp/cinebox_android_bak/values /tmp/cinebox_android_bak/drawable
           cp android/build.gradle /tmp/cinebox_android_bak/root-build.gradle
+          cp android/settings.gradle /tmp/cinebox_android_bak/settings.gradle
+          cp android/gradle.properties /tmp/cinebox_android_bak/gradle.properties
           cp android/variables.gradle /tmp/cinebox_android_bak/variables.gradle
           cp android/gradle/wrapper/gradle-wrapper.properties /tmp/cinebox_android_bak/gradle-wrapper.properties
           cp android/app/src/main/java/com/cinebox/stream/MainActivity.java /tmp/cinebox_android_bak/MainActivity.java
@@ -42,12 +47,11 @@ jobs:
           cp android/app/build.gradle /tmp/cinebox_android_bak/build.gradle
           cp android/app/proguard-rules.pro /tmp/cinebox_android_bak/proguard-rules.pro
           cp android/app/src/main/res/values/*.xml /tmp/cinebox_android_bak/values/
-          
-          npx cap sync android || true
-          
-          # Restore custom files
-          mkdir -p android/app/src/main/java/com/cinebox/stream android/app/src/main/res/values android/gradle/wrapper
+          npx cap sync android
+          mkdir -p android/app/src/main/java/com/cinebox/stream android/app/src/main/res/values android/app/src/main/res/drawable android/gradle/wrapper
           cp /tmp/cinebox_android_bak/root-build.gradle android/build.gradle
+          cp /tmp/cinebox_android_bak/settings.gradle android/settings.gradle
+          cp /tmp/cinebox_android_bak/gradle.properties android/gradle.properties
           cp /tmp/cinebox_android_bak/variables.gradle android/variables.gradle
           cp /tmp/cinebox_android_bak/gradle-wrapper.properties android/gradle/wrapper/gradle-wrapper.properties
           cp /tmp/cinebox_android_bak/MainActivity.java android/app/src/main/java/com/cinebox/stream/MainActivity.java
@@ -57,17 +61,15 @@ jobs:
           cp /tmp/cinebox_android_bak/build.gradle android/app/build.gradle
           cp /tmp/cinebox_android_bak/proguard-rules.pro android/app/proguard-rules.pro
           cp /tmp/cinebox_android_bak/values/*.xml android/app/src/main/res/values/
+          # Remove default Capacitor adaptive icon XML so Android uses the custom CineBox launcher icon
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
-      - name: Force AGP 8.13.0 & SDK 36 after sync
+      - name: Verify Android Namespace, AGP 8.13.0, SDK 36, Capacitor Module, Resources & v1.0.3
         run: |
-          cd android
-          sed -i "s/classpath 'com.android.tools.build:gradle:.*'/classpath 'com.android.tools.build:gradle:8.13.0'/" build.gradle
-          sed -i "s/compileSdkVersion = .*/compileSdkVersion = 36/" variables.gradle
-          sed -i "s/targetSdkVersion = .*/targetSdkVersion = 36/" variables.gradle
-
-      - name: Verify Android Namespace, AGP 8.13.0, SDK 36 & Resources
-        run: |
+          test -f node_modules/@capacitor/android/capacitor/build.gradle
+          grep -q "capacitor-android" android/capacitor.settings.gradle
+          grep -q "setSupportMultipleWindows(true)" android/app/src/main/java/com/cinebox/stream/MainActivity.java
+          grep -q "onCreateWindow" android/app/src/main/java/com/cinebox/stream/MainActivity.java
           grep -q 'versionName "1.0.3"' android/app/build.gradle
           grep -q 'namespace "com.cinebox.stream"' android/app/build.gradle
           grep -q 'com.android.tools.build:gradle:8.13.0' android/build.gradle
