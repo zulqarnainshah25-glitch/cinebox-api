@@ -26,21 +26,41 @@ jobs:
         run: |
           npm ci
           npm run build
-          # Preserve custom MainActivity.java (Popup Blocker & System Bar Blending) & build.gradle (v1.0.2 Release Signing)
-          cp android/app/src/main/java/com/cinebox/stream/MainActivity.java /tmp/MainActivity.java.bak
-          cp android/app/build.gradle /tmp/build.gradle.bak
+          # Remove any stale com.example.app sources or committed Gradle build caches
+          rm -rf android/app/src/main/java/com/example android/app/build android/.gradle
+          # Preserve custom Java/Kotlin, Gradle, Manifest, and Resource files across cap sync
+          mkdir -p /tmp/cinebox_android_bak/values /tmp/cinebox_android_bak/drawable
+          cp android/app/src/main/java/com/cinebox/stream/MainActivity.java /tmp/cinebox_android_bak/MainActivity.java
+          cp android/app/src/main/java/com/cinebox/stream/CineboxLivePlayerPlugin.kt /tmp/cinebox_android_bak/CineboxLivePlayerPlugin.kt
+          cp android/app/src/main/java/com/cinebox/stream/LiveTvPlayerActivity.kt /tmp/cinebox_android_bak/LiveTvPlayerActivity.kt
+          cp android/app/src/main/AndroidManifest.xml /tmp/cinebox_android_bak/AndroidManifest.xml
+          cp android/app/build.gradle /tmp/cinebox_android_bak/build.gradle
+          cp android/app/proguard-rules.pro /tmp/cinebox_android_bak/proguard-rules.pro
+          cp android/app/src/main/res/values/*.xml /tmp/cinebox_android_bak/values/
+          cp android/app/src/main/res/drawable/splash.xml /tmp/cinebox_android_bak/drawable/splash.xml
           npx cap sync android || true
-          mkdir -p android/app/src/main/java/com/cinebox/stream
-          cp /tmp/MainActivity.java.bak android/app/src/main/java/com/cinebox/stream/MainActivity.java
-          cp /tmp/build.gradle.bak android/app/build.gradle
+          mkdir -p android/app/src/main/java/com/cinebox/stream android/app/src/main/res/values android/app/src/main/res/drawable
+          cp /tmp/cinebox_android_bak/MainActivity.java android/app/src/main/java/com/cinebox/stream/MainActivity.java
+          cp /tmp/cinebox_android_bak/CineboxLivePlayerPlugin.kt android/app/src/main/java/com/cinebox/stream/CineboxLivePlayerPlugin.kt
+          cp /tmp/cinebox_android_bak/LiveTvPlayerActivity.kt android/app/src/main/java/com/cinebox/stream/LiveTvPlayerActivity.kt
+          cp /tmp/cinebox_android_bak/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          cp /tmp/cinebox_android_bak/build.gradle android/app/build.gradle
+          cp /tmp/cinebox_android_bak/proguard-rules.pro android/app/proguard-rules.pro
+          cp /tmp/cinebox_android_bak/values/*.xml android/app/src/main/res/values/
+          cp /tmp/cinebox_android_bak/drawable/splash.xml android/app/src/main/res/drawable/splash.xml
           # Remove default Capacitor adaptive icon XML so Android uses the custom CineBox launcher icon
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
-      - name: Verify Native WebView Popup Blocker & v1.0.3 in Android Project
+      - name: Verify Android Namespace, Resources, WebView Popup Blocker & v1.0.3
         run: |
           grep -q "setSupportMultipleWindows(true)" android/app/src/main/java/com/cinebox/stream/MainActivity.java
           grep -q "onCreateWindow" android/app/src/main/java/com/cinebox/stream/MainActivity.java
           grep -q 'versionName "1.0.3"' android/app/build.gradle
+          grep -q 'namespace "com.cinebox.stream"' android/app/build.gradle
+          ! grep -q 'package=' android/app/src/main/AndroidManifest.xml
+          ! grep -rn 'com\.example\.app' android/
+          grep -q 'colorPrimary' android/app/src/main/res/values/colors.xml
+          grep -q 'Theme.SplashScreen' android/app/src/main/res/values/styles.xml
 
       - name: Decode Persistent .jks Keystore from GitHub Secrets
         env:
@@ -57,7 +77,7 @@ jobs:
           CM_KEY_PASSWORD: ${{ secrets.CINEBOX_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew clean assembleRelease --no-daemon
 
       - name: Upload Signed app-release.apk
         uses: actions/upload-artifact@v4

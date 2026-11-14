@@ -4891,8 +4891,9 @@ test('61. Stage 11 Android Media3 Security Hygiene & Existing CineBox App Preser
   assert.equal(gradle.includes('androidx.media3:media3-exoplayer-hls:'), true);
   assert.equal(gradle.includes('androidx.media3:media3-exoplayer-dash:'), true);
 
-  // Manifest registers LiveTvPlayerActivity alongside MainActivity
-  assert.equal(manifest.includes('com.cinebox.stream'), true);
+  // Manifest registers LiveTvPlayerActivity alongside MainActivity without deprecated package= attribute
+  assert.equal(gradle.includes('namespace "com.cinebox.stream"'), true);
+  assert.equal(manifest.includes('package='), false);
   assert.equal(manifest.includes('android:name=".LiveTvPlayerActivity"'), true);
 
   // MainActivity registers plugin while preserving WebView popup/ad blocker + immersive fullscreen
@@ -5217,5 +5218,86 @@ test('63. Reverted Stable Live TV: iptv-org API Full Catalog (with logos.json), 
   assert.equal(dupMirrors.channels[0].tvgId, 'AajTak.in@SD');
   assert.equal(dupMirrors.channels[1].tvgId, 'AajTak.in@SD');
 });
+
+test('64. Android Release APK Fix: Resource Linking (colors.xml, styles.xml, strings.xml, splash.xml), AGP 8+ Namespace & Zero com.example.app Conflicts', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  const colorsXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/res/values/colors.xml'),
+    'utf8'
+  );
+  const stylesXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/res/values/styles.xml'),
+    'utf8'
+  );
+  const stringsXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/res/values/strings.xml'),
+    'utf8'
+  );
+  const splashXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/res/drawable/splash.xml'),
+    'utf8'
+  );
+  const manifestXml = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/AndroidManifest.xml'),
+    'utf8'
+  );
+  const buildGradle = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/build.gradle'),
+    'utf8'
+  );
+  const proguardRules = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/proguard-rules.pro'),
+    'utf8'
+  );
+  const workflowYaml = fs.readFileSync(
+    path.resolve(process.cwd(), '.github/workflows/android-release-apk.yml'),
+    'utf8'
+  );
+
+  // 1. colors.xml defines all Capacitor/AppCompat theme colors
+  assert.equal(colorsXml.includes('<color name="colorPrimary">'), true);
+  assert.equal(colorsXml.includes('<color name="colorPrimaryDark">'), true);
+  assert.equal(colorsXml.includes('<color name="colorAccent">'), true);
+  assert.equal(colorsXml.includes('<color name="splashBackground">'), true);
+
+  // 2. styles.xml defines AppTheme, AppTheme.NoActionBar, and AppTheme.NoActionBarLaunch -> Theme.SplashScreen
+  assert.equal(stylesXml.includes('<style name="AppTheme"'), true);
+  assert.equal(stylesXml.includes('<style name="AppTheme.NoActionBar"'), true);
+  assert.equal(stylesXml.includes('<style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">'), true);
+  assert.equal(stylesXml.includes('@color/colorPrimary'), true);
+  assert.equal(stylesXml.includes('@color/colorPrimaryDark'), true);
+  assert.equal(stylesXml.includes('@color/colorAccent'), true);
+  assert.equal(stylesXml.includes('@drawable/splash'), true);
+  assert.equal(splashXml.includes('@color/splashBackground'), true);
+  assert.equal(splashXml.includes('@mipmap/ic_launcher'), true);
+
+  // 3. strings.xml & build.gradle strictly use com.cinebox.stream and never com.example.app
+  assert.equal(stringsXml.includes('<string name="package_name">com.cinebox.stream</string>'), true);
+  assert.equal(stringsXml.includes('<string name="custom_url_scheme">com.cinebox.stream</string>'), true);
+  assert.equal(stringsXml.includes('com.example.app'), false);
+  assert.equal(buildGradle.includes('namespace "com.cinebox.stream"'), true);
+  assert.equal(buildGradle.includes('applicationId "com.cinebox.stream"'), true);
+  assert.equal(buildGradle.includes('com.example.app'), false);
+  assert.equal(buildGradle.includes('androidx.core:core-splashscreen:'), true);
+  assert.equal(buildGradle.includes("rootProject.ext.has('coreSplashScreenVersion')"), true);
+
+  // 4. AndroidManifest.xml has NO deprecated package= attribute
+  assert.equal(/\bpackage\s*=/.test(manifestXml), false);
+  assert.equal(manifestXml.includes('@style/AppTheme'), true);
+  assert.equal(manifestXml.includes('@style/AppTheme.NoActionBarLaunch'), true);
+  assert.equal(manifestXml.includes('@string/app_name'), true);
+
+  // 5. ProGuard keeps Capacitor bridge + CineboxLivePlayerPlugin under minifyEnabled true
+  assert.equal(proguardRules.includes('com.cinebox.stream.CineboxLivePlayerPlugin'), true);
+  assert.equal(proguardRules.includes('@com.getcapacitor.PluginMethod'), true);
+
+  // 6. GitHub Actions cleans com.example, preserves values/*.xml, and runs clean assembleRelease
+  assert.equal(workflowYaml.includes('rm -rf android/app/src/main/java/com/example'), true);
+  assert.equal(workflowYaml.includes('res/values/*.xml'), true);
+  assert.equal(workflowYaml.includes('./gradlew clean assembleRelease --no-daemon'), true);
+});
+
 
 

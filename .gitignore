@@ -9,3 +9,10 @@ coverage/
 !.env.example
 *.zip
 cinebox-stage3-updated.zip
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/app/release-keystore.jks
+*.jks
+

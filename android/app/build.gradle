@@ -1,23 +1,19 @@
 apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
-    namespace "com.example.app"   // 👈 apna package name yahan rakhein
-    compileSdk 35                 // 👈 YEH MISSING THA — ab add ho gaya
+    namespace "com.cinebox.stream"
+    compileSdk rootProject.ext.compileSdkVersion
 
     defaultConfig {
-        applicationId "com.example.app"   // 👈 apna applicationId
-        minSdk 24
-        targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        applicationId "com.cinebox.stream"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 3
+        versionName "1.0.3"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-    }
-
-    buildTypes {
-        release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        aaptOptions {
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
 
@@ -27,14 +23,81 @@ android {
     }
 
     kotlinOptions {
-        jvmTarget = '17'
+        jvmTarget = "17"
+    }
+
+    // Signature-Safe Release Signing (.jks Keystore)
+    // Credentials are read strictly from environment variables (never hardcoded defaults).
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("CINEBOX_KEYSTORE_PATH") ?: System.getenv("CM_KEYSTORE_PATH")
+            def keystorePassword = System.getenv("CINEBOX_KEYSTORE_PASSWORD") ?: System.getenv("CM_KEYSTORE_PASSWORD")
+            def keyAliasName = System.getenv("CINEBOX_KEY_ALIAS") ?: System.getenv("CM_KEY_ALIAS")
+            def keyPasswordValue = System.getenv("CINEBOX_KEY_PASSWORD") ?: System.getenv("CM_KEY_PASSWORD")
+            if (keystorePath && keystorePassword && keyAliasName && keyPasswordValue) {
+                def keystoreFile = file(keystorePath)
+                if (keystoreFile.exists()) {
+                    storeFile keystoreFile
+                    storePassword keystorePassword
+                    keyAlias keyAliasName
+                    keyPassword keyPasswordValue
+                }
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
     }
 }
 
+repositories {
+    flatDir {
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+def media3Version = "1.11.1"
+def resolvedAppCompatVersion = rootProject.ext.has('androidxAppCompatVersion') ? rootProject.ext.androidxAppCompatVersion : '1.7.0'
+def resolvedCoordinatorVersion = rootProject.ext.has('androidxCoordinatorLayoutVersion') ? rootProject.ext.androidxCoordinatorLayoutVersion : '1.2.0'
+def resolvedCoreSplashScreenVersion = rootProject.ext.has('coreSplashScreenVersion') ? rootProject.ext.coreSplashScreenVersion : '1.0.1'
+def resolvedJunitVersion = rootProject.ext.has('junitVersion') ? rootProject.ext.junitVersion : '4.13.2'
+def resolvedAndroidxJunitVersion = rootProject.ext.has('androidxJunitVersion') ? rootProject.ext.androidxJunitVersion : '1.2.1'
+def resolvedEspressoVersion = rootProject.ext.has('androidxEspressoCoreVersion') ? rootProject.ext.androidxEspressoCoreVersion : '3.6.1'
+
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
-    implementation 'androidx.core:core-ktx:1.13.1'
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'com.google.android.material:material:1.12.0'
-    // 👈 apni baaki dependencies yahan rakhein (Capacitor, Firebase, etc.)
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$resolvedAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$resolvedCoordinatorVersion"
+    implementation "androidx.core:core-splashscreen:$resolvedCoreSplashScreenVersion"
+    implementation project(':capacitor-android')
+
+    // Native AndroidX Media3 ExoPlayer (HLS + DASH + UI + Track Selection)
+    implementation "androidx.media3:media3-exoplayer:$media3Version"
+    implementation "androidx.media3:media3-exoplayer-hls:$media3Version"
+    implementation "androidx.media3:media3-exoplayer-dash:$media3Version"
+    implementation "androidx.media3:media3-ui:$media3Version"
+
+    testImplementation "junit:junit:$resolvedJunitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$resolvedAndroidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$resolvedEspressoVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
 }
