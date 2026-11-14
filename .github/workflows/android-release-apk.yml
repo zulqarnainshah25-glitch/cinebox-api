@@ -40,7 +40,6 @@ jobs:
           cp android/app/build.gradle /tmp/cinebox_android_bak/build.gradle
           cp android/app/proguard-rules.pro /tmp/cinebox_android_bak/proguard-rules.pro
           cp android/app/src/main/res/values/*.xml /tmp/cinebox_android_bak/values/
-          cp android/app/src/main/res/drawable/splash.xml /tmp/cinebox_android_bak/drawable/splash.xml
           npx cap sync android || true
           mkdir -p android/app/src/main/java/com/cinebox/stream android/app/src/main/res/values android/app/src/main/res/drawable android/gradle/wrapper
           cp /tmp/cinebox_android_bak/root-build.gradle android/build.gradle
