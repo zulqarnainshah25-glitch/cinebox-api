@@ -18,12 +18,12 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
     }
 
     kotlinOptions {
-        jvmTarget = "17"
+        jvmTarget = "21"
     }
 
     // Signature-Safe Release Signing (.jks Keystore)
@@ -65,9 +65,9 @@ repositories {
 }
 
 def media3Version = "1.11.1"
-def resolvedAppCompatVersion = rootProject.ext.has('androidxAppCompatVersion') ? rootProject.ext.androidxAppCompatVersion : '1.7.0'
-def resolvedCoordinatorVersion = rootProject.ext.has('androidxCoordinatorLayoutVersion') ? rootProject.ext.androidxCoordinatorLayoutVersion : '1.2.0'
-def resolvedCoreSplashScreenVersion = rootProject.ext.has('coreSplashScreenVersion') ? rootProject.ext.coreSplashScreenVersion : '1.0.1'
+def resolvedAppCompatVersion = rootProject.ext.has('androidxAppCompatVersion') ? rootProject.ext.androidxAppCompatVersion : '1.7.1'
+def resolvedCoordinatorVersion = rootProject.ext.has('androidxCoordinatorLayoutVersion') ? rootProject.ext.androidxCoordinatorLayoutVersion : '1.3.0'
+def resolvedCoreSplashScreenVersion = rootProject.ext.has('coreSplashScreenVersion') ? rootProject.ext.coreSplashScreenVersion : '1.2.0'
 def resolvedJunitVersion = rootProject.ext.has('junitVersion') ? rootProject.ext.junitVersion : '4.13.2'
 def resolvedAndroidxJunitVersion = rootProject.ext.has('androidxJunitVersion') ? rootProject.ext.androidxJunitVersion : '1.2.1'
 def resolvedEspressoVersion = rootProject.ext.has('androidxEspressoCoreVersion') ? rootProject.ext.androidxEspressoCoreVersion : '3.6.1'

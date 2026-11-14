@@ -5293,11 +5293,36 @@ test('64. Android Release APK Fix: Resource Linking (colors.xml, styles.xml, str
   assert.equal(proguardRules.includes('com.cinebox.stream.CineboxLivePlayerPlugin'), true);
   assert.equal(proguardRules.includes('@com.getcapacitor.PluginMethod'), true);
 
-  // 6. GitHub Actions cleans com.example, preserves values/*.xml, and runs clean assembleRelease
+  // 6. GitHub Actions cleans com.example, preserves values/*.xml, and runs clean assembleRelease on Java 21
   assert.equal(workflowYaml.includes('rm -rf android/app/src/main/java/com/example'), true);
   assert.equal(workflowYaml.includes('res/values/*.xml'), true);
+  assert.equal(workflowYaml.includes("java-version: '21'"), true);
   assert.equal(workflowYaml.includes('./gradlew clean assembleRelease --no-daemon'), true);
+
+  // 7. Top-level AGP >= 8.9.1 (8.13.0), compileSdkVersion/targetSdkVersion = 36 & Gradle 8.14.3 wrapper
+  const rootBuildGradle = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/build.gradle'),
+    'utf8'
+  );
+  const variablesGradle = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/variables.gradle'),
+    'utf8'
+  );
+  const wrapperProps = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/gradle/wrapper/gradle-wrapper.properties'),
+    'utf8'
+  );
+  assert.equal(rootBuildGradle.includes('com.android.tools.build:gradle:8.13.0'), true);
+  assert.equal(rootBuildGradle.includes('apply from: "variables.gradle"'), true);
+  assert.equal(variablesGradle.includes('compileSdkVersion = 36'), true);
+  assert.equal(variablesGradle.includes('targetSdkVersion = 36'), true);
+  assert.equal(variablesGradle.includes("androidxCoreVersion = '1.17.0'"), true);
+  assert.equal(variablesGradle.includes("androidxActivityVersion = '1.11.0'"), true);
+  assert.equal(wrapperProps.includes('gradle-8.14.3-all.zip'), true);
+  assert.equal(buildGradle.includes('JavaVersion.VERSION_21'), true);
+  assert.equal(buildGradle.includes('jvmTarget = "21"'), true);
 });
+
 
 
 
