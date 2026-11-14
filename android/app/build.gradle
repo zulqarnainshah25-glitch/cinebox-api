@@ -27,7 +27,6 @@ android {
     }
 
     // Signature-Safe Release Signing (.jks Keystore)
-    // Credentials are read strictly from environment variables (never hardcoded defaults).
     signingConfigs {
         release {
             def keystorePath = System.getenv("CINEBOX_KEYSTORE_PATH") ?: System.getenv("CM_KEYSTORE_PATH")
@@ -54,6 +53,9 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            
+            // 👇 YEH LINE CONFLICT FIX KAREGI
+            //matchingFallbacks = ['release', 'debug'] 
         }
     }
 }
