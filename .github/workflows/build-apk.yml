@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 20
 
       - name: Setup Java (JDK 21)
         uses: actions/setup-java@v4
@@ -34,6 +34,13 @@ jobs:
 
       - name: Sync Capacitor
         run: npx cap sync android
+
+      - name: Force AGP 8.13.0 & SDK 36 after sync
+        run: |
+          cd android
+          sed -i "s/classpath 'com.android.tools.build:gradle:.*'/classpath 'com.android.tools.build:gradle:8.13.0'/" build.gradle
+          sed -i "s/compileSdkVersion = .*/compileSdkVersion = 36/" variables.gradle
+          sed -i "s/targetSdkVersion = .*/targetSdkVersion = 36/" variables.gradle
 
       - name: Decode Keystore
         id: decode_keystore
