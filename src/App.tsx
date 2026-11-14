@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Tv,
   User,
   X,
 } from 'lucide-react';
@@ -85,6 +86,7 @@ import { ProfileMeView } from './components/ProfileMeView';
 import { AdminAndDeliverablesModal } from './components/AdminAndDeliverablesModal';
 import { PakistaniDramasSection } from './components/PakistaniDramasSection';
 import { VidSrcLatestFeedsSection } from './components/VidSrcLatestFeedsSection';
+import { LiveTvSection } from './components/LiveTvSection';
 import { CineBoxBrandLogo } from './components/CineBoxBrandLogo';
 import { InAppUpdateDialog } from './components/InAppUpdateDialog';
 import { PlatformAuthAndPaywallOverlay } from './components/PlatformAuthAndPaywallOverlay';
@@ -109,7 +111,7 @@ import {
   useSearchSuggestions,
 } from './hooks/useSearchSuggestions';
 
-type BottomNavTab = 'home' | 'search' | 'watchlist' | 'me';
+type BottomNavTab = 'home' | 'live' | 'search' | 'watchlist' | 'me';
 
 const TOP_CATEGORIES: CategoryFilter[] = [
   'Trending',
@@ -260,7 +262,7 @@ export default function App() {
   const [logoTapCount, setLogoTapCount] = useState<number>(0);
   const [adminModalState, setAdminModalState] = useState<{
     open: boolean;
-    tab: 'admin' | 'deliverables';
+    tab: 'admin' | 'deliverables' | 'live-tv';
   }>({ open: false, tab: 'admin' });
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1038,6 +1040,15 @@ export default function App() {
                 </button>
               );
             })}
+            <button
+              type="button"
+              data-testid="top-category-tab-live-tv"
+              onClick={() => setActiveTab('live')}
+              className="whitespace-nowrap shrink-0 transition-colors pb-1 text-rose-400 hover:text-rose-300 font-bold inline-flex items-center gap-1.5"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+              <span>{getTranslation(currentLang, 'navLiveTv')}</span>
+            </button>
           </nav>
         )}
       </header>
@@ -1523,6 +1534,18 @@ export default function App() {
         )}
 
         {/* ===================================================================
+            TAB 1B: LIVE TV (IPTV M3U + HLS.JS LIVE PLAYER)
+           =================================================================== */}
+        {activeTab === 'live' && (
+          <LiveTvSection
+            isActive={activeTab === 'live'}
+            currentLang={currentLang}
+            isAdminUnlocked={isAdminUnlocked}
+            onOpenAdminLiveTv={() => setAdminModalState({ open: true, tab: 'live-tv' })}
+          />
+        )}
+
+        {/* ===================================================================
             TAB 2: SEARCH & BROWSE CATALOG VIEW (Client-Side Proxy + MovieBox API)
            =================================================================== */}
         {activeTab === 'search' && (
@@ -1843,7 +1866,7 @@ export default function App() {
         aria-label="Primary Bottom Navigation"
         className="fixed bottom-0 left-0 right-0 z-40 bg-[#11141c]/95 backdrop-blur-md border-t border-slate-800/80 h-14 px-2"
       >
-        <div className="max-w-xl mx-auto h-full grid grid-cols-4 items-center">
+        <div className="max-w-xl mx-auto h-full grid grid-cols-5 items-center">
           <button
             type="button"
             onClick={() => setActiveTab('home')}
@@ -1853,6 +1876,18 @@ export default function App() {
           >
             <Home className="w-5 h-5" />
             <span className="text-[10px] font-semibold mt-0.5">{getTranslation(currentLang, 'navHome')}</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="nav-live-tv-btn"
+            onClick={() => setActiveTab('live')}
+            className={`flex flex-col items-center justify-center min-h-[44px] transition-colors ${
+              activeTab === 'live' ? 'text-[#10d97b]' : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Tv className="w-5 h-5" />
+            <span className="text-[10px] font-semibold mt-0.5">{getTranslation(currentLang, 'navLiveTv')}</span>
           </button>
 
           <button

@@ -2260,7 +2260,7 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
 
   assert.equal(appSource.includes("activeTab === 'downloads'"), false);
   assert.equal(appSource.includes("setActiveTab('downloads')"), false);
-  assert.equal(appSource.includes('grid-cols-4'), true);
+  assert.equal(appSource.includes('grid-cols-5'), true);
   assert.equal(modalSource.includes('Offline Download Manager'), false);
   assert.equal(modalSource.includes('server-extract-download-btn'), false);
   assert.equal(profileSource.includes('Default Offline Download Quality'), false);
@@ -3712,13 +3712,20 @@ test('Final Integration: 4 Specific Streaming Sources (VidSrc.sh, VidLink.pro, V
   const {
     PREFERRED_EMBED_SERVER_ID,
     CONTROLS_AUTO_HIDE_MS,
+    computeNextControlsVisibility,
     getFullscreenPlayerConfig,
   } = await import('./streamResolver');
   const { getSourceButtonState } = await import('../components/player/SourcePicker');
 
   // 1. Exact URLs & Query Parameters for all 4 Sources (Movie & TV)
   assert.equal(PREFERRED_EMBED_SERVER_ID, 'auto-server-vidfast');
-  assert.equal(CONTROLS_AUTO_HIDE_MS, 3000);
+  assert.equal(CONTROLS_AUTO_HIDE_MS, 2000);
+
+  // Click-to-show AND Click-to-hide toggle behavior (plus forceShow on wake strip)
+  assert.equal(computeNextControlsVisibility(true, false), false);
+  assert.equal(computeNextControlsVisibility(false, false), true);
+  assert.equal(computeNextControlsVisibility(true, true), true);
+  assert.equal(computeNextControlsVisibility(false, true), true);
 
   // Source 1: VidSrc.sh (?ds_lang=en)
   assert.equal(
@@ -3858,13 +3865,17 @@ test('Final Integration: 4 Specific Streaming Sources (VidSrc.sh, VidLink.pro, V
   assert.equal(okBtn.healthDot.dotColor, 'green');
   assert.equal(okBtn.buttonClassName.includes('min-h-[32px]'), true);
 
-  // 6. Fullscreen Top-Left Back Button & Top-Right Adblocker/Exit Controls synced with auto-hide
+  // 6. Unified Fullscreen Top Bar (Left "<" Back + Playing Movie Name + Right Controls) synced with 2s auto-hide
   const fsVisible = getFullscreenPlayerConfig(true, 'contain', true);
-  assert.equal(fsVisible.exitButtonClassName.includes('left-['), true);
-  assert.equal(fsVisible.topRightControlsClassName.includes('right-['), true);
+  assert.equal(fsVisible.topBarClassName.includes('fixed top-0 left-0 right-0'), true);
+  assert.equal(fsVisible.topBarClassName.includes('duration-300'), true);
+  assert.equal(fsVisible.topBarClassName.includes('ease-out'), true);
+  assert.equal(fsVisible.topBarClassName.includes('opacity-100'), true);
   assert.equal(fsVisible.topRightControlsClassName.includes('opacity-100'), true);
 
   const fsHidden = getFullscreenPlayerConfig(true, 'contain', false);
+  assert.equal(fsHidden.topBarClassName.includes('opacity-0'), true);
+  assert.equal(fsHidden.topBarClassName.includes('-translate-y-3'), true);
   assert.equal(fsHidden.topRightControlsClassName.includes('opacity-0'), true);
 
   // 7. Verify VideoPlayerModal.tsx structural requirements
@@ -3873,23 +3884,1338 @@ test('Final Integration: 4 Specific Streaming Sources (VidSrc.sh, VidLink.pro, V
     'utf8'
   );
   assert.equal(modalSource.includes('useState<boolean>(true)'), true); // Adblocker default ON
-  assert.equal(modalSource.includes('CONTROLS_AUTO_HIDE_MS'), true); // 3s auto-hide
+  assert.equal(modalSource.includes('CONTROLS_AUTO_HIDE_MS'), true); // 2s auto-hide
+  assert.equal(modalSource.includes('computeNextControlsVisibility'), true); // click show & hide
   assert.equal(modalSource.includes('data-testid="below-video-controls-bar"'), true);
+  assert.equal(modalSource.includes('data-testid="fullscreen-top-header-bar"'), true);
+  assert.equal(modalSource.includes('data-testid="fullscreen-movie-title"'), true);
   assert.equal(modalSource.includes('data-testid="fullscreen-top-right-controls"'), true);
   assert.equal(modalSource.includes('data-testid="fullscreen-adblocker-toggle-btn"'), true);
   assert.equal(modalSource.includes('data-testid="fullscreen-exit-back-btn"'), true);
   assert.equal(modalSource.includes('parseEmbedMediaDataMessage'), true);
 });
 
+test('52. Live TV (Nexonic Verified Default, Pakistan pk.m3u, Fast CORS Error Handling, M3U Parsing & HLS.js UI Wiring)', async () => {
+  const {
+    IPTV_NEXONIC_VERIFIED_PLAYLIST_URL,
+    IPTV_NEXONIC_VERIFIED_MIRROR_URL,
+    IPTV_NEXONIC_VERIFIED_ROOT_URL,
+    IPTV_PAKISTAN_PLAYLIST_URL,
+    IPTV_SPORTS_PLAYLIST_URL,
+    IPTV_ALL_CHANNELS_PLAYLIST_URL,
+    IPTV_BROWSER_BLOCKED_ERROR_MESSAGE,
+    classifyLiveStreamError,
+    clearIptvPlaylistCache,
+    extractIptvCategories,
+    fetchIptvPlaylist,
+    filterIptvChannels,
+    parseM3uExtinfLine,
+    parseM3uPlaylist,
+    resolveIptvPlaylistCandidates,
+    resolveIptvPlaylistUrl,
+  } = await import('../services/iptvService');
 
+  // 1. Default Nexonic Verified & Pakistan pk.m3u URLs
+  assert.equal(
+    IPTV_NEXONIC_VERIFIED_PLAYLIST_URL,
+    'https://raw.githubusercontent.com/Shahrukhalid/nexonic-iptv/main/playlists/verified.m3u'
+  );
+  assert.equal(
+    IPTV_NEXONIC_VERIFIED_MIRROR_URL,
+    'https://shahrukhalid.github.io/nexonic-iptv/playlists/verified.m3u'
+  );
+  assert.equal(
+    IPTV_NEXONIC_VERIFIED_ROOT_URL,
+    'https://raw.githubusercontent.com/Shahrukhalid/nexonic-iptv/main/verified.m3u'
+  );
+  assert.equal(
+    IPTV_PAKISTAN_PLAYLIST_URL,
+    'https://iptv-org.github.io/iptv/countries/pk.m3u'
+  );
+  assert.equal(
+    IPTV_SPORTS_PLAYLIST_URL,
+    'https://iptv-org.github.io/iptv/categories/sports.m3u'
+  );
+  assert.equal(
+    IPTV_ALL_CHANNELS_PLAYLIST_URL,
+    'https://iptv-org.github.io/iptv/index.m3u'
+  );
+  assert.equal(resolveIptvPlaylistUrl('verified'), IPTV_NEXONIC_VERIFIED_PLAYLIST_URL);
+  assert.equal(resolveIptvPlaylistUrl('pakistan'), IPTV_PAKISTAN_PLAYLIST_URL);
+  assert.equal(resolveIptvPlaylistUrl('sports'), IPTV_SPORTS_PLAYLIST_URL);
+  assert.equal(resolveIptvPlaylistUrl('all'), IPTV_ALL_CHANNELS_PLAYLIST_URL);
+  assert.equal(resolveIptvPlaylistCandidates('verified').length, 3);
+  assert.equal(resolveIptvPlaylistUrl('javascript:alert(1)'), null);
 
+  // 2. #EXTINF metadata parsing: tvg-name, tvg-logo, group-title, comma-in-quotes, missing tvg-name fallback
+  const meta1 = parseM3uExtinfLine(
+    '#EXTINF:-1 tvg-id="espn.us" tvg-name="ESPN, Inc." tvg-logo="https://example.com/espn.png" group-title="Sports;Live",ESPN HD (1080p)'
+  );
+  assert.equal(meta1.name, 'ESPN, Inc.');
+  assert.equal(meta1.tvgName, 'ESPN, Inc.');
+  assert.equal(meta1.logoUrl, 'https://example.com/espn.png');
+  assert.equal(meta1.groupTitle, 'Sports');
+  assert.deepEqual(meta1.categories, ['Sports', 'Live']);
 
+  const metaFallback = parseM3uExtinfLine(
+    '#EXTINF:-1 tvg-id="5Plus.il@SD" tvg-logo="https://i.imgur.com/L3RA9Lv.png" group-title="Kids;Sports",5Plus (1080p)'
+  );
+  assert.equal(metaFallback.name, '5Plus (1080p)');
+  assert.deepEqual(metaFallback.categories, ['Kids', 'Sports']);
 
+  // 3. Full M3U Playlist Parsing: intermediate directives (#EXTVLCOPT), XSS stripping, dangerous URL blocking, deduplication
+  const sampleM3u = [
+    '#EXTM3U',
+    '#EXTINF:-1 tvg-name="PTV Sports" tvg-logo="https://cdn.example.com/ptv.png" group-title="Sports",PTV Sports HD',
+    '#EXTVLCOPT:http-user-agent=CineBoxPlayer/1.0',
+    'https://stream.example.com/ptv/index.m3u8',
+    '#EXTINF:-1 tvg-name="<script>alert(1)</script>BBC News" tvg-logo="javascript:alert(2)" group-title="News;Entertainment",BBC News',
+    'https://stream.example.com/bbc/master.m3u8',
+    '#EXTINF:-1 tvg-name="Evil Channel" tvg-logo="https://ok.com/logo.png" group-title="Sports",Evil',
+    'javascript:alert(document.cookie)',
+    '#EXTINF:-1 tvg-name="PTV Sports" tvg-logo="https://cdn.example.com/ptv.png" group-title="Sports",PTV Sports HD',
+    'https://stream.example.com/ptv/index.m3u8',
+  ].join('\n');
 
+  const parsed = parseM3uPlaylist(sampleM3u);
+  assert.equal(parsed.channels.length, 2);
+  assert.equal(parsed.rejectedCount, 1); // rejected javascript: URL
+  assert.equal(parsed.channels[0].name, 'PTV Sports');
+  assert.equal(parsed.channels[0].streamUrl, 'https://stream.example.com/ptv/index.m3u8');
+  assert.equal(parsed.channels[1].name.includes('<script>'), false);
+  assert.equal(parsed.channels[1].logoUrl, null); // javascript: logo blocked
+  assert.deepEqual(parsed.channels[1].categories, ['News', 'Entertainment']);
 
+  // 4. Category grouping & Live search filtering
+  const catSummary = extractIptvCategories(parsed.channels);
+  assert.equal(catSummary.some((c) => c.name === 'Sports' && c.count === 1), true);
+  assert.equal(catSummary.some((c) => c.name === 'News' && c.count === 1), true);
+  assert.equal(catSummary.some((c) => c.name === 'Entertainment' && c.count === 1), true);
 
+  assert.equal(filterIptvChannels(parsed.channels, { query: 'ptv' }).length, 1);
+  assert.equal(filterIptvChannels(parsed.channels, { category: 'Entertainment' }).length, 1);
+  assert.equal(
+    filterIptvChannels(parsed.channels, { category: 'Sports', query: 'bbc' }).length,
+    0
+  );
 
+  // 5. Fast CORS & Mixed-Content Error Classification (Never hangs on Connecting...)
+  const corsError = classifyLiveStreamError({
+    errorType: 'networkError',
+    errorDetails: 'manifestLoadError',
+    httpStatus: 0,
+    streamUrl: 'https://blocked.example.com/live.m3u8',
+    isPageHttps: true,
+    isFatal: false,
+  });
+  assert.equal(corsError.shouldAbortImmediately, true);
+  assert.equal(corsError.isBrowserCorsOrBlocked, true);
+  assert.equal(corsError.userMessage, IPTV_BROWSER_BLOCKED_ERROR_MESSAGE);
 
+  const mixedHttpError = classifyLiveStreamError({
+    streamUrl: 'http://insecure.example.com/live.m3u8',
+    isPageHttps: true,
+  });
+  assert.equal(mixedHttpError.shouldAbortImmediately, true);
+  assert.equal(mixedHttpError.userMessage, IPTV_BROWSER_BLOCKED_ERROR_MESSAGE);
 
+  const forbiddenError = classifyLiveStreamError({
+    errorType: 'networkError',
+    errorDetails: 'manifestLoadError',
+    httpStatus: 403,
+    streamUrl: 'https://geo.example.com/live.m3u8',
+    isPageHttps: false,
+    isFatal: true,
+  });
+  assert.equal(forbiddenError.shouldAbortImmediately, true);
+  assert.equal(forbiddenError.userMessage, IPTV_BROWSER_BLOCKED_ERROR_MESSAGE);
+
+  // 6. Async fetchIptvPlaylist caching, mirror fallback, forceRefresh, AbortController & HTTP error handling
+  clearIptvPlaylistCache();
+  let fetchCalls = 0;
+  const mockFetch: typeof fetch = async () => {
+    fetchCalls += 1;
+    return new Response(sampleM3u, { status: 200 });
+  };
+
+  const firstLoad = await fetchIptvPlaylist('pakistan', { fetchImpl: mockFetch, nowMs: 1000 });
+  assert.equal(firstLoad.fromCache, false);
+  assert.equal(firstLoad.channels.length, 2);
+  assert.equal(fetchCalls, 1);
+
+  const cachedLoad = await fetchIptvPlaylist('pakistan', { fetchImpl: mockFetch, nowMs: 2000 });
+  assert.equal(cachedLoad.fromCache, true);
+  assert.equal(fetchCalls, 1);
+
+  const refreshedLoad = await fetchIptvPlaylist('pakistan', {
+    fetchImpl: mockFetch,
+    forceRefresh: true,
+    nowMs: 3000,
+  });
+  assert.equal(refreshedLoad.fromCache, false);
+  assert.equal(fetchCalls, 2);
+
+  // Nexonic unapproved candidate mirror fallback when primary returns 404 (admin discovery only)
+  let verifiedCalls = 0;
+  const fallbackFetch: typeof fetch = async () => {
+    verifiedCalls += 1;
+    if (verifiedCalls === 1) return new Response('Not Found', { status: 404 });
+    return new Response(sampleM3u, { status: 200 });
+  };
+  const verifiedFallbackRes = await fetchIptvPlaylist('nexonic_unapproved_candidate', {
+    forceRefresh: true,
+    fetchImpl: fallbackFetch,
+    nowMs: 4000,
+  });
+  assert.equal(verifiedCalls, 2);
+  assert.equal(verifiedFallbackRes.sourceUrl, IPTV_NEXONIC_VERIFIED_MIRROR_URL);
+  assert.equal(verifiedFallbackRes.channels.length, 2);
+
+  // AbortController signal respected
+  const abortCtrl = new AbortController();
+  abortCtrl.abort();
+  await assert.rejects(
+    () => fetchIptvPlaylist('pakistan', { signal: abortCtrl.signal, forceRefresh: true }),
+    (err: unknown) => err instanceof Error && err.name === 'AbortError'
+  );
+
+  // HTTP 500 error handled gracefully
+  await assert.rejects(
+    () =>
+      fetchIptvPlaylist('pakistan', {
+        forceRefresh: true,
+        fetchImpl: async () => new Response('Server Error', { status: 500 }),
+      }),
+    /HTTP 500/
+  );
+
+  // 7. Verify LiveTvSection.tsx & App.tsx UI Integration (Stable iptv-org API Default + Indian M3U)
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const liveTvSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/LiveTvSection.tsx'),
+    'utf8'
+  );
+  const appSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/App.tsx'),
+    'utf8'
+  );
+  assert.equal(liveTvSource.includes("useState<IptvPlaylistSourceId>('iptv-org-api')"), true);
+  assert.equal(liveTvSource.includes("testId: 'iptv-source-api-btn'"), true);
+  assert.equal(liveTvSource.includes("testId: 'iptv-source-india-btn'"), true);
+  assert.equal(liveTvSource.includes('fetchIptvOrgApiCatalog'), true);
+  assert.equal(liveTvSource.includes('classifyLiveStreamError'), true);
+  assert.equal(liveTvSource.includes('LIVE_STREAM_CONNECT_TIMEOUT_MS'), true);
+  assert.equal(liveTvSource.includes("import Hls from 'hls.js'"), true);
+  assert.equal(liveTvSource.includes('data-testid="iptv-live-badge"'), true);
+  assert.equal(liveTvSource.includes('data-testid="iptv-play-pause-btn"'), true);
+  assert.equal(liveTvSource.includes('data-testid="iptv-search-input"'), true);
+  assert.equal(appSource.includes("activeTab === 'live'"), true);
+  assert.equal(appSource.includes('data-testid="nav-live-tv-btn"'), true);
+});
+
+test('53. Supabase Live TV Proxy URL Builder, iptv-org Sports Playlist, Pakistan Notice & Honest Offline Classification', async () => {
+  const {
+    DEFAULT_LIVE_TV_PROXY_URL,
+    IPTV_CHANNEL_OFFLINE_ERROR_MESSAGE,
+    IPTV_GEO_BLOCKED_ERROR_MESSAGE,
+    IPTV_PAKISTAN_GEO_NOTICE,
+    IPTV_SPORTS_PLAYLIST_URL,
+    buildLiveTvProxyUrl,
+    classifyLiveStreamError,
+    clearIptvPlaylistCache,
+    fetchIptvPlaylist,
+    filterNexonicSportsChannels,
+    isPrivateOrLoopbackHostname,
+    parseM3uPlaylist,
+    rewriteHlsManifestForProxy,
+  } = await import('../services/iptvService');
+
+  // 1. Proxy URL builder (supports safe ?sourceId= and ?url=) + SSRF guard
+  const stream = 'http://92news.vdn.dstreamone.net/92newshd/92hd/playlist.m3u8';
+  const proxiedByUrl = buildLiveTvProxyUrl(stream);
+  assert.equal(
+    proxiedByUrl,
+    `${DEFAULT_LIVE_TV_PROXY_URL}?url=${encodeURIComponent(stream)}`
+  );
+  const proxiedById = buildLiveTvProxyUrl(stream, undefined, { sourceId: 'src-ptv-1' });
+  assert.equal(proxiedById, `${DEFAULT_LIVE_TV_PROXY_URL}?sourceId=src-ptv-1`);
+  assert.equal(buildLiveTvProxyUrl(proxiedByUrl), proxiedByUrl);
+
+  // Blocks SSRF / loopback / metadata / dangerous URI schemes
+  assert.equal(isPrivateOrLoopbackHostname('127.0.0.1'), true);
+  assert.equal(isPrivateOrLoopbackHostname('169.254.169.254'), true);
+  assert.equal(isPrivateOrLoopbackHostname('192.168.0.1'), true);
+  assert.equal(isPrivateOrLoopbackHostname('localhost'), true);
+  assert.equal(buildLiveTvProxyUrl('http://127.0.0.1:8080/live.m3u8'), null);
+  assert.equal(buildLiveTvProxyUrl('http://169.254.169.254/latest/meta-data/'), null);
+  assert.equal(buildLiveTvProxyUrl('javascript:alert(1)'), null);
+
+  // 2. HLS Manifest (.m3u8) Rewriting: .ts, .m4s, #EXT-X-KEY, #EXT-X-MAP
+  const sampleManifest = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:6',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="En",URI="audio/eng.m3u8"',
+    '#EXT-X-MAP:URI="/streams/init.mp4"',
+    '#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.com/key1.bin"',
+    '#EXTINF:4.000,',
+    'seg_0001.ts',
+    '#EXTINF:4.000,',
+    '/live/chunk_0002.m4s?token=abc',
+    '#EXTINF:4.000,',
+    'https://cdn.example.com/edge/seg_0003.ts',
+  ].join('\n');
+
+  const rewritten = rewriteHlsManifestForProxy(
+    sampleManifest,
+    'https://origin.example.com/hls/ch1/index.m3u8'
+  );
+
+  assert.equal(
+    rewritten.includes(
+      `${DEFAULT_LIVE_TV_PROXY_URL}?url=${encodeURIComponent('https://origin.example.com/hls/ch1/audio/eng.m3u8')}`
+    ),
+    true
+  );
+  assert.equal(
+    rewritten.includes(
+      `${DEFAULT_LIVE_TV_PROXY_URL}?url=${encodeURIComponent('https://origin.example.com/streams/init.mp4')}`
+    ),
+    true
+  );
+  assert.equal(
+    rewritten.includes(
+      `${DEFAULT_LIVE_TV_PROXY_URL}?url=${encodeURIComponent('https://keys.example.com/key1.bin')}`
+    ),
+    true
+  );
+  assert.equal(
+    rewritten.includes(
+      `${DEFAULT_LIVE_TV_PROXY_URL}?url=${encodeURIComponent('https://origin.example.com/hls/ch1/seg_0001.ts')}`
+    ),
+    true
+  );
+
+  // 3. Honest Error Classification: never claim 403/404/502 is geo-blocked without explicit evidence
+  assert.equal(
+    IPTV_CHANNEL_OFFLINE_ERROR_MESSAGE,
+    'Channel stream is currently offline or unreachable.'
+  );
+  assert.equal(
+    IPTV_PAKISTAN_GEO_NOTICE,
+    'Note: Broadcaster regional rights may restrict playback outside Pakistan.'
+  );
+
+  const proxy502 = classifyLiveStreamError({
+    errorType: 'networkError',
+    errorDetails: 'manifestLoadError',
+    httpStatus: 502,
+    streamUrl: 'https://down.example.com/live.m3u8',
+    isPageHttps: true,
+    isFatal: true,
+    usingProxy: true,
+  });
+  assert.equal(proxy502.shouldAbortImmediately, true);
+  assert.equal(proxy502.status, 'offline');
+  assert.equal(proxy502.userMessage, IPTV_CHANNEL_OFFLINE_ERROR_MESSAGE);
+
+  const explicitGeo451 = classifyLiveStreamError({
+    errorType: 'networkError',
+    errorDetails: 'manifestLoadError',
+    httpStatus: 451,
+    streamUrl: 'https://geo.example.com/live.m3u8',
+    isPageHttps: true,
+    isFatal: true,
+    usingProxy: true,
+  });
+  assert.equal(explicitGeo451.status, 'geo_blocked');
+  assert.equal(explicitGeo451.userMessage, IPTV_GEO_BLOCKED_ERROR_MESSAGE);
+
+  const proxy404Https = classifyLiveStreamError({
+    errorType: 'networkError',
+    errorDetails: 'manifestLoadError',
+    httpStatus: 404,
+    streamUrl: 'https://live.alarabiya.net/alarabiapublish/alarabiya.smil/playlist.m3u8',
+    isPageHttps: true,
+    isFatal: false,
+    usingProxy: true,
+  });
+  assert.equal(proxy404Https.shouldFallbackToDirect, true);
+
+  // 4. Sports category fetches official iptv-org sports.m3u (never silently swapping Nexonic verified)
+  const sportsSampleM3u = [
+    '#EXTM3U',
+    '#EXTINF:-1 tvg-id="PTVSports.pk" tvg-name="PTV Sports" group-title="Sports",PTV Sports',
+    'https://cdn.example.com/ptv-sports.m3u8',
+    '#EXTINF:-1 tvg-id="RedBullTV.us" tvg-name="Red Bull TV" group-title="Sports",Red Bull TV',
+    'https://cdn.example.com/redbull.m3u8',
+  ].join('\n');
+
+  clearIptvPlaylistCache();
+  const requestedUrls: string[] = [];
+  const sportsRes = await fetchIptvPlaylist('sports', {
+    forceRefresh: true,
+    nowMs: 10_000,
+    fetchImpl: async (input) => {
+      requestedUrls.push(String(input));
+      return new Response(sportsSampleM3u, { status: 200 });
+    },
+  });
+  assert.equal(requestedUrls[0], IPTV_SPORTS_PLAYLIST_URL);
+  assert.equal(sportsRes.channels.length, 2);
+
+  // Utility filter still avoids logo false positives (/f/f1/)
+  const logoFalsePositiveCheck = parseM3uPlaylist(
+    '#EXTM3U\n#EXTINF:-1 tvg-name="RTL Zwei" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/f/f1/RTL_Zwei.svg" group-title="Germany",RTL Zwei\nhttps://cdn.example.com/rtl.m3u8'
+  );
+  assert.equal(filterNexonicSportsChannels(logoFalsePositiveCheck.channels).length, 0);
+
+  // 5. Hardened Supabase Proxy & LiveTvSection Integration
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const edgeFnSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/functions/live-tv-proxy/index.ts'),
+    'utf8'
+  );
+  const liveTvSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/LiveTvSection.tsx'),
+    'utf8'
+  );
+
+  assert.equal(edgeFnSource.includes("allowOrigin"), true);
+  assert.equal(edgeFnSource.includes('rewriteM3u8Manifest'), true);
+  assert.equal(edgeFnSource.includes('isForbiddenPrivateOrLoopbackHost'), true);
+  assert.equal(edgeFnSource.includes('isForbiddenIpAddress'), true);
+  assert.equal(edgeFnSource.includes('resolveAndValidateHostIps'), true);
+  assert.equal(edgeFnSource.includes('MAX_REDIRECT_HOPS'), true);
+
+  assert.equal(liveTvSource.includes('buildLiveTvProxyUrl'), true);
+  assert.equal(liveTvSource.includes('IPTV_CHANNEL_OFFLINE_ERROR_MESSAGE'), true);
+  assert.equal(liveTvSource.includes('IPTV_PAKISTAN_GEO_NOTICE'), true);
+  assert.equal(liveTvSource.includes('data-testid="iptv-pakistan-geo-notice"'), true);
+  assert.equal(liveTvSource.includes('xhrSetup'), true);
+});
+
+test('54. Stage 11 M3U Parser Edge Cases: Malformed, Missing URLs, Dangerous Schemes, Relative URLs, Large Scale', async () => {
+  const { parseM3uPlaylist } = await import('../services/iptvService');
+
+  // Empty & null-like inputs
+  assert.deepEqual(parseM3uPlaylist('').channels, []);
+  assert.deepEqual(parseM3uPlaylist('   \n\n  ').channels, []);
+
+  // Malformed, missing URLs, dangerous schemes, relative URLs, duplicates, XSS metadata
+  const edgeM3u = [
+    '#EXTM3U',
+    '#EXTINF:-1 tvg-id="ChanA" tvg-name="<script>alert(1)</script>ARY News" tvg-country="PK" tvg-language="ur" group-title="News",ARY News',
+    'relative/live/ary.m3u8',
+    '#EXTINF:-1 tvg-name="Missing Stream",Missing Stream',
+    '#EXTINF:-1 tvg-name="Broken Next Header",Broken Next',
+    '#EXTINF:-1 tvg-name="XSS URL",XSS URL',
+    'javascript:alert(1)',
+    '#EXTINF:-1 tvg-name="Data URI",Data URI',
+    'data:text/html,<script>alert(1)</script>',
+    '#EXTINF:-1 tvg-id="ChanA" tvg-name="ARY News",ARY News',
+    'https://cdn.example.com/relative/live/ary.m3u8',
+  ].join('\n');
+
+  const parsed = parseM3uPlaylist(edgeM3u, {
+    baseUrl: 'https://cdn.example.com/playlists/pk.m3u',
+    provider: 'pk',
+  });
+  assert.equal(parsed.rejectedCount >= 2, true);
+  // Relative URL resolves to https://cdn.example.com/playlists/relative/live/ary.m3u8
+  assert.equal(
+    parsed.channels[0].streamUrl,
+    'https://cdn.example.com/playlists/relative/live/ary.m3u8'
+  );
+  assert.equal(parsed.channels[0].name.includes('<script>'), false);
+  assert.equal(parsed.channels[0].rightsStatus, 'pending');
+  assert.equal(parsed.channels[0].country, 'PK');
+  assert.equal(parsed.channels[0].language, 'ur');
+
+  // Large M3U playlist (>= 1200 entries)
+  const bigLines = ['#EXTM3U'];
+  for (let i = 0; i < 1200; i++) {
+    bigLines.push(`#EXTINF:-1 tvg-id="ch-${i}" group-title="Entertainment",Channel ${i}`);
+    bigLines.push(`https://stream.example.com/live/${i}/index.m3u8`);
+  }
+  const bigRes = parseM3uPlaylist(bigLines.join('\n'));
+  assert.equal(bigRes.channels.length, 1200);
+  assert.equal(bigRes.rejectedCount, 0);
+});
+
+test('55. Stage 11 iptv-org API Metadata Fetching, Partial Error Resilience & Normalized Channel/M3U Deduplication', async () => {
+  const {
+    clearIptvPlaylistCache,
+    fetchIptvOrgApiMetadata,
+    normalizeAndMergeApiAndM3uData,
+    parseM3uPlaylist,
+  } = await import('../services/iptvService');
+
+  clearIptvPlaylistCache();
+
+  // Simulate partial API failure (streams.json 503 while channels/guides/categories succeed)
+  const mockFetch: typeof fetch = async (input) => {
+    const u = String(input);
+    if (u.includes('channels.json')) {
+      return new Response(
+        JSON.stringify([
+          { id: 'PTVSports.pk', name: 'PTV Sports', country: 'PK', categories: ['Sports'], is_nsfw: false },
+          { id: 'ClosedChan.pk', name: 'Old Closed', country: 'PK', closed: '2024-01-01' },
+          { id: 'AdultChan.xx', name: 'Adult', country: 'US', is_nsfw: true },
+        ]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('streams.json')) {
+      return new Response('Service Unavailable', { status: 503 });
+    }
+    if (u.includes('guides.json')) {
+      return new Response(
+        JSON.stringify([{ channel: 'PTVSports.pk', site: 'ptv', site_id: '1', site_name: 'PTV', lang: 'ur' }]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('categories.json')) {
+      return new Response(JSON.stringify([{ id: 'sports', name: 'Sports' }]), { status: 200 });
+    }
+    return new Response('[]', { status: 404 });
+  };
+
+  const apiBundle = await fetchIptvOrgApiMetadata({ fetchImpl: mockFetch, forceRefresh: true, nowMs: 50_000 });
+  assert.equal(apiBundle.channels.length, 3);
+  assert.equal(apiBundle.partialErrors.length, 1);
+  assert.equal(apiBundle.partialErrors[0].includes('streams.json'), true);
+
+  // Merge API channels + M3U channels -> deduplicates by tvg-id, fills logo, blocks NSFW/closed, preserves pending rights
+  const m3u = parseM3uPlaylist(
+    '#EXTM3U\n#EXTINF:-1 tvg-id="PTVSports.pk" tvg-logo="https://img.example.com/ptv.png" group-title="Sports",PTV Sports\nhttps://cdn.example.com/ptv/index.m3u8\n#EXTINF:-1 tvg-id="PTVSports.pk" group-title="Sports",PTV Sports\nhttps://backup.example.com/ptv/index.m3u8'
+  );
+  const merged = normalizeAndMergeApiAndM3uData({
+    apiChannels: apiBundle.channels,
+    apiStreams: apiBundle.streams,
+    apiGuides: apiBundle.guides,
+    m3uChannels: m3u.channels,
+  });
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'PTVSports.pk');
+  assert.equal(merged[0].logoUrl, 'https://img.example.com/ptv.png');
+  assert.equal(merged[0].language, 'ur');
+  assert.equal(merged[0].rightsStatus, 'pending');
+  assert.equal(merged[0].sources.length, 2);
+});
+
+test('56. Stage 11 Rights Approval Gate, Live Catalog API, Secret Auth & SQL RLS Schema Audit', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    buildCuratedPublicCatalogPayload,
+    handleLiveCatalogRequest,
+  } = await import('../../supabase/functions/live-catalog/index');
+
+  const channels = [
+    { id: 'ptv.pk', name: 'PTV Sports', country: 'PK', language: 'ur', categories: ['Sports'], is_published: true, is_nsfw: false },
+    { id: 'pending.pk', name: 'Pending TV', country: 'PK', language: 'ur', categories: ['News'], is_published: true, is_nsfw: false },
+    { id: 'rejected.in', name: 'Rejected TV', country: 'IN', language: 'hi', categories: ['News'], is_published: true, is_nsfw: false },
+  ];
+  const sources = [
+    {
+      id: 'src-approved-1',
+      channel_id: 'ptv.pk',
+      provider: 'official',
+      source_url: 'https://live.example.com/ptv/index.m3u8',
+      allowed_domain: 'live.example.com',
+      format: 'hls',
+      country: 'PK',
+      language: 'ur',
+      rights_status: 'approved',
+      is_enabled: true,
+      allow_browser_proxy: true,
+      playback_status: 'verified',
+      permission_evidence: 'CONFIDENTIAL_SIGNED_CONTRACT_KEY',
+    },
+    {
+      id: 'src-pending',
+      channel_id: 'pending.pk',
+      source_url: 'https://pending.example.com/live.m3u8',
+      rights_status: 'pending',
+      is_enabled: true,
+      playback_status: 'not_tested_from_pk',
+    },
+    {
+      id: 'src-rejected',
+      channel_id: 'rejected.in',
+      source_url: 'https://rejected.example.com/live.m3u8',
+      rights_status: 'rejected',
+      is_enabled: true,
+    },
+    {
+      id: 'src-expired',
+      channel_id: 'ptv.pk',
+      source_url: 'https://expired.example.com/live.m3u8',
+      rights_status: 'expired',
+      is_enabled: true,
+    },
+  ];
+  const epgProgrammes = [
+    { id: 1, channel_id: 'ptv.pk', title: 'Cricket Live', start_at: '2026-11-14T10:00:00Z', end_at: '2026-11-14T12:00:00Z' },
+    { id: 2, channel_id: 'pending.pk', title: 'Hidden Pending Show', start_at: '2026-11-14T10:00:00Z', end_at: '2026-11-14T12:00:00Z' },
+  ];
+
+  // Unapproved / pending / rejected / expired must NEVER appear in public catalog, nor leak permission_evidence
+  const payload = buildCuratedPublicCatalogPayload({
+    channels,
+    sources,
+    epgProgrammes,
+    filters: { country: 'PK', category: 'Sports' },
+  });
+  assert.equal(payload.channels.length, 1);
+  assert.equal(payload.channels[0].id, 'ptv.pk');
+  assert.equal(payload.channels[0].sources.length, 1);
+  assert.equal(payload.channels[0].sources[0].permissionEvidence, null);
+  assert.equal(payload.epgProgrammes.length, 1);
+
+  // HTTP GET filtering
+  const getRes = await handleLiveCatalogRequest(
+    new Request('https://api.example.com/functions/v1/live-catalog?country=IN'),
+    {
+      fetchChannelsAndSources: async () => ({ channels, sources, epgProgrammes }),
+    }
+  );
+  assert.equal(getRes.status, 200);
+  const getJson = await getRes.json();
+  assert.equal(getJson.channels.length, 0);
+
+  // Unauthorized POST rejected with 401
+  const postDenied = await handleLiveCatalogRequest(
+    new Request('https://api.example.com/functions/v1/live-catalog', { method: 'POST' }),
+    { verifySyncAuthorized: async () => false }
+  );
+  assert.equal(postDenied.status, 401);
+
+  // SQL schema & RLS verification
+  const sqlMigration = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/20261114_live_tv_upgrade.sql'),
+    'utf8'
+  );
+  assert.equal(sqlMigration.includes('CREATE TABLE IF NOT EXISTS public.live_channels'), true);
+  assert.equal(sqlMigration.includes('CREATE TABLE IF NOT EXISTS public.live_sources'), true);
+  assert.equal(sqlMigration.includes("rights_status = 'approved'"), true);
+  assert.equal(sqlMigration.includes('auth.uid() = user_id'), true);
+});
+
+test('57. Stage 11 Honest Stream Verification (GET HLS Master+Media+Segment, DASH, 403/405/Timeout/Geo/PK Rule)', async () => {
+  const { verifyCandidateStreamHealth } = await import('../services/iptvService');
+
+  // 1. Valid HLS master -> variant media -> segment from NON-PK runner => must be 'not_tested_from_pk', NOT 'verified'
+  const hlsFetch: typeof fetch = async (input) => {
+    const u = String(input);
+    if (u.endsWith('master.m3u8')) {
+      return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\n720p.m3u8', {
+        status: 200,
+        headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+      });
+    }
+    if (u.endsWith('720p.m3u8')) {
+      return new Response('#EXTM3U\n#EXTINF:4.0,\nseg1.ts', {
+        status: 200,
+        headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+      });
+    }
+    if (u.endsWith('seg1.ts')) {
+      return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x10]), { status: 200 });
+    }
+    return new Response('Not Found', { status: 404 });
+  };
+
+  const nonPkResult = await verifyCandidateStreamHealth('https://cdn.example.com/live/master.m3u8', {
+    testCountry: 'US',
+    fetchImpl: hlsFetch,
+  });
+  assert.equal(nonPkResult.manifestOk, true);
+  assert.equal(nonPkResult.mediaPlaylistOk, true);
+  assert.equal(nonPkResult.segmentOk, true);
+  assert.equal(nonPkResult.errorClassification, 'not_tested_from_pk');
+  assert.equal(nonPkResult.playbackOk, false);
+
+  // Same stream verified from PK runner -> 'verified'
+  const pkResult = await verifyCandidateStreamHealth('https://cdn.example.com/live/master.m3u8', {
+    testCountry: 'PK',
+    fetchImpl: hlsFetch,
+  });
+  assert.equal(pkResult.errorClassification, 'verified');
+  assert.equal(pkResult.playbackOk, true);
+
+  // 2. Broken segment inside valid HLS -> 'offline' (not falsely passing on master alone!)
+  const brokenSegResult = await verifyCandidateStreamHealth('https://cdn.example.com/live/master.m3u8', {
+    testCountry: 'PK',
+    fetchImpl: async (input) => {
+      const u = String(input);
+      if (u.endsWith('master.m3u8')) {
+        return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\n720p.m3u8', { status: 200 });
+      }
+      if (u.endsWith('720p.m3u8')) {
+        return new Response('#EXTM3U\n#EXTINF:4.0,\nseg1.ts', { status: 200 });
+      }
+      return new Response('Segment missing', { status: 404 });
+    },
+  });
+  assert.equal(brokenSegResult.manifestOk, true);
+  assert.equal(brokenSegResult.mediaPlaylistOk, true);
+  assert.equal(brokenSegResult.segmentOk, false);
+  assert.equal(brokenSegResult.errorClassification, 'offline');
+
+  // 3. DASH MPD + segment validation
+  const dashResult = await verifyCandidateStreamHealth('https://cdn.example.com/dash/manifest.mpd', {
+    testCountry: 'PK',
+    fetchImpl: async (input) => {
+      if (String(input).endsWith('manifest.mpd')) {
+        return new Response('<MPD><Period><AdaptationSet><BaseURL>init.mp4</BaseURL></AdaptationSet></Period></MPD>', {
+          status: 200,
+          headers: { 'Content-Type': 'application/dash+xml' },
+        });
+      }
+      return new Response('ok', { status: 200 });
+    },
+  });
+  assert.equal(dashResult.errorClassification, 'verified');
+
+  // 4. Generic HTTP 403 & 405 must NOT lie about geo_blocked
+  const http403 = await verifyCandidateStreamHealth('https://cdn.example.com/live/ch.m3u8', {
+    fetchImpl: async () => new Response('Forbidden', { status: 403 }),
+  });
+  assert.equal(http403.errorClassification, 'offline');
+
+  const http405 = await verifyCandidateStreamHealth('https://cdn.example.com/live/ch.m3u8', {
+    fetchImpl: async () => new Response('Method Not Allowed', { status: 405 }),
+  });
+  assert.equal(http405.errorClassification, 'offline');
+
+  // 5. Explicit HTTP 451 / geo text => geo_blocked
+  const http451 = await verifyCandidateStreamHealth('https://cdn.example.com/live/ch.m3u8', {
+    fetchImpl: async () => new Response('Unavailable For Legal/Country Reasons', { status: 451 }),
+  });
+  assert.equal(http451.errorClassification, 'geo_blocked');
+
+  // 6. Timeout => 'timeout'; bad scheme => 'unsupported_format'
+  const timeoutRes = await verifyCandidateStreamHealth('https://cdn.example.com/live/ch.m3u8', {
+    fetchImpl: async () => {
+      const err = new Error('Timed out');
+      err.name = 'AbortError';
+      throw err;
+    },
+  });
+  assert.equal(timeoutRes.errorClassification, 'timeout');
+
+  const unsupportedRes = await verifyCandidateStreamHealth('rtmp://cdn.example.com/live');
+  assert.equal(unsupportedRes.errorClassification, 'unsupported_format');
+});
+
+test('58. Stage 11 Hardened Live TV Proxy: Allowlist, DNS Rebinding, Private IP, Redirect Hop, Rate Limit, Size Cap & Rewrite', async () => {
+  const {
+    MAX_PLAYLIST_BYTES,
+    handleLiveTvProxyRequest,
+    resetProxyRateLimitForTests,
+  } = await import('../../supabase/functions/live-tv-proxy/index');
+
+  resetProxyRateLimitForTests();
+
+  const approvedSource = {
+    id: 'src-approved-ptv',
+    sourceUrl: 'https://approved.cdn.com/hls/ptv/master.m3u8',
+    allowedDomain: 'approved.cdn.com',
+    pathPrefix: '/hls/ptv/',
+    rightsStatus: 'approved',
+    isEnabled: true,
+    allowBrowserProxy: true,
+  };
+
+  // 1. Disallowed arbitrary host blocked with 403
+  const resDisallowed = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?url=https://evil.example.com/live.m3u8'),
+    { lookupApprovedSource: async () => null, allowedHosts: ['approved.cdn.com'] }
+  );
+  assert.equal(resDisallowed.status, 403);
+  assert.equal(resDisallowed.headers.get('X-Cinebox-Error-Code'), 'UNAPPROVED_HOST');
+
+  // 2. Private IP & Metadata SSRF blocked even if allowlisted host tricks DNS resolution (DNS rebinding)
+  const resDnsRebind = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv'),
+    {
+      lookupApprovedSource: async () => approvedSource,
+      resolveDns: async () => ['169.254.169.254'],
+    }
+  );
+  assert.equal(resDnsRebind.status, 403);
+  assert.equal(resDnsRebind.headers.get('X-Cinebox-Error-Code'), 'SSRF_BLOCKED');
+
+  // 3. Redirect to private/unapproved host blocked cleanly
+  const resRedirectBlock = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv'),
+    {
+      lookupApprovedSource: async () => approvedSource,
+      resolveDns: async () => ['93.184.216.34'],
+      fetchImpl: async () =>
+        new Response(null, {
+          status: 302,
+          headers: { Location: 'http://127.0.0.1:8080/internal-admin' },
+        }),
+    }
+  );
+  assert.equal(resRedirectBlock.status, 403);
+  assert.equal(resRedirectBlock.headers.get('X-Cinebox-Error-Code'), 'SSRF_BLOCKED');
+
+  // 4. Unsupported HTTP method -> 405
+  const resMethod = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv', {
+      method: 'POST',
+    })
+  );
+  assert.equal(resMethod.status, 405);
+
+  // 5. Oversized manifest -> 413
+  const oversized = '#EXTM3U\n' + 'A'.repeat(MAX_PLAYLIST_BYTES + 10);
+  const resTooLarge = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv'),
+    {
+      lookupApprovedSource: async () => approvedSource,
+      resolveDns: async () => ['93.184.216.34'],
+      fetchImpl: async () =>
+        new Response(oversized, {
+          status: 200,
+          headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+        }),
+    }
+  );
+  assert.equal(resTooLarge.status, 413);
+
+  // 6. Rate limiting -> 429
+  resetProxyRateLimitForTests();
+  const depsLimited = {
+    lookupApprovedSource: async () => approvedSource,
+    resolveDns: async () => ['93.184.216.34'],
+    rateLimitMax: 2,
+    fetchImpl: async () =>
+      new Response('#EXTM3U\n#EXTINF:4,\nseg1.ts', {
+        status: 200,
+        headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+      }),
+  };
+  const ok1 = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv', {
+      headers: { 'cf-connecting-ip': '198.51.100.44' },
+    }),
+    depsLimited
+  );
+  const ok2 = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv', {
+      headers: { 'cf-connecting-ip': '198.51.100.44' },
+    }),
+    depsLimited
+  );
+  const limited3 = await handleLiveTvProxyRequest(
+    new Request('https://proxy.test/functions/v1/live-tv-proxy?sourceId=src-approved-ptv', {
+      headers: { 'cf-connecting-ip': '198.51.100.44' },
+    }),
+    depsLimited
+  );
+  assert.equal(ok1.status, 200);
+  assert.equal(ok2.status, 200);
+  assert.equal(limited3.status, 429);
+  const ok1Body = await ok1.text();
+  assert.equal(ok1Body.includes('/live-tv-proxy?url='), true);
+});
+
+test('59. Stage 11 EPG XMLTV Parsing, UTC-to-Local Formatting, Channel Matching & Current/Next Computation', async () => {
+  const {
+    cacheChannelEpgProgrammes,
+    computeCurrentAndNextEpg,
+    formatEpgLocalTime,
+    getCachedChannelEpgProgrammes,
+    matchEpgProgrammesForChannel,
+    parseXmlTvProgrammes,
+    parseXmlTvTimestampToUtcIso,
+  } = await import('../services/iptvService');
+
+  assert.equal(
+    parseXmlTvTimestampToUtcIso('20261114140000 +0500'),
+    '2026-11-14T09:00:00.000Z'
+  );
+  assert.equal(formatEpgLocalTime('2026-11-14T09:00:00.000Z', 'en-US', 'Asia/Karachi').includes('02:00'), true);
+
+  const xmltv = `
+    <tv>
+      <programme start="20261114080000 +0000" stop="20261114100000 +0000" channel="PTVSports.pk">
+        <title lang="en">Pakistan vs Australia Live</title>
+        <desc>ODI Match Highlights &lt;script&gt;xss&lt;/script&gt;</desc>
+        <category>Sports</category>
+      </programme>
+      <programme start="20261114100000 +0000" stop="20261114120000 +0000" channel="PTVSports.pk">
+        <title lang="en">Post Match Analysis</title>
+      </programme>
+      <programme start="20261114100000 +0000" stop="20261114110000 +0000" channel="ARYNews.pk">
+        <title lang="ur">Headlines</title>
+      </programme>
+    </tv>
+  `;
+
+  const parsed = parseXmlTvProgrammes(xmltv);
+  assert.equal(parsed.length, 3);
+  assert.equal(parsed[0].description.includes('<script>'), false);
+
+  const matched = matchEpgProgrammesForChannel(parsed, {
+    id: 'PTVSports.pk',
+    tvgId: 'PTVSports.pk',
+  });
+  assert.equal(matched.length, 2);
+
+  const nowMs = Date.parse('2026-11-14T09:00:00.000Z');
+  const schedule = computeCurrentAndNextEpg(matched, nowMs);
+  assert.equal(schedule.current?.title, 'Pakistan vs Australia Live');
+  assert.equal(schedule.next?.title, 'Post Match Analysis');
+
+  // Missing guide returns empty/null gracefully (no invented programmes)
+  const missing = matchEpgProgrammesForChannel(parsed, { id: 'Unknown.tv', tvgId: 'Unknown.tv' });
+  assert.equal(missing.length, 0);
+  const emptySched = computeCurrentAndNextEpg(missing, nowMs);
+  assert.equal(emptySched.current, null);
+  assert.equal(emptySched.next, null);
+
+  // Cache TTL check
+  cacheChannelEpgProgrammes('PTVSports.pk', matched, 1000);
+  assert.equal(getCachedChannelEpgProgrammes('PTVSports.pk', 2000)?.length, 2);
+  assert.equal(getCachedChannelEpgProgrammes('PTVSports.pk', 2_000_000), null);
+});
+
+test('60. Stage 11 Favorites, Watch History Dedupe/Clear & Native Android Media3 Bridge Verification', async () => {
+  const {
+    clearLiveHistory,
+    launchNativeMedia3LivePlayer,
+    recordLiveWatchHistory,
+    resetHistoryThrottleForTests,
+    toggleLiveFavorite,
+  } = await import('../services/liveTvUserService');
+
+  resetHistoryThrottleForTests();
+
+  const ch1 = {
+    id: 'PTVSports.pk',
+    sourceId: 'src-ptv-1',
+    name: 'PTV Sports',
+    tvgName: 'PTV Sports',
+    tvgId: 'PTVSports.pk',
+    logoUrl: 'https://cdn.example.com/ptv.png',
+    groupTitle: 'Sports',
+    categories: ['Sports'],
+    streamUrl: 'https://cdn.example.com/ptv/index.m3u8',
+    isHttpInsecure: false,
+    country: 'PK',
+    format: 'hls' as const,
+  };
+
+  // Favorites toggle on/off
+  const favOn = await toggleLiveFavorite(ch1, []);
+  assert.equal(favOn.isFavorite, true);
+  assert.equal(favOn.favorites.length, 1);
+  const favOff = await toggleLiveFavorite(ch1, favOn.favorites);
+  assert.equal(favOff.isFavorite, false);
+  assert.equal(favOff.favorites.length, 0);
+
+  // History recording with 15s deduplication & clear history
+  let hist = await recordLiveWatchHistory(ch1, [], 10_000);
+  assert.equal(hist.length, 1);
+  // Rapid duplicate within 15s window ignored
+  hist = await recordLiveWatchHistory(ch1, hist, 15_000);
+  assert.equal(hist.length, 1);
+  hist = await clearLiveHistory();
+  assert.equal(hist.length, 0);
+
+  // Native Android Media3 Bridge: success path
+  let launchedArgs: any = null;
+  const okNative = await launchNativeMedia3LivePlayer(ch1, null, {
+    isAvailable: async () => ({ available: true, engine: 'androidx-media3-1.11.1' }),
+    playStream: async (opts) => {
+      launchedArgs = opts;
+      return { started: true };
+    },
+    switchChannel: async () => ({ switched: true }),
+    stopPlayback: async () => ({ stopped: true }),
+  });
+  assert.equal(okNative.launched, true);
+  assert.equal(launchedArgs.format, 'hls');
+
+  // Native Android Media3 Bridge: unsupported format rejected honestly
+  const badFormat = await launchNativeMedia3LivePlayer(
+    { ...ch1, streamUrl: 'https://cdn.example.com/unknown-binary', format: 'unknown' },
+    null
+  );
+  assert.equal(badFormat.launched, false);
+  assert.equal((badFormat.error || '').includes('not supported'), true);
+
+  // Native Android Media3 Bridge: missing plugin fails honestly without WebView/iframe fallback
+  const missingBridge = await launchNativeMedia3LivePlayer(ch1, null, {
+    isAvailable: async () => ({ available: false, engine: 'none' }),
+    playStream: async () => ({ started: false }),
+    switchChannel: async () => ({ switched: false }),
+    stopPlayback: async () => ({ stopped: false }),
+  });
+  assert.equal(missingBridge.launched, false);
+  assert.equal((missingBridge.error || '').includes('Media3'), true);
+});
+
+test('61. Stage 11 Android Media3 Security Hygiene & Existing CineBox App Preservation', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+
+  const gradle = fs.readFileSync(path.resolve(process.cwd(), 'android/app/build.gradle'), 'utf8');
+  const manifest = fs.readFileSync(path.resolve(process.cwd(), 'android/app/src/main/AndroidManifest.xml'), 'utf8');
+  const mainActivity = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  const pluginKt = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/CineboxLivePlayerPlugin.kt'),
+    'utf8'
+  );
+  const playerActivityKt = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/LiveTvPlayerActivity.kt'),
+    'utf8'
+  );
+
+  // Preserves package ID, version, and removes hardcoded signing secrets
+  assert.equal(gradle.includes('applicationId "com.cinebox.stream"'), true);
+  assert.equal(gradle.includes('cinebox_keystore_pass_2026'), false);
+  assert.equal(gradle.includes('cinebox_key_pass_2026'), false);
+  assert.equal(gradle.includes('androidx.media3:media3-exoplayer:'), true);
+  assert.equal(gradle.includes('androidx.media3:media3-exoplayer-hls:'), true);
+  assert.equal(gradle.includes('androidx.media3:media3-exoplayer-dash:'), true);
+
+  // Manifest registers LiveTvPlayerActivity alongside MainActivity
+  assert.equal(manifest.includes('com.cinebox.stream'), true);
+  assert.equal(manifest.includes('android:name=".LiveTvPlayerActivity"'), true);
+
+  // MainActivity registers plugin while preserving WebView popup/ad blocker + immersive fullscreen
+  assert.equal(mainActivity.includes('registerPlugin(CineboxLivePlayerPlugin.class);'), true);
+  assert.equal(mainActivity.includes('onCreateWindow'), true);
+  assert.equal(mainActivity.includes('shouldInterceptRequest'), true);
+  assert.equal(mainActivity.includes('onShowCustomView'), true);
+
+  // Kotlin player supports HLS + DASH + track selection + release lifecycle
+  assert.equal(pluginKt.includes('@CapacitorPlugin(name = "CineboxLivePlayer")'), true);
+  assert.equal(playerActivityKt.includes('MimeTypes.APPLICATION_M3U8'), true);
+  assert.equal(playerActivityKt.includes('MimeTypes.APPLICATION_MPD'), true);
+  assert.equal(playerActivityKt.includes('player?.release()'), true);
+});
+
+test('62. Live TV Catalog Fixes: Standalone SQL Helper+Seeds, Schema Diagnostic, live-cataloge 404 Fallback & Admin POST Actions', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { handleLiveCatalogRequest, buildCuratedPublicCatalogPayload } = await import(
+    '../../supabase/functions/live-catalog/index'
+  );
+  const { fetchCuratedLiveCatalog } = await import('../services/iptvService');
+
+  // 1. Standalone migration defines JWT role helper functions & idempotent open FTA starter seeds
+  const sqlMigration = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/20261114_live_tv_upgrade.sql'),
+    'utf8'
+  );
+  assert.equal(sqlMigration.includes('CREATE OR REPLACE FUNCTION public.is_cinebox_admin()'), true);
+  assert.equal(
+    sqlMigration.includes('CREATE OR REPLACE FUNCTION public.is_cinebox_moderator_or_admin()'),
+    true
+  );
+  assert.equal(sqlMigration.includes("'DWEnglish.de'"), true);
+  assert.equal(sqlMigration.includes("'RedBullTV.at'"), true);
+  assert.equal(sqlMigration.includes("'NASATVPublic.us'"), true);
+
+  // 2. Missing SQL schema diagnostic propagates transparently without hiding setup steps
+  const missingSchemaPayload = buildCuratedPublicCatalogPayload({
+    channels: [],
+    sources: [],
+    epgProgrammes: [],
+    filters: {},
+    schemaReady: false,
+    diagnostic: 'Live TV tables missing',
+  });
+  assert.equal(missingSchemaPayload.schemaReady, false);
+  assert.equal(missingSchemaPayload.diagnostic, 'Live TV tables missing');
+
+  const diagRes = await fetchCuratedLiveCatalog(
+    {},
+    {
+      fetchImpl: async () =>
+        new Response(JSON.stringify(missingSchemaPayload), { status: 200 }),
+    }
+  );
+  assert.equal(diagRes.schemaReady, false);
+  assert.equal(diagRes.notice, 'Live TV tables missing');
+
+  // 3. 404 on `live-catalog` falls back cleanly to `live-cataloge` if deployed under alternate slug
+  const hitUrls: string[] = [];
+  const slugFallbackRes = await fetchCuratedLiveCatalog(
+    {},
+    {
+      fetchImpl: async (input) => {
+        const u = String(input);
+        hitUrls.push(u);
+        if (u.endsWith('/functions/v1/live-catalog')) {
+          return new Response('NOT_FOUND', { status: 404 });
+        }
+        return new Response(
+          JSON.stringify({
+            version: 'cat-test',
+            updatedAt: '2026-11-14T00:00:00Z',
+            schemaReady: true,
+            channels: [
+              {
+                id: 'DWEnglish.de',
+                tvgId: 'DWEnglish.de',
+                name: 'DW English',
+                logoUrl: null,
+                country: 'INTL',
+                language: 'en',
+                categories: ['News'],
+                isNsfw: false,
+                rightsStatus: 'approved',
+                playbackStatus: 'not_tested_from_pk',
+                sources: [
+                  {
+                    id: 'src-dw',
+                    channelId: 'DWEnglish.de',
+                    provider: 'official-fta',
+                    sourceUrl: 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8',
+                    allowedDomain: 'dwamdstream102.akamaized.net',
+                    format: 'hls',
+                    country: 'INTL',
+                    language: 'en',
+                    rightsStatus: 'approved',
+                    availableCountries: ['GLOBAL'],
+                    allowBrowserProxy: true,
+                    isEnabled: true,
+                    priority: 10,
+                    playbackStatus: 'not_tested_from_pk',
+                  },
+                ],
+              },
+            ],
+            epgProgrammes: [],
+          }),
+          { status: 200 }
+        );
+      },
+    }
+  );
+  assert.equal(hitUrls.some((u) => u.includes('/live-cataloge')), true);
+  assert.equal(slugFallbackRes.channels.length, 1);
+  assert.equal(slugFallbackRes.channels[0].id, 'DWEnglish.de');
+
+  // 4. live-catalog POST Admin Action handler executes when authorized
+  let receivedAction = '';
+  const postOk = await handleLiveCatalogRequest(
+    new Request('https://api.example.com/functions/v1/live-catalog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'upsert_and_approve', channel: { id: 'X' } }),
+    }),
+    {
+      verifySyncAuthorized: async () => true,
+      handleAdminAction: async (body) => {
+        receivedAction = body?.action || '';
+        return new Response(JSON.stringify({ ok: true, action: receivedAction }), { status: 200 });
+      },
+    }
+  );
+  assert.equal(postOk.status, 200);
+  assert.equal(receivedAction, 'upsert_and_approve');
+});
+
+test('63. Reverted Stable Live TV: iptv-org API Full Catalog (with logos.json), Indian diljankhehra-cpu M3U + Fallback, Category Inference & Dynamic HLS', async () => {
+  const {
+    IPTV_INDIA_ORG_FALLBACK_URL,
+    IPTV_INDIA_PLAYLIST_URL,
+    buildChannelsFromIptvOrgApi,
+    clearIptvPlaylistCache,
+    fetchIptvOrgApiCatalog,
+    fetchIptvPlaylist,
+    inferLiveChannelCategories,
+    resolveIptvPlaylistCandidates,
+  } = await import('../services/iptvService');
+  const { launchNativeMedia3LivePlayer } = await import('../services/liveTvUserService');
+
+  // 1. Indian M3U primary & fallback candidates
+  assert.equal(IPTV_INDIA_PLAYLIST_URL, 'https://diljankhehra-cpu.github.io/IPTV/in.m3u');
+  assert.deepEqual(resolveIptvPlaylistCandidates('india'), [
+    'https://diljankhehra-cpu.github.io/IPTV/in.m3u',
+    IPTV_INDIA_ORG_FALLBACK_URL,
+  ]);
+
+  // 2. Category inference for Indian M3U channels lacking group-title
+  assert.deepEqual(inferLiveChannelCategories('Star Sports 1 HD', 'StarSports1.in'), ['Sports']);
+  assert.deepEqual(inferLiveChannelCategories('Aaj Tak HD', 'AajTak.in'), ['News']);
+  assert.deepEqual(inferLiveChannelCategories('Sony Max Movies', 'SonyMax.in'), ['Movies']);
+  assert.deepEqual(inferLiveChannelCategories('Pogo Kids TV', 'Pogo.in'), ['Kids']);
+  assert.deepEqual(inferLiveChannelCategories('9XM Music Hits', '9XM.in'), ['Music']);
+  assert.deepEqual(inferLiveChannelCategories('B4U Music Bollywood', 'B4U.in'), ['Movies', 'Music']);
+  assert.deepEqual(inferLiveChannelCategories('Discovery Science', 'Disc.in'), ['Documentary']);
+  assert.deepEqual(inferLiveChannelCategories('Colors TV HD', 'Colors.in'), ['Entertainment']);
+  assert.deepEqual(inferLiveChannelCategories('Unknown Regional Channel', 'Reg.in'), ['General']);
+
+  // Parse a realistic diljankhehra-cpu/IPTV/in.m3u snippet with no group-title
+  clearIptvPlaylistCache();
+  const sampleIndiaM3u = [
+    '#EXTM3U',
+    '#EXTINF:-1 tvg-id="StarSports1.in" tvg-name="Star Sports 1 Hindi" tvg-logo="https://img.example.com/ss1.png",Star Sports 1 Hindi',
+    'https://mini.allinonereborn.fun/tata.php?id=101',
+    '#EXTINF:-1 tvg-id="AajTak.in" tvg-name="Aaj Tak News" tvg-logo="https://img.example.com/aajtak.png",Aaj Tak News',
+    'https://cdn.example.com/aajtak/live.m3u8',
+  ].join('\n');
+
+  const indiaRes = await fetchIptvPlaylist('india', {
+    forceRefresh: true,
+    fetchImpl: async () => new Response(sampleIndiaM3u, { status: 200 }),
+  });
+  assert.equal(indiaRes.sourceUrl, 'https://diljankhehra-cpu.github.io/IPTV/in.m3u');
+  assert.equal(indiaRes.channels.length, 2);
+  assert.equal(indiaRes.channels[0].groupTitle, 'Sports');
+  assert.equal(indiaRes.channels[1].groupTitle, 'News');
+  assert.equal(indiaRes.categories.some((c) => c.name === 'Sports' && c.count === 1), true);
+  assert.equal(indiaRes.categories.some((c) => c.name === 'News' && c.count === 1), true);
+
+  // Indian M3U falls back to iptv-org countries/in.m3u when primary fails
+  let indiaFallbackCalls = 0;
+  const fallbackIndia = await fetchIptvPlaylist('india', {
+    forceRefresh: true,
+    fetchImpl: async (input) => {
+      indiaFallbackCalls += 1;
+      if (String(input) === IPTV_INDIA_PLAYLIST_URL) {
+        return new Response('Upstream Timeout', { status: 502 });
+      }
+      return new Response('#EXTM3U\n#EXTINF:-1 group-title="News",DD India\nhttps://dd.example.com/live.m3u8', {
+        status: 200,
+      });
+    },
+  });
+  assert.equal(indiaFallbackCalls, 2);
+  assert.equal(fallbackIndia.sourceUrl, IPTV_INDIA_ORG_FALLBACK_URL);
+  assert.equal(fallbackIndia.channels[0].name, 'DD India');
+
+  // 3. iptv-org API catalog builder: logos.json, HTTPS-first stream sorting, SSRF/NSFW/closed blocking, alternateSources
+  clearIptvPlaylistCache();
+  const built = buildChannelsFromIptvOrgApi({
+    channels: [
+      { id: 'GeoNews.pk', name: 'Geo News', country: 'PK', categories: ['news'], is_nsfw: false },
+      { id: 'Closed.pk', name: 'Closed TV', country: 'PK', closed: '2023-05-01' },
+      { id: 'Adult.us', name: 'Adult TV', country: 'US', is_nsfw: true },
+    ],
+    streams: [
+      { channel: 'GeoNews.pk', url: 'http://insecure.example.com/geo/live.m3u8', title: 'Geo News' },
+      { channel: 'GeoNews.pk', url: 'https://secure.example.com/geo/live.m3u8', title: 'Geo News' },
+      { channel: 'GeoNews.pk', url: 'http://127.0.0.1:8080/ssrf.m3u8', title: 'Geo News' },
+      { channel: 'Closed.pk', url: 'https://closed.example.com/live.m3u8', title: 'Closed TV' },
+      { channel: 'Adult.us', url: 'https://adult.example.com/live.m3u8', title: 'Adult TV' },
+    ],
+    logos: [
+      { channel: 'GeoNews.pk', url: 'https://logo.example.com/old.png', in_use: false },
+      { channel: 'GeoNews.pk', url: 'https://logo.example.com/geo.png', in_use: true },
+    ],
+    guides: [{ channel: 'GeoNews.pk', site: 'geo', site_id: '1', site_name: 'Geo', lang: 'ur' }],
+    categories: [{ id: 'news', name: 'News' }],
+  });
+
+  assert.equal(built.channels.length, 1);
+  assert.equal(built.rejectedCount, 1); // 127.0.0.1 SSRF URL rejected
+  const geo = built.channels[0];
+  assert.equal(geo.id, 'GeoNews.pk');
+  assert.equal(geo.logoUrl, 'https://logo.example.com/geo.png');
+  assert.equal(geo.language, 'ur');
+  assert.equal(geo.streamUrl, 'https://secure.example.com/geo/live.m3u8'); // HTTPS sorted before HTTP
+  assert.equal(geo.alternateSources?.length, 2);
+
+  // 4. fetchIptvOrgApiCatalog throws cleanly if streams.json fails and does NOT poison cache
+  clearIptvPlaylistCache();
+  let streamShouldFail = true;
+  const catalogMockFetch: typeof fetch = async (input) => {
+    const u = String(input);
+    if (u.includes('channels.json')) {
+      return new Response(
+        JSON.stringify([{ id: 'HumTV.pk', name: 'HUM TV', country: 'PK', categories: ['entertainment'] }]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('streams.json')) {
+      if (streamShouldFail) return new Response('Down', { status: 503 });
+      return new Response(
+        JSON.stringify([{ channel: 'HumTV.pk', url: 'https://hum.example.com/live.m3u8', title: 'HUM TV' }]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('logos.json')) {
+      return new Response(
+        JSON.stringify([{ channel: 'HumTV.pk', url: 'https://hum.example.com/logo.png', in_use: true }]),
+        { status: 200 }
+      );
+    }
+    if (u.includes('guides.json')) return new Response('[]', { status: 200 });
+    if (u.includes('categories.json')) return new Response(JSON.stringify([{ id: 'entertainment', name: 'Entertainment' }]), { status: 200 });
+    return new Response('[]', { status: 404 });
+  };
+
+  await assert.rejects(
+    () => fetchIptvOrgApiCatalog({ fetchImpl: catalogMockFetch, nowMs: 100_000 }),
+    /Unable to load iptv-org API channels/
+  );
+
+  // Retry succeeds because empty streams bundle did not poison cache
+  streamShouldFail = false;
+  const catalogOk = await fetchIptvOrgApiCatalog({ fetchImpl: catalogMockFetch, nowMs: 100_500 });
+  assert.equal(catalogOk.channels.length, 1);
+  assert.equal(catalogOk.channels[0].logoUrl, 'https://hum.example.com/logo.png');
+
+  // 5. Native Android Media3 accepts dynamic .php HLS stream URLs from in.m3u while blocking unknown binaries
+  let launchedPhpUrl = '';
+  const phpLaunch = await launchNativeMedia3LivePlayer(
+    indiaRes.channels[0],
+    null,
+    {
+      isAvailable: async () => ({ available: true, engine: 'media3' }),
+      playStream: async (opts) => {
+        launchedPhpUrl = opts.streamUrl;
+        return { started: true };
+      },
+      switchChannel: async () => ({ switched: true }),
+      stopPlayback: async () => ({ stopped: true }),
+    }
+  );
+  assert.equal(phpLaunch.launched, true);
+  assert.equal(launchedPhpUrl, 'https://mini.allinonereborn.fun/tata.php?id=101');
+
+  // 6. Logo wrapper unwrapping & unique IDs for M3U mirror entries sharing tvg-id
+  const { normalizeChannelLogoUrl, parseM3uPlaylist } = await import('../services/iptvService');
+  assert.equal(
+    normalizeChannelLogoUrl(
+      'https://mediaready.videoready.tv/tatasky/image/fetch/f_auto,fl_lossy,q_auto/https://dvdh7g0f0hwck.cloudfront.net/assets/images/channel/Nick.png'
+    ),
+    'https://dvdh7g0f0hwck.cloudfront.net/assets/images/channel/Nick.png'
+  );
+  assert.equal(
+    normalizeChannelLogoUrl(
+      'https://mediaready.videoready.tv/tatasky/image/fetch/f_auto/http://127.0.0.1/secret.png'
+    ),
+    null
+  );
+  const dupMirrors = parseM3uPlaylist([
+    '#EXTM3U',
+    '#EXTINF:-1 tvg-id="AajTak.in@SD",Aaj Tak Mirror 1',
+    'https://cdn1.example.com/aajtak/master.m3u8',
+    '#EXTINF:-1 tvg-id="AajTak.in@SD",Aaj Tak Mirror 2',
+    'https://cdn2.example.com/aajtak/master.m3u8',
+  ].join('\n'));
+  assert.equal(dupMirrors.channels.length, 2);
+  assert.notEqual(dupMirrors.channels[0].id, dupMirrors.channels[1].id);
+  assert.equal(dupMirrors.channels[0].tvgId, 'AajTak.in@SD');
+  assert.equal(dupMirrors.channels[1].tvgId, 'AajTak.in@SD');
+});
 
 

@@ -24,6 +24,7 @@ import {
   Smartphone,
   Sparkles,
   Trash2,
+  Tv,
   Upload,
   UserCheck,
   UserPlus,
@@ -78,9 +79,18 @@ import {
   VideoHosterFileItem,
 } from '../services/videoHosterIntegration';
 import { bumpSemverPatchVersion } from '../services/inAppUpdateService';
+import {
+  adminFetchAllLiveChannels,
+  AdminLiveChannelEntry,
+  adminUpdateLiveSourceRights,
+  adminUpsertAndApproveLiveChannel,
+  diagnoseLiveTvBackend,
+  LIVE_TV_UPGRADE_SQL_SNIPPET,
+  LiveTvBackendDiagnostic,
+} from '../services/liveTvAdminService';
 
 interface AdminAndDeliverablesModalProps {
-  initialTab: 'admin' | 'deliverables';
+  initialTab: 'admin' | 'deliverables' | 'live-tv';
   isAdminUnlocked: boolean;
   appConfig: AppConfigRecord;
   movies: MovieItem[];
@@ -273,6 +283,7 @@ cd android && ./gradlew assembleDebug`;
 
 type AdminSectionTab =
   | 'apk-download'
+  | 'live-tv'
   | 'links'
   | 'bulk'
   | 'users'
@@ -295,7 +306,11 @@ export const AdminAndDeliverablesModal: React.FC<AdminAndDeliverablesModalProps>
   onPreviewPopupAd,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminSectionTab>(
-    initialTab === 'deliverables' ? 'deliverables' : 'bulk'
+    initialTab === 'deliverables'
+      ? 'deliverables'
+      : initialTab === 'live-tv'
+      ? 'live-tv'
+      : 'bulk'
   );
   const [adminEmailInput, setAdminEmailInput] = useState<string>('');
   const [adminPasswordInput, setAdminPasswordInput] = useState<string>('');
@@ -445,6 +460,91 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
   const [supaDiag, setSupaDiag] = useState<SupabaseDiagnosticReport | null>(null);
   const [isTestingSupa, setIsTestingSupa] = useState<boolean>(false);
 
+  // 7. Live TV Channels Manager State
+  const [liveDiag, setLiveDiag] = useState<LiveTvBackendDiagnostic | null>(null);
+  const [isTestingLive, setIsTestingLive] = useState<boolean>(false);
+  const [liveEntries, setLiveEntries] = useState<AdminLiveChannelEntry[]>([]);
+  const [liveChannelName, setLiveChannelName] = useState<string>('');
+  const [liveChannelCountry, setLiveChannelCountry] = useState<string>('INTL');
+  const [liveChannelLanguage, setLiveChannelLanguage] = useState<string>('en');
+  const [liveChannelCategory, setLiveChannelCategory] = useState<string>('News');
+  const [liveChannelStreamUrl, setLiveChannelStreamUrl] = useState<string>('');
+  const [liveChannelLogoUrl, setLiveChannelLogoUrl] = useState<string>('');
+  const [liveChannelEvidence, setLiveChannelEvidence] = useState<string>(
+    'Official broadcaster / open free-to-air OTT feed verified'
+  );
+  const [liveAllowProxy, setLiveAllowProxy] = useState<boolean>(true);
+  const [isSavingLiveChannel, setIsSavingLiveChannel] = useState<boolean>(false);
+
+  const handleRefreshLiveTvAdmin = async () => {
+    setIsTestingLive(true);
+    try {
+      const [diag, list] = await Promise.all([
+        diagnoseLiveTvBackend(),
+        adminFetchAllLiveChannels(),
+      ]);
+      setLiveDiag(diag);
+      if (list.ok) {
+        setLiveEntries(list.entries);
+      }
+    } finally {
+      setIsTestingLive(false);
+    }
+  };
+
+  const handleSaveAndApproveLiveChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingLiveChannel(true);
+    try {
+      const res = await adminUpsertAndApproveLiveChannel({
+        name: liveChannelName,
+        country: liveChannelCountry,
+        language: liveChannelLanguage,
+        category: liveChannelCategory,
+        logoUrl: liveChannelLogoUrl || null,
+        streamUrl: liveChannelStreamUrl,
+        permissionEvidence: liveChannelEvidence,
+        allowBrowserProxy: liveAllowProxy,
+        approveImmediately: true,
+      });
+      if (!res.ok) {
+        showTempBanner(`Live TV Save Error: ${res.error || 'Failed to save channel'}`);
+        return;
+      }
+      setLiveChannelName('');
+      setLiveChannelStreamUrl('');
+      setLiveChannelLogoUrl('');
+      showTempBanner('Live TV channel saved, approved & published to Supabase!');
+      await handleRefreshLiveTvAdmin();
+    } finally {
+      setIsSavingLiveChannel(false);
+    }
+  };
+
+  const handleToggleLiveEntryApproval = async (
+    entry: AdminLiveChannelEntry,
+    approve: boolean
+  ) => {
+    const res = await adminUpdateLiveSourceRights({
+      channelId: entry.channelId,
+      sourceId: entry.sourceId,
+      rightsStatus: approve ? 'approved' : 'rejected',
+      isEnabled: approve,
+      isPublished: approve,
+      allowBrowserProxy: entry.allowBrowserProxy,
+    });
+    if (res.ok) {
+      showTempBanner(
+        approve
+          ? `Approved & published "${entry.name}" publicly!`
+          : `Disabled "${entry.name}" from public catalogue.`
+      );
+      await handleRefreshLiveTvAdmin();
+    } else {
+      showTempBanner(`Error updating ${entry.name}: ${res.error}`);
+    }
+  };
+
   const handleRunLiveSupabaseTest = async () => {
     setIsTestingSupa(true);
     try {
@@ -470,6 +570,7 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
         onUsersUpdated?.(list);
       });
       testSupabaseLiveTables().then(setSupaDiag);
+      void handleRefreshLiveTvAdmin();
     }
   }, [isAdminUnlocked]);
 
@@ -937,12 +1038,26 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
 
             <button
               type="button"
+              data-testid="admin-tab-live-tv"
+              onClick={() => setActiveTab('live-tv')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                activeTab === 'live-tv'
+                  ? 'bg-[#10d97b] text-slate-950'
+                  : 'bg-emerald-950/70 border border-[#10d97b]/40 text-[#10d97b] hover:bg-emerald-900/60'
+              }`}
+            >
+              <Tv className="w-4 h-4" />
+              <span>📺 Live TV Manager ({liveEntries.length})</span>
+            </button>
+
+            <button
+              type="button"
               data-testid="admin-tab-bulk"
               onClick={() => setActiveTab('bulk')}
               className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                 activeTab === 'bulk'
                   ? 'bg-[#10d97b] text-slate-950'
-                  : 'bg-emerald-950/70 border border-[#10d97b]/40 text-[#10d97b] hover:bg-emerald-900/60'
+                  : 'bg-slate-800/80 text-slate-300 hover:text-white'
               }`}
             >
               <Upload className="w-4 h-4" />
@@ -1292,6 +1407,290 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                 </div>
               </div>
             </form>
+          ) : activeTab === 'live-tv' ? (
+            /* =================================================================
+               TAB 0b: LIVE TV CHANNELS APPROVAL MANAGER & SQL/EDGE SETUP
+               ================================================================= */
+            <div className="space-y-5" data-testid="admin-live-tv-panel">
+              {/* Diagnostics Banner */}
+              <div className="p-4 rounded-2xl bg-[#0e1520] border border-[#10d97b]/40 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
+                      <Tv className="w-4 h-4 text-[#10d97b]" />
+                      <span>Live TV Backend &amp; Edge Function Status (`live-catalog`)</span>
+                    </h3>
+                    <p className="text-[11px] font-mono text-slate-400">
+                      Endpoint: {liveDiag?.catalogEndpoint || 'Not Checked'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="refresh-live-tv-diag-btn"
+                    disabled={isTestingLive}
+                    onClick={handleRefreshLiveTvAdmin}
+                    className="px-3.5 py-2 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 text-xs font-extrabold flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingLive ? 'animate-spin' : ''}`} />
+                    <span>{isTestingLive ? 'Checking...' : 'Check Live TV Backend'}</span>
+                  </button>
+                </div>
+
+                {liveDiag && (
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`px-2 py-0.5 rounded font-bold ${
+                          liveDiag.edgeFunctionReachable
+                            ? 'bg-emerald-950 text-[#10d97b] border border-emerald-500/40'
+                            : 'bg-amber-950 text-amber-300 border border-amber-500/40'
+                        }`}
+                      >
+                        live-catalog: {liveDiag.edgeFunctionHttpStatus ?? 'ERR'}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded font-bold ${
+                          liveDiag.schemaReady
+                            ? 'bg-emerald-950 text-[#10d97b] border border-emerald-500/40'
+                            : 'bg-rose-950 text-rose-300 border border-rose-500/40'
+                        }`}
+                      >
+                        SQL Schema: {liveDiag.schemaReady ? 'READY' : 'MISSING TABLES'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-bold">
+                        Published: {liveDiag.publishedChannelCount}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-300">{liveDiag.message}</p>
+                    <p className="text-[11px] font-mono text-amber-300/90">
+                      CLI Deploy Note: <code>supabase functions deploy live-catalog --no-verify-jwt</code>
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Add & Approve Channel Form */}
+              <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+                <form
+                  onSubmit={handleSaveAndApproveLiveChannel}
+                  data-testid="admin-add-live-channel-form"
+                  className="lg:col-span-2 p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3 h-fit"
+                >
+                  <h4 className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                    <PlusCircle className="w-4 h-4 text-[#10d97b]" />
+                    <span>Add &amp; Approve Live TV Channel</span>
+                  </h4>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Channel Name *</label>
+                    <input
+                      type="text"
+                      required
+                      data-testid="live-admin-name-input"
+                      value={liveChannelName}
+                      onChange={(e) => setLiveChannelName(e.target.value)}
+                      placeholder="e.g. DW English or PTV Sports"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Country</label>
+                      <select
+                        value={liveChannelCountry}
+                        onChange={(e) => setLiveChannelCountry(e.target.value)}
+                        className="w-full px-2 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
+                      >
+                        <option value="INTL">INTL</option>
+                        <option value="PK">PK</option>
+                        <option value="IN">IN</option>
+                        <option value="US">US</option>
+                        <option value="UK">UK</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Language</label>
+                      <input
+                        type="text"
+                        value={liveChannelLanguage}
+                        onChange={(e) => setLiveChannelLanguage(e.target.value)}
+                        placeholder="en / ur"
+                        className="w-full px-2.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Category</label>
+                      <select
+                        value={liveChannelCategory}
+                        onChange={(e) => setLiveChannelCategory(e.target.value)}
+                        className="w-full px-2 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
+                      >
+                        <option value="News">News</option>
+                        <option value="Sports">Sports</option>
+                        <option value="Entertainment">Entertainment</option>
+                        <option value="Movies">Movies</option>
+                        <option value="Documentary">Documentary</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      HLS (.m3u8) / DASH (.mpd) Stream URL *
+                    </label>
+                    <input
+                      type="url"
+                      required
+                      data-testid="live-admin-stream-url-input"
+                      value={liveChannelStreamUrl}
+                      onChange={(e) => setLiveChannelStreamUrl(e.target.value)}
+                      placeholder="https://example.com/live/master.m3u8"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Logo URL (Optional)</label>
+                    <input
+                      type="url"
+                      value={liveChannelLogoUrl}
+                      onChange={(e) => setLiveChannelLogoUrl(e.target.value)}
+                      placeholder="https://example.com/logo.png"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Rights / Permission Evidence *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={liveChannelEvidence}
+                      onChange={(e) => setLiveChannelEvidence(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
+                    />
+                  </div>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={liveAllowProxy}
+                      onChange={(e) => setLiveAllowProxy(e.target.checked)}
+                      className="w-4 h-4 accent-[#10d97b]"
+                    />
+                    <span>Allow Browser Proxy (`allow_browser_proxy`)</span>
+                  </label>
+
+                  <button
+                    type="submit"
+                    disabled={isSavingLiveChannel}
+                    data-testid="live-admin-save-approve-btn"
+                    className="w-full py-2.5 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs disabled:opacity-50"
+                  >
+                    {isSavingLiveChannel ? 'Publishing...' : 'Save, Approve & Publish Channel'}
+                  </button>
+                </form>
+
+                {/* Existing Database Live Channels */}
+                <div className="lg:col-span-3 p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3">
+                  <h4 className="text-xs sm:text-sm font-bold text-white">
+                    Supabase `live_channels` + `live_sources` ({liveEntries.length})
+                  </h4>
+                  {liveEntries.length === 0 ? (
+                    <div className="p-6 rounded-xl bg-slate-950 border border-slate-800 text-center space-y-2 text-xs text-slate-400">
+                      <p>
+                        No channels found in Supabase yet. Run the Live TV SQL Schema below in Supabase SQL Editor to create tables &amp; insert 6 verified open FTA starter channels.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                      {liveEntries.map((entry) => {
+                        const isLiveApproved =
+                          entry.rightsStatus === 'approved' && entry.isEnabled && entry.isPublished;
+                        return (
+                          <div
+                            key={`${entry.channelId}-${entry.sourceId}`}
+                            className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-white">{entry.name}</span>
+                                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-slate-300">
+                                  {entry.country} · {entry.categories[0] || 'General'}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    isLiveApproved
+                                      ? 'bg-emerald-950 text-[#10d97b] border border-emerald-500/40'
+                                      : 'bg-amber-950 text-amber-300 border border-amber-500/40'
+                                  }`}
+                                >
+                                  {isLiveApproved ? 'APPROVED & LIVE' : entry.rightsStatus}
+                                </span>
+                              </div>
+                              <div className="text-[10px] font-mono text-slate-400 truncate">
+                                {entry.streamUrl}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {!isLiveApproved ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleLiveEntryApproval(entry, true)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#10d97b] text-slate-950 font-extrabold text-[11px]"
+                                >
+                                  Approve &amp; Publish
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleLiveEntryApproval(entry, false)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-rose-950 border border-rose-500/40 text-rose-300 font-bold text-[11px]"
+                                >
+                                  Disable
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Copyable Live TV SQL Migration Block */}
+              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[#10d97b] flex items-center gap-1.5">
+                    <Database className="w-4 h-4" />
+                    <span>Live TV SQL Schema + RLS + 6 Open FTA Starter Channels (`20261114_live_tv_upgrade.sql`)</span>
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="copy-live-tv-sql-btn"
+                    onClick={() => copyCode('live-tv-sql', LIVE_TV_UPGRADE_SQL_SNIPPET)}
+                    className="px-3 py-1 rounded-lg bg-[#10d97b] text-slate-950 font-bold text-xs flex items-center gap-1"
+                  >
+                    {copiedBlock === 'live-tv-sql' ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {copiedBlock === 'live-tv-sql' ? 'Copied Live TV SQL!' : 'Copy Live TV SQL'}
+                    </span>
+                  </button>
+                </div>
+                <pre className="text-[10px] font-mono text-slate-300 overflow-x-auto max-h-48 p-2 bg-black/60 rounded-xl">
+                  {LIVE_TV_UPGRADE_SQL_SNIPPET}
+                </pre>
+              </div>
+            </div>
           ) : activeTab === 'bulk' ? (
             /* =================================================================
                TAB 1: BULK MOVIES LINK UPLOAD (CSV / JSON / FILE + HOSTER CLONE)
@@ -2414,6 +2813,35 @@ Jawan 2023 Hindi | jawan720 | https://commondatastorage.googleapis.com/gtv-video
                 </div>
                 <pre className="text-[11px] font-mono text-slate-300 overflow-x-auto max-h-48 p-2 bg-black/50 rounded-xl">
                   {SUPABASE_SQL_SCRIPT}
+                </pre>
+              </div>
+
+              {/* 1b. Live TV SQL Schema + Starter Channels */}
+              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#10d97b] flex items-center gap-1.5">
+                    <Tv className="w-4 h-4" />
+                    <span>
+                      1b. Live TV SQL Schema (`live_channels`, `live_sources`, `live_epg_programmes` + Starter Seed)
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyCode('live-tv-sql-deliverable', LIVE_TV_UPGRADE_SQL_SNIPPET)}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1"
+                  >
+                    {copiedBlock === 'live-tv-sql-deliverable' ? (
+                      <Check className="w-3.5 h-3.5 text-[#10d97b]" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {copiedBlock === 'live-tv-sql-deliverable' ? 'Copied' : 'Copy Live TV SQL'}
+                    </span>
+                  </button>
+                </div>
+                <pre className="text-[11px] font-mono text-slate-300 overflow-x-auto max-h-48 p-2 bg-black/50 rounded-xl">
+                  {LIVE_TV_UPGRADE_SQL_SNIPPET}
                 </pre>
               </div>
 

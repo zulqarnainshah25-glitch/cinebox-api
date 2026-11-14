@@ -21,7 +21,7 @@ import {
 export type { AlternateLanguageStream, EmbedServerOption, VerifiedAudioTrack };
 
 export const PREFERRED_EMBED_SERVER_ID = 'auto-server-vidfast';
-export const CONTROLS_AUTO_HIDE_MS = 3000;
+export const CONTROLS_AUTO_HIDE_MS = 2000;
 
 export const FALLBACK_TEST_MP4_720P =
   'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
@@ -1026,14 +1026,28 @@ export interface FullscreenPlayerLayoutConfig {
   containerClassName: string;
   videoObjectFitClass: string;
   bottomControlsSafePaddingClass: string;
+  topBarClassName: string;
   exitButtonClassName: string;
   topRightControlsClassName: string;
 }
 
 /**
+ * Pure helper for player click/tap toggle visibility:
+ * - If `forceShow` is true (e.g. tapping the wake strip when hidden), returns `true`.
+ * - Otherwise toggles between visible (`true`) and hidden (`false`) on every player tap.
+ */
+export function computeNextControlsVisibility(
+  currentlyVisible: boolean,
+  forceShow: boolean = false
+): boolean {
+  if (forceShow) return true;
+  return !currentlyVisible;
+}
+
+/**
  * Computes fullscreen player container classes, pure #000000 borderless background,
- * top-left Back/Exit Fullscreen button & top-right Adblocker/Fullscreen controls synced with auto-hide,
- * and mobile navigation-bar safe-area padding.
+ * unified top fullscreen bar (left "<" back + playing movie name + compact right actions)
+ * with smooth 300ms transition & 2-second auto-hide, and mobile safe-area padding.
  */
 export function getFullscreenPlayerConfig(
   isFullscreen: boolean,
@@ -1055,17 +1069,15 @@ export function getFullscreenPlayerConfig(
     ? 'px-4 sm:px-6 pb-[max(1.25rem,calc(env(safe-area-inset-bottom,16px)+12px))] pt-3 bg-gradient-to-t from-black via-black/80 to-transparent'
     : 'px-3 sm:px-4 pb-[max(0.875rem,calc(env(safe-area-inset-bottom,10px)+6px))] pt-2.5 bg-gradient-to-t from-black/95 via-black/75 to-transparent';
 
-  const exitButtonClassName = `fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 min-h-[36px] ${
-    areControlsVisible
-      ? 'opacity-100 pointer-events-auto translate-y-0'
-      : 'opacity-0 pointer-events-none -translate-y-2'
-  }`;
+  const visibilityMotionClass = areControlsVisible
+    ? 'opacity-100 pointer-events-auto translate-y-0'
+    : 'opacity-0 pointer-events-none -translate-y-3';
 
-  const topRightControlsClassName = `fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] right-[max(0.75rem,env(safe-area-inset-right,12px))] z-[10000] flex items-center gap-1.5 sm:gap-2 transition-all duration-200 ${
-    areControlsVisible
-      ? 'opacity-100 pointer-events-auto translate-y-0'
-      : 'opacity-0 pointer-events-none -translate-y-2'
-  }`;
+  const topBarClassName = `fixed top-0 left-0 right-0 z-[10000] flex items-center justify-between gap-2.5 px-3 sm:px-5 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-5 bg-gradient-to-b from-black/95 via-black/70 to-transparent backdrop-blur-[2px] transition-all duration-300 ease-out ${visibilityMotionClass}`;
+
+  const exitButtonClassName = `min-h-[38px] min-w-[38px] flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-white transition-all duration-300 ease-out active:scale-95 shrink-0 ${visibilityMotionClass}`;
+
+  const topRightControlsClassName = `flex items-center gap-1.5 sm:gap-2 shrink-0 transition-all duration-300 ease-out ${visibilityMotionClass}`;
 
   return {
     isFullscreen,
@@ -1079,6 +1091,7 @@ export function getFullscreenPlayerConfig(
     containerClassName,
     videoObjectFitClass,
     bottomControlsSafePaddingClass,
+    topBarClassName,
     exitButtonClassName,
     topRightControlsClassName,
   };

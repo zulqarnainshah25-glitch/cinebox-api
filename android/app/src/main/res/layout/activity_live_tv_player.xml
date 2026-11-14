@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/live_player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:resize_mode="fit"
+        app:show_buffering="never"
+        app:use_controller="true" />
+
+    <!-- Top Overlay Header -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="#99000000"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="12dp">
+
+        <ImageButton
+            android:id="@+id/live_back_btn"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Back"
+            android:src="@android:drawable/ic_media_previous"
+            app:tint="#FFFFFF" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/live_channel_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Live TV"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/live_epg_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Live Stream"
+                android:textColor="#10D97B"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/live_edge_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginEnd="6dp"
+            android:backgroundTint="#E11D48"
+            android:minWidth="0dp"
+            android:paddingHorizontal="10dp"
+            android:text="LIVE"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/live_audio_track_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginEnd="4dp"
+            android:backgroundTint="#1E293B"
+            android:minWidth="0dp"
+            android:paddingHorizontal="8dp"
+            android:text="Audio"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp" />
+
+        <Button
+            android:id="@+id/live_subtitle_track_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginEnd="4dp"
+            android:backgroundTint="#1E293B"
+            android:minWidth="0dp"
+            android:paddingHorizontal="8dp"
+            android:text="CC"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp" />
+
+        <Button
+            android:id="@+id/live_source_switch_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginEnd="4dp"
+            android:backgroundTint="#1E293B"
+            android:minWidth="0dp"
+            android:paddingHorizontal="8dp"
+            android:text="Sources"
+            android:textColor="#10D97B"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <ImageButton
+            android:id="@+id/live_orientation_btn"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Toggle Orientation"
+            android:src="@android:drawable/ic_menu_rotate"
+            app:tint="#FFFFFF" />
+    </LinearLayout>
+
+    <!-- Buffering Spinner -->
+    <ProgressBar
+        android:id="@+id/live_loading_spinner"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="center"
+        android:indeterminateTint="#10D97B"
+        android:visibility="gone" />
+
+    <!-- Error & Retry Overlay -->
+    <LinearLayout
+        android:id="@+id/live_error_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#E60B0D12"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="24dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/live_error_message"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="Stream unavailable"
+            android:textColor="#F8FAFC"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/live_retry_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:backgroundTint="#10D97B"
+            android:text="Retry Stream"
+            android:textColor="#0B0D12"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+</FrameLayout>

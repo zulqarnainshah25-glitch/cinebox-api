@@ -243,7 +243,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
     <>
       {/* Subtle Top & Bottom Cinema Scrims */}
       <div
-        className={`pointer-events-none absolute inset-0 z-20 bg-gradient-to-b from-black/75 via-transparent to-black/85 transition-opacity duration-200 ${
+        className={`pointer-events-none absolute inset-0 z-20 bg-gradient-to-b from-black/75 via-transparent to-black/85 transition-opacity duration-300 ease-out ${
           areControlsVisible ? 'opacity-100' : 'opacity-0'
         }`}
       />
@@ -321,18 +321,25 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
 
       {/* TOP PLAYER BAR */}
       <div
-        className={`absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-3 transition-opacity duration-200 ${
+        className={`absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-3 transition-all duration-300 ease-out ${
           areControlsVisible
-            ? 'opacity-100 pointer-events-auto'
-            : 'opacity-0 pointer-events-none'
+            ? 'opacity-100 pointer-events-auto translate-y-0'
+            : 'opacity-0 pointer-events-none -translate-y-3'
         }`}
       >
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
             data-testid="close-player-btn"
-            onClick={onClose}
-            aria-label="Back to catalog"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isFullscreen) {
+                onToggleFullscreen();
+              } else {
+                onClose();
+              }
+            }}
+            aria-label={isFullscreen ? 'Exit Fullscreen' : 'Back to catalog'}
             className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full bg-black/40 hover:bg-black/70 text-white transition-colors"
           >
             <ChevronLeft className="w-6 h-6" />

@@ -7,6 +7,7 @@ export type AppLanguageCode = 'en' | 'ur';
 export interface I18nDictionary {
   // Bottom Navigation
   navHome: string;
+  navLiveTv: string;
   navSearch: string;
   navDownloads: string;
   navWatchlist: string;
@@ -66,6 +67,7 @@ export interface I18nDictionary {
 export const TRANSLATIONS: Record<AppLanguageCode, I18nDictionary> = {
   en: {
     navHome: 'Home',
+    navLiveTv: 'Live TV',
     navSearch: 'Search',
     navDownloads: 'Downloads',
     navWatchlist: 'Watchlist',
@@ -119,6 +121,7 @@ export const TRANSLATIONS: Record<AppLanguageCode, I18nDictionary> = {
   },
   ur: {
     navHome: 'ہوم',
+    navLiveTv: 'لائیو ٹی وی',
     navSearch: 'تلاش',
     navDownloads: 'ڈاؤن لوڈز',
     navWatchlist: 'میری لسٹ',

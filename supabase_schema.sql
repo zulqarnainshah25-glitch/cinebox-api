@@ -692,3 +692,261 @@ CREATE POLICY "user_feedback_admin_delete"
   TO authenticated
   USING (public.is_cinebox_admin());
 
+-- =============================================================================
+-- 11. LIVE TV UPGRADE (ADDITIVE TABLES & RLS — NEVER DESTROYS EXISTING TABLES)
+-- Canonical migration source: supabase/migrations/20261114_live_tv_upgrade.sql
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.live_channels (
+  id TEXT PRIMARY KEY,
+  tvg_id TEXT DEFAULT '',
+  name TEXT NOT NULL,
+  alt_names JSONB NOT NULL DEFAULT '[]'::jsonb,
+  country TEXT NOT NULL DEFAULT 'INTL',
+  language TEXT NOT NULL DEFAULT 'und',
+  categories JSONB NOT NULL DEFAULT '["General"]'::jsonb,
+  logo_url TEXT DEFAULT NULL,
+  website TEXT DEFAULT NULL,
+  epg_guide_id TEXT DEFAULT NULL,
+  is_nsfw BOOLEAN NOT NULL DEFAULT false,
+  is_published BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.live_sources (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES public.live_channels(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL DEFAULT 'iptv-org',
+  source_url TEXT NOT NULL,
+  allowed_domain TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'hls' CHECK (format IN ('hls', 'dash', 'unknown')),
+  country TEXT NOT NULL DEFAULT 'INTL',
+  language TEXT NOT NULL DEFAULT 'und',
+  rights_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (rights_status IN ('pending', 'approved', 'rejected', 'expired')),
+  available_countries TEXT[] NOT NULL DEFAULT '{}'::text[],
+  permission_evidence TEXT DEFAULT NULL,
+  allow_browser_proxy BOOLEAN NOT NULL DEFAULT false,
+  reviewed_at TIMESTAMPTZ DEFAULT NULL,
+  reviewed_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  last_checked_at TIMESTAMPTZ DEFAULT NULL,
+  playback_status TEXT NOT NULL DEFAULT 'not_tested_from_pk'
+    CHECK (
+      playback_status IN (
+        'verified', 'geo_blocked', 'offline', 'invalid_manifest',
+        'unsupported_format', 'cors_blocked', 'playback_error',
+        'timeout', 'not_tested_from_pk', 'pending_review'
+      )
+    ),
+  is_enabled BOOLEAN NOT NULL DEFAULT false,
+  priority INTEGER NOT NULL DEFAULT 100,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (channel_id, source_url)
+);
+
+CREATE TABLE IF NOT EXISTS public.live_source_checks (
+  id BIGSERIAL PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES public.live_sources(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL REFERENCES public.live_channels(id) ON DELETE CASCADE,
+  test_country TEXT NOT NULL DEFAULT 'UNKNOWN',
+  checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  test_method TEXT NOT NULL DEFAULT 'edge-probe',
+  dns_ok BOOLEAN NOT NULL DEFAULT false,
+  tls_ok BOOLEAN NOT NULL DEFAULT false,
+  manifest_ok BOOLEAN NOT NULL DEFAULT false,
+  media_playlist_ok BOOLEAN NOT NULL DEFAULT false,
+  segment_ok BOOLEAN NOT NULL DEFAULT false,
+  playback_ok BOOLEAN NOT NULL DEFAULT false,
+  mime_type TEXT DEFAULT NULL,
+  http_status INTEGER DEFAULT NULL,
+  stability_seconds INTEGER NOT NULL DEFAULT 0,
+  error_classification TEXT NOT NULL DEFAULT 'not_tested_from_pk',
+  details TEXT NOT NULL DEFAULT '',
+  last_success_at TIMESTAMPTZ DEFAULT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.live_epg_programmes (
+  id BIGSERIAL PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES public.live_channels(id) ON DELETE CASCADE,
+  tvg_id TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT 'und',
+  start_at TIMESTAMPTZ NOT NULL,
+  end_at TIMESTAMPTZ NOT NULL,
+  guide_source TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (channel_id, start_at, title)
+);
+
+CREATE TABLE IF NOT EXISTS public.user_live_favorites (
+  id BIGSERIAL PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL,
+  channel_name TEXT NOT NULL DEFAULT '',
+  logo_url TEXT DEFAULT NULL,
+  country TEXT NOT NULL DEFAULT 'INTL',
+  category TEXT NOT NULL DEFAULT 'General',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.user_live_history (
+  id BIGSERIAL PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL,
+  source_id TEXT DEFAULT NULL,
+  channel_name TEXT NOT NULL DEFAULT '',
+  logo_url TEXT DEFAULT NULL,
+  country TEXT NOT NULL DEFAULT 'INTL',
+  category TEXT NOT NULL DEFAULT 'General',
+  last_watched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, channel_id)
+);
+
+ALTER TABLE public.live_channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.live_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.live_source_checks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.live_epg_programmes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_live_favorites ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_live_history ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE public.live_channels FROM anon, authenticated;
+REVOKE ALL ON TABLE public.live_sources FROM anon, authenticated;
+REVOKE ALL ON TABLE public.live_source_checks FROM anon, authenticated;
+REVOKE ALL ON TABLE public.live_epg_programmes FROM anon, authenticated;
+REVOKE ALL ON TABLE public.user_live_favorites FROM anon, authenticated;
+REVOKE ALL ON TABLE public.user_live_history FROM anon, authenticated;
+
+GRANT SELECT ON TABLE public.live_channels TO anon, authenticated;
+GRANT INSERT, UPDATE, DELETE ON TABLE public.live_channels TO authenticated;
+GRANT SELECT (
+  id, channel_id, provider, source_url, allowed_domain, format, country, language,
+  rights_status, available_countries, allow_browser_proxy, reviewed_at,
+  last_checked_at, playback_status, is_enabled, priority, updated_at
+) ON TABLE public.live_sources TO anon, authenticated;
+GRANT INSERT, UPDATE, DELETE ON TABLE public.live_sources TO authenticated;
+GRANT SELECT ON TABLE public.live_source_checks TO anon, authenticated;
+GRANT INSERT, UPDATE, DELETE ON TABLE public.live_source_checks TO authenticated;
+GRANT SELECT ON TABLE public.live_epg_programmes TO anon, authenticated;
+GRANT INSERT, UPDATE, DELETE ON TABLE public.live_epg_programmes TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_live_favorites TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_live_history TO authenticated;
+
+DROP POLICY IF EXISTS "live_channels_public_approved_select" ON public.live_channels;
+CREATE POLICY "live_channels_public_approved_select"
+  ON public.live_channels FOR SELECT TO anon, authenticated
+  USING (
+    public.is_cinebox_moderator_or_admin()
+    OR (
+      is_published = true AND is_nsfw = false
+      AND EXISTS (
+        SELECT 1 FROM public.live_sources s
+        WHERE s.channel_id = live_channels.id
+          AND s.rights_status = 'approved' AND s.is_enabled = true
+      )
+    )
+  );
+DROP POLICY IF EXISTS "live_channels_admin_all" ON public.live_channels;
+CREATE POLICY "live_channels_admin_all"
+  ON public.live_channels FOR ALL TO authenticated
+  USING (public.is_cinebox_moderator_or_admin())
+  WITH CHECK (public.is_cinebox_moderator_or_admin());
+
+DROP POLICY IF EXISTS "live_sources_public_approved_select" ON public.live_sources;
+CREATE POLICY "live_sources_public_approved_select"
+  ON public.live_sources FOR SELECT TO anon, authenticated
+  USING (public.is_cinebox_moderator_or_admin() OR (rights_status = 'approved' AND is_enabled = true));
+DROP POLICY IF EXISTS "live_sources_admin_all" ON public.live_sources;
+CREATE POLICY "live_sources_admin_all"
+  ON public.live_sources FOR ALL TO authenticated
+  USING (public.is_cinebox_moderator_or_admin())
+  WITH CHECK (public.is_cinebox_moderator_or_admin());
+
+DROP POLICY IF EXISTS "live_source_checks_public_select" ON public.live_source_checks;
+CREATE POLICY "live_source_checks_public_select"
+  ON public.live_source_checks FOR SELECT TO anon, authenticated
+  USING (
+    public.is_cinebox_moderator_or_admin()
+    OR EXISTS (
+      SELECT 1 FROM public.live_sources s
+      WHERE s.id = live_source_checks.source_id
+        AND s.rights_status = 'approved' AND s.is_enabled = true
+    )
+  );
+DROP POLICY IF EXISTS "live_source_checks_admin_all" ON public.live_source_checks;
+CREATE POLICY "live_source_checks_admin_all"
+  ON public.live_source_checks FOR ALL TO authenticated
+  USING (public.is_cinebox_moderator_or_admin())
+  WITH CHECK (public.is_cinebox_moderator_or_admin());
+
+DROP POLICY IF EXISTS "live_epg_public_select" ON public.live_epg_programmes;
+CREATE POLICY "live_epg_public_select"
+  ON public.live_epg_programmes FOR SELECT TO anon, authenticated
+  USING (
+    public.is_cinebox_moderator_or_admin()
+    OR EXISTS (
+      SELECT 1 FROM public.live_sources s
+      WHERE s.channel_id = live_epg_programmes.channel_id
+        AND s.rights_status = 'approved' AND s.is_enabled = true
+    )
+  );
+DROP POLICY IF EXISTS "live_epg_admin_all" ON public.live_epg_programmes;
+CREATE POLICY "live_epg_admin_all"
+  ON public.live_epg_programmes FOR ALL TO authenticated
+  USING (public.is_cinebox_moderator_or_admin())
+  WITH CHECK (public.is_cinebox_moderator_or_admin());
+
+DROP POLICY IF EXISTS "user_live_favorites_self_all" ON public.user_live_favorites;
+CREATE POLICY "user_live_favorites_self_all"
+  ON public.user_live_favorites FOR ALL TO authenticated
+  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "user_live_history_self_all" ON public.user_live_history;
+CREATE POLICY "user_live_history_self_all"
+  ON public.user_live_history FOR ALL TO authenticated
+  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+
+-- Starter verified open / public-domain / free-to-air Live TV channels (idempotent)
+INSERT INTO public.live_channels (id, tvg_id, name, country, language, categories, logo_url, website, is_nsfw, is_published)
+VALUES
+  ('DWEnglish.de', 'DWEnglish.de', 'DW English', 'INTL', 'en', '["News","Documentary"]'::jsonb, 'https://static.dw.com/cssi/images/dw-logo-blue.png', 'https://www.dw.com/en/live-tv/s-100825', false, true),
+  ('DWArabic.de', 'DWArabic.de', 'DW Arabic', 'INTL', 'ar', '["News","Documentary"]'::jsonb, 'https://static.dw.com/cssi/images/dw-logo-blue.png', 'https://www.dw.com/ar/', false, true),
+  ('RedBullTV.at', 'RedBullTV.at', 'Red Bull TV', 'INTL', 'en', '["Sports","Entertainment"]'::jsonb, 'https://resources.redbull.com/icons/redbullcom/v2/favicon.ico', 'https://www.redbull.com/int-en/live-events', false, true),
+  ('NASATVPublic.us', 'NASATVPublic.us', 'NASA TV Public', 'INTL', 'en', '["Documentary","Science","News"]'::jsonb, 'https://www.nasa.gov/wp-content/themes/nasa/assets/images/nasa-logo.svg', 'https://www.nasa.gov/nasatv/', false, true),
+  ('NASATVMedia.us', 'NASATVMedia.us', 'NASA TV Media', 'INTL', 'en', '["Documentary","Science"]'::jsonb, 'https://www.nasa.gov/wp-content/themes/nasa/assets/images/nasa-logo.svg', 'https://www.nasa.gov/nasatv/', false, true),
+  ('MuxOpenDemo.intl', 'MuxOpenDemo.intl', 'CineBox Open Cinema (HLS)', 'INTL', 'en', '["Movies","Entertainment"]'::jsonb, NULL, 'https://mux.com', false, true)
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  country = EXCLUDED.country,
+  language = EXCLUDED.language,
+  categories = EXCLUDED.categories,
+  website = EXCLUDED.website,
+  is_nsfw = false,
+  is_published = true,
+  updated_at = NOW();
+
+INSERT INTO public.live_sources (
+  id, channel_id, provider, source_url, allowed_domain, format, country, language,
+  rights_status, available_countries, permission_evidence, allow_browser_proxy,
+  reviewed_at, playback_status, is_enabled, priority
+)
+VALUES
+  ('src-dw-english-hls', 'DWEnglish.de', 'official-fta', 'https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8', 'dwamdstream102.akamaized.net', 'hls', 'INTL', 'en', 'approved', ARRAY['GLOBAL'], 'Official Deutsche Welle public international broadcaster open free-to-air HLS stream', true, NOW(), 'not_tested_from_pk', true, 10),
+  ('src-dw-arabic-hls', 'DWArabic.de', 'official-fta', 'https://dwamdstream103.akamaized.net/hls/live/2015526/dwstream103/index.m3u8', 'dwamdstream103.akamaized.net', 'hls', 'INTL', 'ar', 'approved', ARRAY['GLOBAL'], 'Official Deutsche Welle Arabic public international broadcaster open free-to-air HLS stream', true, NOW(), 'not_tested_from_pk', true, 20),
+  ('src-redbull-tv-hls', 'RedBullTV.at', 'official-fta', 'https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8', 'rbmn-live.akamaized.net', 'hls', 'INTL', 'en', 'approved', ARRAY['GLOBAL'], 'Official Red Bull TV open free-to-air live sports & entertainment channel', true, NOW(), 'not_tested_from_pk', true, 10),
+  ('src-nasa-public-hls', 'NASATVPublic.us', 'public-domain', 'https://ntv1.akamaized.net/hls/live/2014075/NASA-NTV1-HLS/master.m3u8', 'ntv1.akamaized.net', 'hls', 'INTL', 'en', 'approved', ARRAY['GLOBAL'], 'US federal public-domain NASA Public Educational HLS broadcast', true, NOW(), 'not_tested_from_pk', true, 10),
+  ('src-nasa-media-hls', 'NASATVMedia.us', 'public-domain', 'https://ntv2.akamaized.net/hls/live/2013923/NASA-NTV2-HLS/master.m3u8', 'ntv2.akamaized.net', 'hls', 'INTL', 'en', 'approved', ARRAY['GLOBAL'], 'US federal public-domain NASA Media Educational HLS broadcast', true, NOW(), 'not_tested_from_pk', true, 20),
+  ('src-mux-open-demo-hls', 'MuxOpenDemo.intl', 'open-cc', 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8', 'test-streams.mux.dev', 'hls', 'INTL', 'en', 'approved', ARRAY['GLOBAL'], 'Creative Commons Big Buck Bunny Adaptive HLS open-access stream', true, NOW(), 'not_tested_from_pk', true, 50)
+ON CONFLICT (id) DO UPDATE SET
+  source_url = EXCLUDED.source_url,
+  allowed_domain = EXCLUDED.allowed_domain,
+  rights_status = 'approved',
+  allow_browser_proxy = true,
+  is_enabled = true,
+  updated_at = NOW();
+
+
+

@@ -33,6 +33,7 @@ import {
   AlternateLanguageStream,
   auditStickyAncestors,
   buildVidSrcAdBlockCssRules,
+  computeNextControlsVisibility,
   CONTROLS_AUTO_HIDE_MS,
   formatPlayerTimecode,
   getCleanIframeAttributes,
@@ -402,13 +403,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   };
 
   const handleWakeOrToggleControls = (forceShow: boolean = false) => {
-    if (forceShow) {
-      setAreControlsVisible(true);
-      scheduleControlsAutoHide();
-      return;
-    }
     setAreControlsVisible((prev) => {
-      const next = !prev;
+      const next = computeNextControlsVisibility(prev, forceShow);
       if (next) {
         scheduleControlsAutoHide();
       } else if (controlsHideTimerRef.current) {
@@ -419,7 +415,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     });
   };
 
-  // Auto-hide controls after 3 seconds whenever playback is active (mobile & fullscreen)
+  // Auto-hide controls after 2 seconds whenever playback is active (mobile & fullscreen)
   useEffect(() => {
     const shouldAutoHide =
       playerMode === 'direct' ? isPlaying : true;
@@ -1163,6 +1159,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     return cleanup;
   }, [playerMode, isCurrentServerVidSrc, isVidSrcAdBlockerEnabled]);
 
+  const activePlayingTitle =
+    playerMode === 'pak-drama'
+      ? pakDramaStreams[activePakStreamIdx]?.title ||
+        (movie.mediaType === 'tv'
+          ? `${movie.title} — S${selectedSeason}:E${selectedEpisode}`
+          : movie.title)
+      : playerMode === 'trailer'
+      ? movie.youtubeTitle || `${movie.title} — Official Trailer`
+      : movie.mediaType === 'tv'
+      ? `${movie.title} — S${selectedSeason}:E${selectedEpisode}`
+      : movie.title;
+
   const displayPlayerTitle =
     movie.mediaType === 'tv'
       ? `${movie.title} — S${selectedSeason}:E${selectedEpisode}`
@@ -1277,7 +1285,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           className={stickyPlayerWrapperClass}
         >
         {/* ===================================================================
-            HYBRID VIDEO PLAYER SURFACE (ONLY Back & Title Overlaid on Video; Auto-Hide 3s)
+            HYBRID VIDEO PLAYER SURFACE (Unified Top Bar; Click Show/Hide; Auto-Hide 2s)
            =================================================================== */}
         <div
           ref={playerContainerRef}
@@ -1286,7 +1294,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             if (!hasPlaybackStarted) {
               setHasPlaybackStarted(true);
             }
-            handleWakeOrToggleControls(playerMode !== 'direct');
+            handleWakeOrToggleControls(false);
           }}
           className={fsConfig.containerClassName}
           style={{
@@ -1294,21 +1302,27 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             backgroundColor: '#000000',
           }}
         >
-          {/* Normal Mode Top Overlay: ONLY Back Button & Title (auto-hides after 3s) */}
+          {/* Normal Mode Top Overlay: ONLY Back Button & Title (auto-hides after 2s, tap to toggle) */}
           {!isFullscreen && playerMode !== 'direct' && (
             <div
               data-testid="player-top-header-bar"
-              onClick={(e) => e.stopPropagation()}
-              className={`absolute top-0 left-0 right-0 z-30 flex items-center gap-2.5 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-4 bg-gradient-to-b from-black/85 via-black/45 to-transparent transition-all duration-200 ${
+              onClick={(e) => {
+                e.stopPropagation();
+                handleWakeOrToggleControls(false);
+              }}
+              className={`absolute top-0 left-0 right-0 z-30 flex items-center gap-2.5 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-4 bg-gradient-to-b from-black/90 via-black/55 to-transparent transition-all duration-300 ease-out ${
                 areControlsVisible
                   ? 'opacity-100 pointer-events-auto translate-y-0'
-                  : 'opacity-0 pointer-events-none -translate-y-2'
+                  : 'opacity-0 pointer-events-none -translate-y-3'
               }`}
             >
               <button
                 type="button"
                 data-testid="close-player-btn"
-                onClick={onClose}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose();
+                }}
                 aria-label="Back to catalog"
                 className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors shrink-0 backdrop-blur-sm"
               >
@@ -1316,11 +1330,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </button>
               <div className="min-w-0 flex-1">
                 <span className="text-xs sm:text-sm font-bold text-white truncate block drop-shadow">
-                  {playerMode === 'pak-drama'
-                    ? pakDramaStreams[activePakStreamIdx]?.title || displayPlayerTitle
-                    : playerMode === 'trailer'
-                    ? movie.youtubeTitle || `${movie.title} — Official Trailer`
-                    : displayPlayerTitle}
+                  {activePlayingTitle}
                 </span>
               </div>
             </div>
@@ -1338,29 +1348,45 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 e.stopPropagation();
                 handleWakeOrToggleControls(true);
               }}
-              className={`top-0 left-0 right-0 h-14 bg-transparent cursor-pointer ${
+              className={`top-0 left-0 right-0 h-16 bg-transparent cursor-pointer ${
                 isFullscreen ? 'fixed z-[9999]' : 'absolute z-30'
               }`}
               aria-label="Tap to show player controls"
             />
           )}
 
-          {/* Fullscreen Overlay: Top-Left Back Button + Top-Right Adblocker & Fullscreen Exit */}
-          {fsConfig.showAlwaysVisibleExitButton && (
-            <>
-              <button
-                type="button"
-                data-testid="fullscreen-exit-back-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleExitFullscreen();
-                }}
-                aria-label="Back / Exit Fullscreen"
-                className={fsConfig.exitButtonClassName}
-              >
-                <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />
-                <span>Back</span>
-              </button>
+          {/* Unified Fullscreen Top Bar: Left "<" Back + Playing Movie Name + Compact Right Controls */}
+          {fsConfig.showAlwaysVisibleExitButton && playerMode !== 'direct' && (
+            <div
+              data-testid="fullscreen-top-header-bar"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleWakeOrToggleControls(false);
+              }}
+              className={fsConfig.topBarClassName}
+            >
+              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                <button
+                  type="button"
+                  data-testid="fullscreen-exit-back-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleExitFullscreen();
+                  }}
+                  aria-label="Back / Exit Fullscreen"
+                  className={fsConfig.exitButtonClassName}
+                >
+                  <ChevronLeft className="w-5 h-5 text-white stroke-[2.5]" />
+                </button>
+                <div className="min-w-0 flex-1">
+                  <span
+                    data-testid="fullscreen-movie-title"
+                    className="text-xs sm:text-sm font-bold text-white truncate block drop-shadow"
+                  >
+                    {activePlayingTitle}
+                  </span>
+                </div>
+              </div>
 
               <div
                 data-testid="fullscreen-top-right-controls"
@@ -1378,10 +1404,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       handleToggleVidSrcAdBlocker();
                       scheduleControlsAutoHide();
                     }}
-                    className={`px-2.5 py-1.5 rounded-full text-[11px] font-extrabold shadow-2xl backdrop-blur-md flex items-center gap-1.5 min-h-[36px] border transition-all active:scale-95 ${
+                    className={`px-2.5 py-1.5 rounded-full text-[11px] font-bold flex items-center gap-1 min-h-[36px] border transition-all active:scale-95 ${
                       isVidSrcAdBlockerEnabled
-                        ? 'bg-emerald-950/90 border-[#10d97b] text-[#10d97b]'
-                        : 'bg-black/85 border-white/20 text-slate-300'
+                        ? 'bg-emerald-950/85 border-[#10d97b]/70 text-[#10d97b]'
+                        : 'bg-white/10 border-white/15 text-slate-300'
                     }`}
                   >
                     {isVidSrcAdBlockerEnabled ? (
@@ -1389,7 +1415,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                     ) : (
                       <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                     )}
-                    <span>Adblocker {isVidSrcAdBlockerEnabled ? 'ON' : 'OFF'}</span>
+                    <span>{isVidSrcAdBlockerEnabled ? 'Adblock ON' : 'Adblock OFF'}</span>
                   </button>
                 )}
 
@@ -1398,13 +1424,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   data-testid="fullscreen-exit-corner-x-btn"
                   onClick={handleExitFullscreen}
                   aria-label="Exit Fullscreen"
-                  className="px-2.5 py-1.5 rounded-full bg-black/85 hover:bg-black border border-white/20 text-white text-[11px] font-extrabold flex items-center gap-1.5 shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 min-h-[36px]"
+                  title="Exit Fullscreen"
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-white transition-all duration-200 active:scale-95"
                 >
-                  <Minimize2 className="w-3.5 h-3.5 text-[#10d97b]" />
-                  <span>Exit</span>
+                  <Minimize2 className="w-4 h-4 text-[#10d97b]" />
                 </button>
               </div>
-            </>
+            </div>
           )}
 
           {playerMode === 'trailer' && movie.youtubeKey ? (
@@ -1629,7 +1655,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   setSubtitlesEnabled(next);
                   saveSubtitlePreferences({ enabled: next }, activeUserId);
                 }}
-                onWakeControls={() => handleWakeOrToggleControls(true)}
+                onWakeControls={(forceShow) => handleWakeOrToggleControls(Boolean(forceShow))}
               />
 
               {/* Real .VTT / .SRT Subtitle Layer with RTL Urdu Nastaliq support */}

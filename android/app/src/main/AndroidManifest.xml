@@ -42,6 +42,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LiveTvPlayerActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.AppCompat.NoActionBar" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

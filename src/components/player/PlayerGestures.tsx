@@ -16,7 +16,7 @@ export interface PlayerGesturesProps {
   onToggleFullscreen: () => void;
   onToggleMute: () => void;
   onToggleSubtitles: () => void;
-  onWakeControls: () => void;
+  onWakeControls: (forceShow?: boolean) => void;
 }
 
 /**
@@ -134,7 +134,7 @@ export const PlayerGestures: React.FC<PlayerGesturesProps> = ({
       if (!action) return;
 
       e.preventDefault();
-      onWakeControls();
+      onWakeControls(true);
 
       switch (action) {
         case 'toggle-play':
@@ -213,7 +213,7 @@ export const PlayerGestures: React.FC<PlayerGesturesProps> = ({
     touches?: React.TouchList
   ) => {
     if (isLocked) {
-      onWakeControls();
+      onWakeControls(true);
       return;
     }
 
@@ -308,7 +308,7 @@ export const PlayerGestures: React.FC<PlayerGesturesProps> = ({
     }
 
     if (isLocked) {
-      onWakeControls();
+      onWakeControls(true);
       touchStartRef.current = null;
       return;
     }
@@ -328,7 +328,7 @@ export const PlayerGestures: React.FC<PlayerGesturesProps> = ({
       lastTapRef.current = { time: 0, side: 'center' };
     } else {
       lastTapRef.current = { time: now, side };
-      onWakeControls();
+      onWakeControls(false);
     }
 
     touchStartRef.current = null;

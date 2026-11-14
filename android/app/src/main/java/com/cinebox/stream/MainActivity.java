@@ -129,6 +129,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(CineboxLivePlayerPlugin.class);
         super.onCreate(savedInstanceState);
 
         configureSystemBarsPureBlack(false);

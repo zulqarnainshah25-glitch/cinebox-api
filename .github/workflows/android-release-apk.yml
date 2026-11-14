@@ -24,7 +24,7 @@ jobs:
 
       - name: Install Dependencies & Sync Capacitor Android
         run: |
-          npm install --legacy-peer-deps
+          npm ci
           npm run build
           # Preserve custom MainActivity.java (Popup Blocker & System Bar Blending) & build.gradle (v1.0.2 Release Signing)
           cp android/app/src/main/java/com/cinebox/stream/MainActivity.java /tmp/MainActivity.java.bak

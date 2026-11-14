@@ -452,3 +452,217 @@ export interface ResolvedPlaybackPlan {
   size720p?: string;
   size1080p?: string;
 }
+
+export type IptvPlaylistSourceId =
+  | 'iptv-org-api'
+  | 'approved'
+  | 'pakistan'
+  | 'india'
+  | 'sports'
+  | 'news'
+  | 'movies'
+  | 'entertainment'
+  | 'freetv'
+  | 'all'
+  | 'nexonic_unapproved_candidate'
+  /** @deprecated Kept for internal compatibility */
+  | 'verified';
+
+export type LiveRightsStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+
+export type LivePlaybackStatus =
+  | 'verified'
+  | 'geo_blocked'
+  | 'offline'
+  | 'invalid_manifest'
+  | 'unsupported_format'
+  | 'cors_blocked'
+  | 'playback_error'
+  | 'timeout'
+  | 'not_tested_from_pk'
+  | 'pending_review';
+
+export type LiveStreamFormat = 'hls' | 'dash' | 'unknown';
+
+export interface IptvChannel {
+  id: string;
+  name: string;
+  tvgName: string;
+  tvgId: string;
+  logoUrl: string | null;
+  groupTitle: string;
+  categories: string[];
+  streamUrl: string;
+  isHttpInsecure: boolean;
+  country?: string;
+  language?: string;
+  format?: LiveStreamFormat;
+  provider?: string;
+  rightsStatus?: LiveRightsStatus;
+  playbackStatus?: LivePlaybackStatus;
+  lastCheckedAt?: string | null;
+  pkTested?: boolean;
+  allowBrowserProxy?: boolean;
+  sourceId?: string;
+  alternateSources?: LiveSourceRecord[];
+}
+
+export interface LiveSourceRecord {
+  id: string;
+  channelId: string;
+  provider: string;
+  sourceUrl: string;
+  allowedDomain: string;
+  format: LiveStreamFormat;
+  country: string;
+  language: string;
+  rightsStatus: LiveRightsStatus;
+  availableCountries: string[];
+  permissionEvidence: string | null;
+  allowBrowserProxy: boolean;
+  reviewedAt: string | null;
+  lastCheckedAt: string | null;
+  playbackStatus: LivePlaybackStatus;
+  isEnabled: boolean;
+  priority?: number;
+}
+
+export interface LiveSourceCheckRecord {
+  id?: number;
+  sourceId: string;
+  channelId: string;
+  testCountry: string;
+  checkedAt: string;
+  testMethod: string;
+  dnsOk: boolean;
+  tlsOk: boolean;
+  manifestOk: boolean;
+  mediaPlaylistOk: boolean;
+  segmentOk: boolean;
+  playbackOk: boolean;
+  mimeType: string | null;
+  httpStatus: number | null;
+  stabilitySeconds: number;
+  errorClassification: LivePlaybackStatus;
+  details: string;
+}
+
+export interface LiveEpgProgramme {
+  id: string;
+  channelId: string;
+  tvgId: string;
+  title: string;
+  description: string;
+  category: string;
+  language: string;
+  startAtUtc: string;
+  endAtUtc: string;
+}
+
+export interface IptvOrgApiChannel {
+  id: string;
+  name: string;
+  alt_names?: string[];
+  network?: string | null;
+  owners?: string[];
+  country: string;
+  categories?: string[];
+  is_nsfw?: boolean;
+  launched?: string | null;
+  closed?: string | null;
+  replaced_by?: string | null;
+  website?: string | null;
+}
+
+export interface IptvOrgApiStream {
+  channel: string | null;
+  feed?: string | null;
+  title?: string;
+  url: string;
+  quality?: string | null;
+  labels?: string[];
+  user_agent?: string | null;
+  referrer?: string | null;
+}
+
+export interface IptvOrgApiGuide {
+  channel: string | null;
+  feed?: string | null;
+  site: string;
+  site_id: string;
+  site_name: string;
+  lang: string;
+  sources?: unknown[];
+}
+
+export interface IptvOrgApiCategory {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface IptvOrgApiLogo {
+  channel: string;
+  feed?: string | null;
+  in_use?: boolean;
+  tags?: string[];
+  width?: number;
+  height?: number;
+  format?: string;
+  url: string;
+}
+
+export interface NormalizedLiveChannel {
+  id: string;
+  tvgId: string;
+  name: string;
+  logoUrl: string | null;
+  country: string;
+  language: string;
+  categories: string[];
+  website: string | null;
+  isNsfw: boolean;
+  rightsStatus: LiveRightsStatus;
+  playbackStatus: LivePlaybackStatus;
+  lastCheckedAt: string | null;
+  pkTested: boolean;
+  sources: LiveSourceRecord[];
+  currentProgramme?: LiveEpgProgramme | null;
+  nextProgramme?: LiveEpgProgramme | null;
+}
+
+export interface UserLiveFavoriteRecord {
+  id?: number;
+  userId: string;
+  channelId: string;
+  channelName: string;
+  logoUrl: string | null;
+  country: string;
+  category: string;
+  createdAt: string;
+}
+
+export interface UserLiveHistoryRecord {
+  id?: number;
+  userId: string;
+  channelId: string;
+  sourceId: string | null;
+  channelName: string;
+  logoUrl: string | null;
+  country: string;
+  category: string;
+  lastWatchedAt: string;
+}
+
+export interface IptvCategorySummary {
+  name: string;
+  count: number;
+}
+
+export interface IptvPlaylistParseResult {
+  channels: IptvChannel[];
+  categories: IptvCategorySummary[];
+  rejectedCount: number;
+}
+
+
