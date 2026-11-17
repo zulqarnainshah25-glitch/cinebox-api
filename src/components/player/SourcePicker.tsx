@@ -410,7 +410,7 @@ export const SourcePicker: React.FC<SourcePickerProps> = ({
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-[#10d97b] shrink-0" />
             <span>
-              Popup-blocking &amp; sandbox protection active. Note: Third-party sources may still show provider ads — keep Adblocker ON or switch to another Source if needed.
+              Multi-source iframe Adblocker active for Source 1–4 &amp; custom embeds (blocks popups, popunders, VAST &amp; ad redirects while keeping direct streams untouched).
             </span>
           </div>
           <Info className="w-3.5 h-3.5 text-slate-400 shrink-0 hidden sm:block" />

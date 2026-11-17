@@ -20,7 +20,7 @@ export type ContentCategory =
 
 export type CategoryFilter = ContentCategory;
 
-export type BottomNavTab = 'home' | 'search' | 'downloads' | 'watchlist' | 'me';
+export type BottomNavTab = 'home' | 'live' | 'search' | 'downloads' | 'watchlist' | 'me';
 
 export type ThemeColorId = 'neon-green' | 'netflix-red' | 'royal-blue';
 

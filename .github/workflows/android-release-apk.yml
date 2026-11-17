@@ -47,8 +47,10 @@ jobs:
           cp android/app/build.gradle /tmp/cinebox_android_bak/build.gradle
           cp android/app/proguard-rules.pro /tmp/cinebox_android_bak/proguard-rules.pro
           cp android/app/src/main/res/values/*.xml /tmp/cinebox_android_bak/values/
+          cp android/app/src/main/res/drawable/splash.xml /tmp/cinebox_android_bak/drawable/splash.xml
+          cp android/app/src/main/assets/adblock_domains.txt /tmp/cinebox_android_bak/adblock_domains.txt
           npx cap sync android
-          mkdir -p android/app/src/main/java/com/cinebox/stream android/app/src/main/res/values android/app/src/main/res/drawable android/gradle/wrapper
+          mkdir -p android/app/src/main/java/com/cinebox/stream android/app/src/main/res/values android/app/src/main/res/drawable android/app/src/main/assets android/gradle/wrapper
           cp /tmp/cinebox_android_bak/root-build.gradle android/build.gradle
           cp /tmp/cinebox_android_bak/settings.gradle android/settings.gradle
           cp /tmp/cinebox_android_bak/gradle.properties android/gradle.properties
@@ -61,16 +63,19 @@ jobs:
           cp /tmp/cinebox_android_bak/build.gradle android/app/build.gradle
           cp /tmp/cinebox_android_bak/proguard-rules.pro android/app/proguard-rules.pro
           cp /tmp/cinebox_android_bak/values/*.xml android/app/src/main/res/values/
+          cp /tmp/cinebox_android_bak/drawable/splash.xml android/app/src/main/res/drawable/splash.xml
+          cp /tmp/cinebox_android_bak/adblock_domains.txt android/app/src/main/assets/adblock_domains.txt
           # Remove default Capacitor adaptive icon XML so Android uses the custom CineBox launcher icon
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
-      - name: Verify Android Namespace, AGP 8.13.0, SDK 36, Capacitor Module, Resources & v1.0.3
+      - name: Verify Android Namespace, AGP 8.13.0, SDK 36, Capacitor Module, Resources & v1.0.12
         run: |
           test -f node_modules/@capacitor/android/capacitor/build.gradle
+          test -f android/app/src/main/assets/adblock_domains.txt
           grep -q "capacitor-android" android/capacitor.settings.gradle
           grep -q "setSupportMultipleWindows(true)" android/app/src/main/java/com/cinebox/stream/MainActivity.java
           grep -q "onCreateWindow" android/app/src/main/java/com/cinebox/stream/MainActivity.java
-          grep -q 'versionName "1.0.3"' android/app/build.gradle
+          grep -q 'versionName "1.0.12"' android/app/build.gradle
           grep -q 'namespace "com.cinebox.stream"' android/app/build.gradle
           grep -q 'com.android.tools.build:gradle:8.13.0' android/build.gradle
           grep -q 'compileSdkVersion = 36' android/variables.gradle
@@ -86,7 +91,7 @@ jobs:
         run: |
           echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release-keystore.jks
 
-      - name: Assemble Signature-Safe Release APK (v1.0.3)
+      - name: Assemble Signature-Safe Release APK (v1.0.12)
         working-directory: ./android
         env:
           CM_KEYSTORE_PATH: release-keystore.jks

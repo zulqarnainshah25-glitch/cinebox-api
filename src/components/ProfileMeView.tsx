@@ -279,7 +279,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             </div>
             <div className="min-w-0">
               <div className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-2 flex-wrap">
-                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.3'})</span>
+                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.12'})</span>
                 <span className="px-2 py-0.5 rounded bg-emerald-950 border border-[#10d97b]/40 text-[10px] font-mono text-[#10d97b]">
                   Global Cloud Link
                 </span>
@@ -512,11 +512,11 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
               {userSettings.defaultDownloadQuality.toUpperCase()} ·{' '}
               {userSettings.defaultServer === 'auto-server-1'
                 ? 'Source 1 (VidSrc)'
-                : userSettings.defaultServer === 'auto-server-vidlink'
-                ? 'Source 2 (VidLink)'
+                : userSettings.defaultServer === 'auto-server-vidfast'
+                ? 'Source 3 (VidFast)'
                 : userSettings.defaultServer === 'auto-server-3'
                 ? 'Source 4 (2Embed)'
-                : 'Source 3 (VidFast)'}
+                : 'Source 2 (VidLink)'}
             </span>
             <ChevronRight className="w-4 h-4" />
           </div>
@@ -839,20 +839,20 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    data-testid="setting-server-vidfast-btn"
+                    data-testid="setting-server-vidlink-btn"
                     onClick={() =>
                       onUpdateUserSettings({
                         ...userSettings,
-                        defaultServer: 'auto-server-vidfast',
+                        defaultServer: 'auto-server-vidlink',
                       })
                     }
                     className={`py-2 px-3 rounded-xl text-xs font-bold border ${
-                      userSettings.defaultServer === 'auto-server-vidfast' || !userSettings.defaultServer
+                      userSettings.defaultServer === 'auto-server-vidlink' || !userSettings.defaultServer
                         ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
                         : 'bg-slate-900 text-slate-300 border-slate-800'
                     }`}
                   >
-                    Source 3 (VidFast ★)
+                    Source 2 (VidLink ★)
                   </button>
                   <button
                     type="button"
@@ -873,20 +873,20 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    data-testid="setting-server-vidlink-btn"
+                    data-testid="setting-server-vidfast-btn"
                     onClick={() =>
                       onUpdateUserSettings({
                         ...userSettings,
-                        defaultServer: 'auto-server-vidlink',
+                        defaultServer: 'auto-server-vidfast',
                       })
                     }
                     className={`py-2 px-3 rounded-xl text-xs font-bold border ${
-                      userSettings.defaultServer === 'auto-server-vidlink'
+                      userSettings.defaultServer === 'auto-server-vidfast'
                         ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
                         : 'bg-slate-900 text-slate-300 border-slate-800'
                     }`}
                   >
-                    Source 2 (VidLink)
+                    Source 3 (VidFast)
                   </button>
                   <button
                     type="button"

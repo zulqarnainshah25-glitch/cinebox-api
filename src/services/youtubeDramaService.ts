@@ -1,8 +1,10 @@
+import { Capacitor } from '@capacitor/core';
 import { MovieItem, MovieLinkRecord } from '../types/movie';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
+import { buildCorsProxyHeaders, buildProxiedUrl } from './movieBoxDirectApi';
 
 /**
- * Official YouTube Data API v3 Integration for Pakistani Dramas
+ * Official YouTube Data API v3 Integration (Global Open YouTube Search + Pakistani Drama Channels)
  * Phase 1 Security: Reads `VITE_YOUTUBE_API_KEY` from environment only (no client localStorage key storage).
  */
 
@@ -20,10 +22,10 @@ export interface OfficialPakDramaChannel {
 export const OFFICIAL_PAK_DRAMA_CHANNELS: OfficialPakDramaChannel[] = [
   {
     key: 'ALL',
-    name: 'All Channels',
-    label: 'All Channels (HUM • ARY • GEO)',
-    channelId: 'UC6-F5tO8uklgE9Zy8IvbdFw',
-    networkName: 'All Official Networks',
+    name: 'All YouTube',
+    label: 'All YouTube (Global Search)',
+    channelId: '',
+    networkName: 'All of YouTube',
   },
   {
     key: 'HUM_TV',
@@ -80,27 +82,35 @@ export interface YouTubeDramaFetchResult {
   quotaExceeded: boolean;
   missingApiKey: boolean;
   errorMessage: string | null;
-  source?: 'youtube-api-v3' | 'youtube-rss-live' | 'verified-official-catalog' | 'cache';
+  source?:
+    | 'youtube-api-v3'
+    | 'youtube-rss-live'
+    | 'youtube-web-live'
+    | 'verified-official-catalog'
+    | 'cache';
 }
 
 const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
 const DEFAULT_CORS_PROXY_URL =
   'https://myeammfiwahmmemkoqif.supabase.co/functions/v1/cors-proxy';
 
-export const YOUTUBE_DRAMA_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes cache to protect 10,000/day quota
-const youtubeDramaMemoryCache = new Map<
-  string,
-  { timestamp: number; items: YouTubeDramaEpisodeItem[]; source: YouTubeDramaFetchResult['source'] }
->();
+export const YOUTUBE_DRAMA_CACHE_TTL_MS = 30 * 60 * 1000; // 30-minute quota-saving cache
+
+interface YouTubeDramaCacheEntry {
+  timestamp: number;
+  items: YouTubeDramaEpisodeItem[];
+  source: YouTubeDramaFetchResult['source'];
+}
+
+const youtubeDramaMemoryCache = new Map<string, YouTubeDramaCacheEntry>();
 
 export function clearYouTubeDramaCache(): void {
   youtubeDramaMemoryCache.clear();
 }
 
 /**
- * Verified Official Pakistani Drama Episodes from HUM TV, ARY Digital, Har Pal Geo, and GEO TV.
- * Used as an instant, guaranteed-working fallback when `VITE_YOUTUBE_API_KEY` is not set in `.env`
- * or when YouTube Data API v3 daily quota (10,000 units/day) is exhausted.
+ * Verified Official Pakistani Drama Full Episodes catalog across HUM TV, ARY Digital,
+ * Har Pal Geo, and GEO TV used as resilient fallback when API key is unset or RSS proxy fails.
  */
 export const VERIFIED_OFFICIAL_PAK_DRAMA_EPISODES: YouTubeDramaEpisodeItem[] = [
   {
@@ -378,6 +388,52 @@ export function getActiveYouTubeApiKey(): string {
   return typeof envKey === 'string' ? envKey.trim() : '';
 }
 
+export function sanitizeYouTubeSearchQuery(rawQuery: string | null | undefined): string {
+  if (!rawQuery || typeof rawQuery !== 'string') return '';
+  return rawQuery
+    .replace(/[<>]/g, '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+export function buildYouTubeExternalSearchUrl(rawQuery: string | null | undefined): string {
+  const cleanQuery = sanitizeYouTubeSearchQuery(rawQuery);
+  if (!cleanQuery) return 'https://www.youtube.com';
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(cleanQuery)}`;
+}
+
+/**
+ * Builds an unrestricted global YouTube Data API v3 `search.list` URL across all of YouTube
+ * (never restricts by `channelId`) so any query available on YouTube is returned.
+ */
+export function buildYouTubeGlobalSearchUrl(params: {
+  apiKey: string;
+  query: string;
+  maxResults?: number;
+  order?: 'date' | 'viewCount' | 'relevance';
+}): string {
+  const cleanKey = (params.apiKey || '').trim();
+  const cleanQuery = sanitizeYouTubeSearchQuery(params.query);
+  const maxResults = Math.min(Math.max(Number(params.maxResults) || 20, 1), 50);
+  const order = params.order || 'relevance';
+
+  const searchParams = new URLSearchParams({
+    key: cleanKey,
+    part: 'snippet,id',
+    order,
+    maxResults: String(maxResults),
+    type: 'video',
+  });
+
+  if (cleanQuery) {
+    searchParams.set('q', cleanQuery);
+  }
+
+  return `${YOUTUBE_API_BASE}/search?${searchParams.toString()}`;
+}
+
 export function buildYouTubeChannelSearchUrl(params: {
   apiKey: string;
   channelId: string;
@@ -389,6 +445,7 @@ export function buildYouTubeChannelSearchUrl(params: {
   const cleanChannelId = (params.channelId || 'UC6-F5tO8uklgE9Zy8IvbdFw').trim();
   const maxResults = Math.min(Math.max(Number(params.maxResults) || 20, 1), 50);
   const order = params.order || 'date';
+  const cleanQuery = sanitizeYouTubeSearchQuery(params.query);
 
   const searchParams = new URLSearchParams({
     key: cleanKey,
@@ -399,8 +456,8 @@ export function buildYouTubeChannelSearchUrl(params: {
     type: 'video',
   });
 
-  if (params.query && params.query.trim()) {
-    searchParams.set('q', params.query.trim());
+  if (cleanQuery) {
+    searchParams.set('q', cleanQuery);
   }
 
   return `${YOUTUBE_API_BASE}/search?${searchParams.toString()}`;
@@ -451,7 +508,10 @@ export function formatIso8601Duration(isoDuration: string | null | undefined): s
   if (hours > 0) {
     return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   }
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  if (minutes > 0 || seconds > 0) {
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+  return '38m';
 }
 
 export function formatViewCount(rawViews: string | number | null | undefined): string {
@@ -564,6 +624,218 @@ export function mergeYouTubeVideoDetails(
   });
 }
 
+function extractJsonObjectAfterMarker(source: string, marker: string): string | null {
+  const markerIdx = source.indexOf(marker);
+  if (markerIdx === -1) return null;
+  const openIdx = source.indexOf('{', markerIdx + marker.length);
+  if (openIdx === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = openIdx; i < source.length; i++) {
+    const ch = source[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(openIdx, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Parses YouTube web search HTML (`https://www.youtube.com/results?search_query=...`)
+ * via embedded `ytInitialData` (`videoRenderer`) so global YouTube search still works
+ * without API quota exhaustion or key restrictions.
+ */
+export function parseYouTubeSearchHtmlResults(
+  rawHtml: string | null | undefined,
+  maxResults: number = 20
+): YouTubeDramaEpisodeItem[] {
+  if (!rawHtml || typeof rawHtml !== 'string') return [];
+
+  const jsonSlice =
+    extractJsonObjectAfterMarker(rawHtml, 'var ytInitialData =') ||
+    extractJsonObjectAfterMarker(rawHtml, 'window["ytInitialData"] =') ||
+    extractJsonObjectAfterMarker(rawHtml, '"ytInitialData":');
+  if (!jsonSlice) return [];
+
+  let parsedData: any = null;
+  try {
+    parsedData = JSON.parse(jsonSlice);
+  } catch {
+    return [];
+  }
+
+  const sections =
+    parsedData?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer
+      ?.contents ||
+    parsedData?.contents?.sectionListRenderer?.contents ||
+    [];
+
+  const collected: YouTubeDramaEpisodeItem[] = [];
+  const seenIds = new Set<string>();
+  const cappedMax = Math.min(Math.max(Number(maxResults) || 20, 1), 40);
+
+  const visitNodes = (nodes: any[]) => {
+    if (!Array.isArray(nodes)) return;
+    for (const node of nodes) {
+      if (collected.length >= cappedMax) return;
+      if (!node || typeof node !== 'object') continue;
+
+      if (node.videoRenderer) {
+        const vr = node.videoRenderer;
+        const cleanVideoId = String(vr.videoId || '')
+          .replace(/[^a-zA-Z0-9_-]/g, '')
+          .trim();
+        if (!cleanVideoId || cleanVideoId.length < 6 || seenIds.has(cleanVideoId)) continue;
+        seenIds.add(cleanVideoId);
+
+        const titleRuns = Array.isArray(vr?.title?.runs)
+          ? vr.title.runs.map((r: any) => String(r?.text || '')).join('')
+          : '';
+        const rawTitle = (titleRuns || String(vr?.title?.simpleText || `YouTube Video (${cleanVideoId})`))
+          .replace(/[<>]/g, '')
+          .trim();
+
+        const channelTitle = (
+          vr?.ownerText?.runs?.[0]?.text ||
+          vr?.longBylineText?.runs?.[0]?.text ||
+          vr?.shortBylineText?.runs?.[0]?.text ||
+          'YouTube'
+        )
+          .replace(/[<>]/g, '')
+          .trim();
+
+        const channelId = String(
+          vr?.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId ||
+            vr?.longBylineText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId ||
+            ''
+        ).trim();
+
+        const durationFormatted = String(
+          vr?.lengthText?.simpleText ||
+            vr?.thumbnailOverlays?.find((o: any) => o?.thumbnailOverlayTimeStatusRenderer)
+              ?.thumbnailOverlayTimeStatusRenderer?.text?.simpleText ||
+            'HD'
+        )
+          .replace(/[<>]/g, '')
+          .trim();
+
+        const viewCountFormatted = String(
+          vr?.shortViewCountText?.simpleText ||
+            vr?.viewCountText?.simpleText ||
+            'YouTube Video'
+        )
+          .replace(/[<>]/g, '')
+          .trim();
+
+        const snippetText = Array.isArray(vr?.detailedMetadataSnippets?.[0]?.snippetText?.runs)
+          ? vr.detailedMetadataSnippets[0].snippetText.runs
+              .map((r: any) => String(r?.text || ''))
+              .join('')
+          : '';
+        const publishedLabel = String(vr?.publishedTimeText?.simpleText || '').trim();
+        const description =
+          snippetText.replace(/[<>]/g, '').trim() ||
+          `Watch ${rawTitle} on YouTube (${channelTitle}${
+            publishedLabel ? ` • ${publishedLabel}` : ''
+          }).`;
+
+        const thumbArr = Array.isArray(vr?.thumbnail?.thumbnails)
+          ? vr.thumbnail.thumbnails
+          : [];
+        const rawThumb = thumbArr[thumbArr.length - 1]?.url || thumbArr[0]?.url || '';
+        const safeThumb =
+          sanitizeSafeUrl(rawThumb) || `https://i.ytimg.com/vi/${cleanVideoId}/hqdefault.jpg`;
+
+        collected.push({
+          videoId: cleanVideoId,
+          numericId: videoIdToDeterministicNumber(cleanVideoId),
+          title: rawTitle,
+          description,
+          posterUrl: safeThumb,
+          backdropUrl: `https://i.ytimg.com/vi/${cleanVideoId}/maxresdefault.jpg`,
+          channelId,
+          channelTitle,
+          publishedAt: new Date().toISOString(),
+          releaseYear: 'YouTube',
+          durationFormatted,
+          viewCountFormatted,
+          embedUrl: buildYouTubeDramaEmbedUrl(cleanVideoId),
+          watchUrl: `https://www.youtube.com/watch?v=${cleanVideoId}`,
+        });
+      }
+
+      if (Array.isArray(node?.itemSectionRenderer?.contents)) {
+        visitNodes(node.itemSectionRenderer.contents);
+      }
+      if (Array.isArray(node?.richGridRenderer?.contents)) {
+        visitNodes(node.richGridRenderer.contents);
+      }
+    }
+  };
+
+  visitNodes(sections);
+  return collected;
+}
+
+async function fetchOpenYouTubeSearchFallback(
+  query: string,
+  maxResults: number,
+  fetchImpl: typeof fetch
+): Promise<YouTubeDramaEpisodeItem[]> {
+  const cleanQuery = sanitizeYouTubeSearchQuery(query);
+  if (!cleanQuery) return [];
+
+  const targetUrl = `${buildYouTubeExternalSearchUrl(cleanQuery)}&hl=en`;
+  const isNative = typeof window !== 'undefined' && Capacitor.isNativePlatform();
+  const proxyBase = String(
+    (import.meta as any).env?.VITE_CORS_PROXY_URL || DEFAULT_CORS_PROXY_URL
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  const fetchUrl = isNative
+    ? targetUrl
+    : buildProxiedUrl(targetUrl, `${proxyBase}?target=`) || targetUrl;
+  const headers = isNative ? { Accept: 'text/html' } : buildCorsProxyHeaders(fetchUrl);
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5500);
+    const res = await fetchImpl(fetchUrl, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) return [];
+    const html = await res.text();
+    return parseYouTubeSearchHtmlResults(html, maxResults);
+  } catch {
+    return [];
+  }
+}
+
 async function fetchLiveYouTubeChannelRssFallback(
   targetChannels: OfficialPakDramaChannel[],
   options: {
@@ -581,17 +853,18 @@ async function fetchLiveYouTubeChannelRssFallback(
   const collected: YouTubeDramaEpisodeItem[] = [];
 
   for (const ch of targetChannels) {
+    if (!ch.channelId) continue;
     const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(
       ch.channelId
     )}`;
-    const proxiedUrl = `${proxyBase}?url=${encodeURIComponent(feedUrl)}&target=${encodeURIComponent(
-      feedUrl
-    )}`;
+    const proxiedUrl = buildProxiedUrl(feedUrl, `${proxyBase}?target=`);
+    if (!proxiedUrl) continue;
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 4500);
       const res = await fetchImpl(proxiedUrl, {
         method: 'GET',
+        headers: buildCorsProxyHeaders(proxiedUrl),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -625,9 +898,11 @@ export async function fetchPakistaniDramasFromYouTube(
   const isExplicitApiKeyTest = options.apiKeyOverride !== undefined;
   const apiKey = (options.apiKeyOverride ?? getActiveYouTubeApiKey()).trim();
   const channelKey = options.channelKey || 'ALL';
-  const effectiveQuery = (options.query || options.searchQuery || '').trim();
-  const sortOrder = options.sortOrder || 'date';
-  const maxResults = options.maxResults || 20;
+  const effectiveQuery = sanitizeYouTubeSearchQuery(options.query || options.searchQuery || '');
+  const isGlobalOpenSearch = channelKey === 'ALL' && effectiveQuery.length > 0;
+  const sortOrder: PakDramaSortOrder =
+    options.sortOrder || (isGlobalOpenSearch ? 'relevance' : 'date');
+  const maxResults = Math.min(Math.max(Number(options.maxResults) || 20, 1), 50);
 
   const cacheKey = `${channelKey}::${sortOrder}::${effectiveQuery.toLowerCase()}::${maxResults}`;
   if (!options.forceRefresh && !isExplicitApiKeyTest) {
@@ -646,12 +921,12 @@ export async function fetchPakistaniDramasFromYouTube(
 
   const targetChannels =
     channelKey === 'ALL'
-      ? OFFICIAL_PAK_DRAMA_CHANNELS.filter((c) => c.key !== 'ALL')
-      : OFFICIAL_PAK_DRAMA_CHANNELS.filter((c) => c.key === channelKey);
+      ? OFFICIAL_PAK_DRAMA_CHANNELS.filter((c) => c.key !== 'ALL' && Boolean(c.channelId))
+      : OFFICIAL_PAK_DRAMA_CHANNELS.filter((c) => c.key === channelKey && Boolean(c.channelId));
 
-  // 1. When VITE_YOUTUBE_API_KEY is not configured in .env (and not an explicit unit-test override):
-  //    Automatically fetch live episodes from Official YouTube Channel RSS Feeds via server-side cors-proxy,
-  //    falling back to the Verified Official Pakistani Drama Catalog so the section always works!
+  // 1. When VITE_YOUTUBE_API_KEY is unset:
+  //    - If user searched globally (`channelKey === 'ALL' && effectiveQuery`): run open YouTube search fallback
+  //    - Otherwise fetch live RSS from HUM TV, ARY Digital, Har Pal Geo & GEO TV -> fallback to Verified Official Catalog
   if (!apiKey) {
     if (isExplicitApiKeyTest) {
       return {
@@ -661,6 +936,29 @@ export async function fetchPakistaniDramasFromYouTube(
         missingApiKey: true,
         errorMessage: 'Content Unavailable, Try Again',
       };
+    }
+
+    if (isGlobalOpenSearch) {
+      const openWebItems = await fetchOpenYouTubeSearchFallback(
+        effectiveQuery,
+        maxResults,
+        fetchImpl
+      );
+      if (openWebItems.length > 0) {
+        youtubeDramaMemoryCache.set(cacheKey, {
+          timestamp: Date.now(),
+          items: openWebItems,
+          source: 'youtube-web-live',
+        });
+        return {
+          ok: true,
+          items: openWebItems,
+          quotaExceeded: false,
+          missingApiKey: false,
+          errorMessage: null,
+          source: 'youtube-web-live',
+        };
+      }
     }
 
     const rssItems = await fetchLiveYouTubeChannelRssFallback(
@@ -705,43 +1003,88 @@ export async function fetchPakistaniDramasFromYouTube(
     };
   }
 
-  const perChannelMax =
-    channelKey === 'ALL'
-      ? Math.max(5, Math.ceil(maxResults / targetChannels.length))
-      : maxResults;
-
   try {
-    const allEpisodes: YouTubeDramaEpisodeItem[] = [];
+    let allEpisodes: YouTubeDramaEpisodeItem[] = [];
     let sawQuotaExceeded = false;
 
-    for (const ch of targetChannels) {
-      const searchUrl = buildYouTubeChannelSearchUrl({
+    if (isGlobalOpenSearch) {
+      // Unrestricted Global YouTube Search (`search.list` WITHOUT `channelId`)
+      const globalSearchUrl = buildYouTubeGlobalSearchUrl({
         apiKey,
-        channelId: ch.channelId,
         query: effectiveQuery,
-        maxResults: perChannelMax,
+        maxResults,
         order: sortOrder,
       });
 
-      const res = await fetchImpl(searchUrl, {
+      const res = await fetchImpl(globalSearchUrl, {
         method: 'GET',
         headers: { Accept: 'application/json' },
       });
-
       const json = await res.json().catch(() => null);
       if (!res.ok) {
         if (isYouTubeQuotaExceededError(res.status, json)) {
           sawQuotaExceeded = true;
-          break;
         }
-        continue;
+      } else {
+        allEpisodes = parseYouTubeSearchItems(json);
       }
+    } else {
+      const perChannelMax =
+        channelKey === 'ALL'
+          ? Math.max(4, Math.ceil(maxResults / Math.max(1, targetChannels.length)))
+          : maxResults;
 
-      const parsed = parseYouTubeSearchItems(json);
-      allEpisodes.push(...parsed);
+      for (const ch of targetChannels) {
+        const searchUrl = buildYouTubeChannelSearchUrl({
+          apiKey,
+          channelId: ch.channelId,
+          query: effectiveQuery,
+          maxResults: perChannelMax,
+          order: sortOrder === 'relevance' ? 'date' : sortOrder,
+        });
+
+        const res = await fetchImpl(searchUrl, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (isYouTubeQuotaExceededError(res.status, json)) {
+            sawQuotaExceeded = true;
+            break;
+          }
+          continue;
+        }
+
+        const parsed = parseYouTubeSearchItems(json);
+        allEpisodes.push(...parsed);
+      }
     }
 
     if (sawQuotaExceeded) {
+      if (!isExplicitApiKeyTest && isGlobalOpenSearch) {
+        const openWebItems = await fetchOpenYouTubeSearchFallback(
+          effectiveQuery,
+          maxResults,
+          fetchImpl
+        );
+        if (openWebItems.length > 0) {
+          youtubeDramaMemoryCache.set(cacheKey, {
+            timestamp: Date.now(),
+            items: openWebItems,
+            source: 'youtube-web-live',
+          });
+          return {
+            ok: true,
+            items: openWebItems,
+            quotaExceeded: false,
+            missingApiKey: false,
+            errorMessage: null,
+            source: 'youtube-web-live',
+          };
+        }
+      }
       return {
         ok: false,
         items: [],
@@ -753,6 +1096,23 @@ export async function fetchPakistaniDramasFromYouTube(
 
     if (allEpisodes.length === 0) {
       if (!isExplicitApiKeyTest) {
+        if (isGlobalOpenSearch) {
+          const openWebItems = await fetchOpenYouTubeSearchFallback(
+            effectiveQuery,
+            maxResults,
+            fetchImpl
+          );
+          if (openWebItems.length > 0) {
+            return {
+              ok: true,
+              items: openWebItems,
+              quotaExceeded: false,
+              missingApiKey: false,
+              errorMessage: null,
+              source: 'youtube-web-live',
+            };
+          }
+        }
         const fallbackItems = filterAndSortDramaEpisodes(VERIFIED_OFFICIAL_PAK_DRAMA_EPISODES, {
           channelKey,
           query: effectiveQuery,
@@ -781,7 +1141,7 @@ export async function fetchPakistaniDramasFromYouTube(
     try {
       const detailsUrl = buildYouTubeVideoDetailsUrl({
         apiKey,
-        videoIds: allEpisodes.slice(0, 25).map((e) => e.videoId),
+        videoIds: allEpisodes.slice(0, 35).map((e) => e.videoId),
       });
       const detailsRes = await fetchImpl(detailsUrl, {
         method: 'GET',
@@ -811,6 +1171,23 @@ export async function fetchPakistaniDramasFromYouTube(
     };
   } catch {
     if (!isExplicitApiKeyTest) {
+      if (isGlobalOpenSearch) {
+        const openWebItems = await fetchOpenYouTubeSearchFallback(
+          effectiveQuery,
+          maxResults,
+          fetchImpl
+        );
+        if (openWebItems.length > 0) {
+          return {
+            ok: true,
+            items: openWebItems,
+            quotaExceeded: false,
+            missingApiKey: false,
+            errorMessage: null,
+            source: 'youtube-web-live',
+          };
+        }
+      }
       const fallbackItems = filterAndSortDramaEpisodes(VERIFIED_OFFICIAL_PAK_DRAMA_EPISODES, {
         channelKey,
         query: effectiveQuery,

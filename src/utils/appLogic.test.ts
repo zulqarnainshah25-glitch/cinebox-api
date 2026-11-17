@@ -1977,7 +1977,7 @@ test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0
     currentVersionOverride: '1.0.0',
     globalAppConfig: {
       apk_download_url: 'https://drive.google.com/uc?export=download&id=1RealGoogleDriveFileId123',
-      apk_latest_version: '1.0.9',
+      apk_latest_version: '1.0.12',
     },
   });
   assert.equal(webCheck.checked, true);
@@ -1994,32 +1994,32 @@ test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0
     false
   );
 
-  // 3. Version Number Update (1.0.2 -> 1.0.3, versionCode 3)
-  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.3');
-  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.3');
+  // 3. Version Number Update (1.0.11 -> 1.0.12, versionCode 12)
+  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.12');
+  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.12');
 
   const pkgJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')
   );
-  assert.equal(pkgJson.version, '1.0.3');
+  assert.equal(pkgJson.version, '1.0.12');
 
   const envExample = fs.readFileSync(
     path.resolve(process.cwd(), '.env.example'),
     'utf8'
   );
-  assert.equal(envExample.includes('VITE_APP_VERSION="1.0.3"'), true);
+  assert.equal(envExample.includes('VITE_APP_VERSION="1.0.12"'), true);
 
   const buildGradle = fs.readFileSync(
     path.resolve(process.cwd(), 'android/app/build.gradle'),
     'utf8'
   );
-  assert.equal(buildGradle.includes('versionCode 3'), true);
-  assert.equal(buildGradle.includes('versionName "1.0.3"'), true);
+  assert.equal(buildGradle.includes('versionCode 12'), true);
+  assert.equal(buildGradle.includes('versionName "1.0.12"'), true);
 
   const versionJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'public/version.json'), 'utf8')
   );
-  assert.equal(versionJson.version, '1.0.3');
+  assert.equal(versionJson.version, '1.0.12');
 
   // 4. Fullscreen Back Button (Controls-Synced Visibility & Taskbar Blending) + Borderless #000000 object-fit: contain
   const fsVisible = getFullscreenPlayerConfig(true, 'contain', true);
@@ -2345,21 +2345,21 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
   assert.equal(isVidSrcAdNetworkUrl('https://vidsrc.sh/assets/sbx.js?v=1786671805'), true);
   assert.equal(isVidSrcAdNetworkUrl('https://vidsrc.sh/embed/movie/533535'), false);
 
-  // When VidSrc.sh is active and AdBlocker is ON -> strict sandbox without allow-popups or allow-top-navigation
+  // When VidSrc.sh is active and AdBlocker is ON -> un-sandboxed (sandbox MUST be undefined so VidSrc.sh never triggers /sandbox.php)
   const vidsrcProtectedAttrs = getVidSrcPlayerIframeAttributes(
     'https://vidsrc.sh/embed/movie/533535?ds_lang=en',
     'Deadpool - VidSrc.sh',
     true
   );
   assert.equal(vidsrcProtectedAttrs.isVidSrcAdBlockerActive, true);
+  assert.equal(vidsrcProtectedAttrs.sandbox, undefined);
+  assert.equal(vidsrcProtectedAttrs.referrerPolicy, 'origin');
   assert.equal(
-    vidsrcProtectedAttrs.sandbox,
-    'allow-scripts allow-same-origin allow-forms allow-presentation'
+    vidsrcProtectedAttrs.allow,
+    'autoplay; fullscreen; picture-in-picture; encrypted-media'
   );
-  assert.equal((vidsrcProtectedAttrs.sandbox || '').includes('allow-popups'), false);
-  assert.equal((vidsrcProtectedAttrs.sandbox || '').includes('allow-top-navigation'), false);
 
-  // When AdBlocker is OFF -> no sandbox restriction
+  // When AdBlocker is OFF -> still un-sandboxed, AdBlocker flags disabled
   const vidsrcUnprotectedAttrs = getVidSrcPlayerIframeAttributes(
     'https://vidsrc.sh/embed/movie/533535?ds_lang=en',
     'Deadpool - VidSrc.sh',
@@ -2368,7 +2368,7 @@ test('Streaming-Only Architecture, Official Website (neboxmovies.ai.studio) Admi
   assert.equal(vidsrcUnprotectedAttrs.isVidSrcAdBlockerActive, false);
   assert.equal(vidsrcUnprotectedAttrs.sandbox, undefined);
 
-  // When Server 3 (2Embed.cc) is active -> never sandboxed even when AdBlocker is ON
+  // When Server 3 (2Embed.cc) is active -> never sandboxed
   const twoEmbedAttrs = getVidSrcPlayerIframeAttributes(
     'https://www.2embed.cc/embed/533535',
     'Deadpool - 2Embed',
@@ -2816,15 +2816,16 @@ test('Fix 1: Sticky Video Player on Scroll uses CSS position: sticky; top: 0; z-
     true
   );
 
-  // 9. Verify VideoPlayerModal.tsx renders sticky-video-player-wrapper, JS fallback spacer, and scrollTop threshold check
+  // 9. Verify VideoPlayerModal.tsx uses On-Demand Theater Modal instead of sticky iframe overlap over top header
   const modalSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
     'utf8'
   );
-  assert.equal(modalSource.includes('data-testid="sticky-video-player-wrapper"'), true);
-  assert.equal(modalSource.includes('data-testid="sticky-player-js-fallback-spacer"'), true);
-  assert.equal(modalSource.includes('STICKY_EMBED_SCROLL_THRESHOLD_PX'), true);
-  assert.equal(modalSource.includes('setIsEmbedIframeLoaded(true)'), true);
+  assert.equal(modalSource.includes('data-testid="detail-top-nav-header"'), true);
+  assert.equal(modalSource.includes('data-testid="movie-detail-hero-preview"'), true);
+  assert.equal(modalSource.includes('data-testid="detail-play-now-btn"'), true);
+  assert.equal(modalSource.includes('data-testid="theater-player-modal"'), true);
+  assert.equal(modalSource.includes('data-testid="sticky-video-player-wrapper"'), false);
   assert.equal(modalSource.includes('brightness === 100 ? undefined'), true);
 });
 
@@ -3718,8 +3719,8 @@ test('Final Integration: 4 Specific Streaming Sources (VidSrc.sh, VidLink.pro, V
   const { getSourceButtonState } = await import('../components/player/SourcePicker');
 
   // 1. Exact URLs & Query Parameters for all 4 Sources (Movie & TV)
-  assert.equal(PREFERRED_EMBED_SERVER_ID, 'auto-server-vidfast');
-  assert.equal(CONTROLS_AUTO_HIDE_MS, 2000);
+  assert.equal(PREFERRED_EMBED_SERVER_ID, 'auto-server-vidlink');
+  assert.equal(CONTROLS_AUTO_HIDE_MS, 3000);
 
   // Click-to-show AND Click-to-hide toggle behavior (plus forceShow on wake strip)
   assert.equal(computeNextControlsVisibility(true, false), false);
@@ -3884,7 +3885,7 @@ test('Final Integration: 4 Specific Streaming Sources (VidSrc.sh, VidLink.pro, V
     'utf8'
   );
   assert.equal(modalSource.includes('useState<boolean>(true)'), true); // Adblocker default ON
-  assert.equal(modalSource.includes('CONTROLS_AUTO_HIDE_MS'), true); // 2s auto-hide
+  assert.equal(modalSource.includes('FULLSCREEN_CONTROLS_AUTO_HIDE_MS'), true); // 3s auto-hide
   assert.equal(modalSource.includes('computeNextControlsVisibility'), true); // click show & hide
   assert.equal(modalSource.includes('data-testid="below-video-controls-bar"'), true);
   assert.equal(modalSource.includes('data-testid="fullscreen-top-header-bar"'), true);
@@ -5321,7 +5322,1370 @@ test('64. Android Release APK Fix: Resource Linking (colors.xml, styles.xml, str
   assert.equal(wrapperProps.includes('gradle-8.14.3-all.zip'), true);
   assert.equal(buildGradle.includes('JavaVersion.VERSION_21'), true);
   assert.equal(buildGradle.includes('jvmTarget = "21"'), true);
+
+  // 8. @capacitor/android & @capacitor/cli present in package.json + settings.gradle + gradle.properties
+  const pkgJson = JSON.parse(
+    fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')
+  );
+  const settingsGradle = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/settings.gradle'),
+    'utf8'
+  );
+  const gradleProps = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/gradle.properties'),
+    'utf8'
+  );
+  assert.equal(Boolean(pkgJson.dependencies['@capacitor/android']), true);
+  assert.equal(Boolean(pkgJson.dependencies['@capacitor/cli']), true);
+  assert.equal(settingsGradle.includes("apply from: 'capacitor.settings.gradle'"), true);
+  assert.equal(gradleProps.includes('android.useAndroidX=true'), true);
+  assert.equal(workflowYaml.includes('node_modules/@capacitor/android/capacitor/build.gradle'), true);
 });
+
+test('65. Player v1.0.5: Un-Sandboxed Embed Iframe, Smart First-Tap Click-Shield, Focus/Redirect Guards, Synchronized AdBlocker Toast & 3s Auto-Hide Fullscreen Back Reset', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    ADBLOCK_TOAST_DISABLED,
+    ADBLOCK_TOAST_ENABLED,
+    ADBLOCK_TOAST_TRAP_BLOCKED,
+    CLICK_SHIELD_REARM_IDLE_MS,
+    CLICK_SHIELD_UNLOCK_WINDOW_MS,
+    CONTROLS_AUTO_HIDE_MS,
+    FULLSCREEN_CONTROLS_AUTO_HIDE_MS,
+    createBlurHijackEvaluator,
+    getAdBlockerIframeSandbox,
+    getCleanIframeAttributes,
+    installVidSrcNetworkAdInterceptor,
+    lockScreenOrientationSafely,
+  } = await import('./streamResolver');
+
+  // 1. Auto-hide constants, Click-Shield timing, exact toast strings & NEVER sandboxing embed iframes
+  assert.equal(CONTROLS_AUTO_HIDE_MS, 3000);
+  assert.equal(FULLSCREEN_CONTROLS_AUTO_HIDE_MS, 3000);
+  assert.equal(CLICK_SHIELD_UNLOCK_WINDOW_MS, 10_000);
+  assert.equal(CLICK_SHIELD_REARM_IDLE_MS, 15_000);
+  assert.equal(ADBLOCK_TOAST_ENABLED, '🛡️ AdBlocker Enabled');
+  assert.equal(ADBLOCK_TOAST_DISABLED, '⚠️ AdBlocker Disabled');
+  assert.equal(
+    ADBLOCK_TOAST_TRAP_BLOCKED,
+    '🛡️ Popup Ad Trap Blocked — Tap again to play'
+  );
+  assert.equal(getAdBlockerIframeSandbox(true), undefined);
+  assert.equal(getAdBlockerIframeSandbox(false), undefined);
+
+  const cleanAttrs = getCleanIframeAttributes(
+    'https://vidsrc.sh/embed/movie/533535?ds_lang=en',
+    'Deadpool'
+  );
+  assert.equal(cleanAttrs.sandbox, undefined);
+  assert.equal(cleanAttrs.allowFullScreen, true);
+  assert.equal(cleanAttrs.referrerPolicy, 'origin');
+  assert.equal(
+    cleanAttrs.allow,
+    'autoplay; fullscreen; picture-in-picture; encrypted-media'
+  );
+
+  // 2. Refined AdBlocker focus/blur evaluator
+  const evaluator = createBlurHijackEvaluator({
+    graceWindowMs: 2500,
+    burstWindowMs: 1500,
+    burstThreshold: 3,
+  });
+
+  const legitTap1 = evaluator.evaluateBlur({ nowMs: 10_000, isIframeActive: true });
+  assert.equal(legitTap1.shouldBlock, false);
+  assert.equal(legitTap1.reason, 'legitimate-iframe-tap');
+
+  evaluator.markUserInteraction(11_000);
+  const graceTap = evaluator.evaluateBlur({ nowMs: 12_000, isIframeActive: true });
+  assert.equal(graceTap.shouldBlock, false);
+  assert.equal(graceTap.reason, 'user-interaction-grace');
+
+  const nonIframe = evaluator.evaluateBlur({ nowMs: 15_000, isIframeActive: false });
+  assert.equal(nonIframe.shouldBlock, false);
+  assert.equal(nonIframe.reason, 'non-iframe-blur');
+
+  const b1 = evaluator.evaluateBlur({ nowMs: 20_000, isIframeActive: true });
+  const b2 = evaluator.evaluateBlur({ nowMs: 20_300, isIframeActive: true });
+  const b3 = evaluator.evaluateBlur({ nowMs: 20_600, isIframeActive: true });
+  assert.equal(b1.shouldBlock, false);
+  assert.equal(b2.shouldBlock, false);
+  assert.equal(b3.shouldBlock, true);
+  assert.equal(b3.reason, 'rapid-hijack-burst');
+
+  // 3. Parent-level beforeunload, visibilitychange, blur & window.open hijack guards
+  const intercepted: Array<{ url: string; kind: string }> = [];
+  const listeners = new Map<string, Set<Function>>();
+  let focusRestoredCount = 0;
+  let interactiveGrace = true;
+
+  const mockWin: any = {
+    fetch: async () => ({ ok: true, status: 200 }),
+    open: () => ({ ok: true }),
+    focus: () => {
+      focusRestoredCount += 1;
+    },
+    addEventListener: (evt: string, fn: Function) => {
+      if (!listeners.has(evt)) listeners.set(evt, new Set());
+      listeners.get(evt)!.add(fn);
+    },
+    removeEventListener: (evt: string, fn: Function) => {
+      listeners.get(evt)?.delete(fn);
+    },
+  };
+  const docListeners = new Map<string, Set<Function>>();
+  const mockDoc: any = {
+    visibilityState: 'visible',
+    activeElement: { tagName: 'IFRAME' },
+    addEventListener: (evt: string, fn: Function) => {
+      if (!docListeners.has(evt)) docListeners.set(evt, new Set());
+      docListeners.get(evt)!.add(fn);
+    },
+    removeEventListener: (evt: string, fn: Function) => {
+      docListeners.get(evt)?.delete(fn);
+    },
+  };
+
+  const cleanupGuard = installVidSrcNetworkAdInterceptor({
+    enabled: true,
+    isVidSrcTarget: true,
+    targetWindow: mockWin,
+    targetDocument: mockDoc,
+    isInteractiveGraceActive: () => interactiveGrace,
+    onAdBlocked: (url, kind) => intercepted.push({ url, kind }),
+  });
+
+  // Legitimate Play/Pause/Seek tap inside iframe during 10s Click-Shield unlock window -> NOT interrupted
+  listeners.get('blur')?.forEach((fn) => fn());
+  assert.equal(focusRestoredCount, 0);
+  assert.equal(intercepted.length, 0);
+
+  // Popup steals focus into non-iframe or hides tab -> window.focus() called + blocked counter incremented
+  interactiveGrace = false;
+  mockDoc.activeElement = { tagName: 'BODY' };
+  listeners.get('blur')?.forEach((fn) => fn());
+  assert.equal(focusRestoredCount, 1);
+  assert.equal(intercepted.at(-1)?.kind, 'focus-steal');
+
+  mockDoc.visibilityState = 'hidden';
+  docListeners.get('visibilitychange')?.forEach((fn) => fn());
+  assert.equal(focusRestoredCount, 2);
+  assert.equal(intercepted.at(-1)?.kind, 'focus-steal');
+
+  // beforeunload redirect guard prevents unsolicited top-level navigation
+  let unloadPrevented = false;
+  const unloadEvt: any = {
+    returnValue: 'ok',
+    preventDefault: () => {
+      unloadPrevented = true;
+    },
+  };
+  listeners.get('beforeunload')?.forEach((fn) => fn(unloadEvt));
+  assert.equal(unloadPrevented, true);
+  assert.equal(unloadEvt.returnValue, '');
+  assert.equal(intercepted.at(-1)?.kind, 'redirect');
+
+  // window.open always returns null while enabled
+  assert.equal(mockWin.open('https://ads.example.com/pop'), null);
+  assert.equal(intercepted.at(-1)?.kind, 'popup');
+
+  // Cleanup removes all listeners cleanly (no memory leaks)
+  cleanupGuard();
+  assert.equal(listeners.get('blur')?.size || 0, 0);
+  assert.equal(listeners.get('beforeunload')?.size || 0, 0);
+  assert.equal(docListeners.get('visibilitychange')?.size || 0, 0);
+
+  // 4. Safe Screen Orientation Portrait Lock & Unlock Fallback
+  let lockedOrientation = '';
+  let unlockedCalled = false;
+  const lockOk = await lockScreenOrientationSafely('portrait', {
+    orientation: {
+      lock: async (mode: string) => {
+        lockedOrientation = mode;
+      },
+      unlock: () => {
+        unlockedCalled = true;
+      },
+    },
+  });
+  assert.deepEqual(lockOk, { ok: true, mode: 'portrait' });
+  assert.equal(lockedOrientation, 'portrait');
+
+  const fallbackOk = await lockScreenOrientationSafely('portrait', {
+    orientation: {
+      lock: async () => {
+        throw new Error('NotSupportedError');
+      },
+      unlock: () => {
+        unlockedCalled = true;
+      },
+    },
+  });
+  assert.deepEqual(fallbackOk, { ok: true, mode: 'portrait' });
+  assert.equal(unlockedCalled, true);
+
+  const missingScreen = await lockScreenOrientationSafely('portrait', null);
+  assert.deepEqual(missingScreen, { ok: false, mode: 'portrait' });
+
+  // 5. Verify VideoPlayerModal.tsx & PakistaniDramasSection.tsx UI/UX & security contracts
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  const pakDramaSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/PakistaniDramasSection.tsx'),
+    'utf8'
+  );
+
+  // Never apply sandbox attribute on embed iframe; preserve key={cleanIframeAttrs.src} so toggle never reloads video
+  assert.equal(/\bsandbox\s*=/.test(modalSource), false);
+  assert.equal(modalSource.includes('key={cleanIframeAttrs.src}'), true);
+  assert.equal(modalSource.includes('allow={cleanIframeAttrs.allow}'), true);
+  assert.equal(modalSource.includes('referrerPolicy={cleanIframeAttrs.referrerPolicy}'), true);
+
+  // Smart First-Tap Click-Shield + synchronized toasts + blocked counter pill
+  assert.equal(modalSource.includes('data-testid="vidsrc-click-shield-layer"'), true);
+  assert.equal(modalSource.includes('CLICK_SHIELD_UNLOCK_WINDOW_MS'), true);
+  assert.equal(modalSource.includes('CLICK_SHIELD_REARM_IDLE_MS'), true);
+  assert.equal(modalSource.includes('ADBLOCK_TOAST_ENABLED'), true);
+  assert.equal(modalSource.includes('ADBLOCK_TOAST_DISABLED'), true);
+  assert.equal(modalSource.includes('ADBLOCK_TOAST_TRAP_BLOCKED'), true);
+  assert.equal(modalSource.includes('({blockedAdsCount} blocked)'), true);
+
+  // On-Demand Theater Modal + 3s auto-hide Exit Fullscreen + Back popstate portrait reset
+  assert.equal(modalSource.includes('useState<boolean>(Boolean(offlineDownload))'), true);
+  assert.equal(modalSource.includes('data-testid="theater-player-modal"'), true);
+  assert.equal(modalSource.includes('data-testid="fullscreen-exit-pill-btn"'), true);
+  assert.equal(modalSource.includes("window.addEventListener('popstate', handlePopState)"), true);
+  assert.equal(modalSource.includes("lockScreenOrientationSafely('portrait')"), true);
+  assert.equal(pakDramaSource.includes("window.addEventListener('popstate', onPopState)"), true);
+  assert.equal(pakDramaSource.includes("lockScreenOrientationSafely('portrait')"), true);
+});
+
+test('66. Open YouTube Global Search v1.0.6: Unrestricted search.list (No channelId), YouTube HTML ytInitialData Fallback, XSS/Null Query Sanitization & Version Sync', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    OFFICIAL_PAK_DRAMA_CHANNELS,
+    buildYouTubeExternalSearchUrl,
+    buildYouTubeGlobalSearchUrl,
+    clearYouTubeDramaCache,
+    fetchPakistaniDramasFromYouTube,
+    parseYouTubeSearchHtmlResults,
+    sanitizeYouTubeSearchQuery,
+  } = await import('../services/youtubeDramaService');
+
+  clearYouTubeDramaCache();
+
+  // 1. Verify 'ALL' pill is unrestricted ("All YouTube") with empty channelId
+  const allScope = OFFICIAL_PAK_DRAMA_CHANNELS.find((c) => c.key === 'ALL');
+  assert.equal(allScope?.name, 'All YouTube');
+  assert.equal(allScope?.channelId, '');
+
+  // 2. Sanitization & Null/XSS edge cases
+  assert.equal(sanitizeYouTubeSearchQuery(null), '');
+  assert.equal(sanitizeYouTubeSearchQuery(undefined), '');
+  assert.equal(sanitizeYouTubeSearchQuery('  <script>alert(1)</script>  Coke Studio\n  15 '), 'scriptalert(1)/script Coke Studio 15');
+  assert.equal(sanitizeYouTubeSearchQuery('a'.repeat(200)).length, 120);
+  assert.equal(buildYouTubeExternalSearchUrl(''), 'https://www.youtube.com');
+  assert.equal(
+    buildYouTubeExternalSearchUrl('Coke Studio Season 15'),
+    'https://www.youtube.com/results?search_query=Coke%20Studio%20Season%2015'
+  );
+
+  // 3. Unrestricted Global Search URL (NO channelId parameter!)
+  const globalUrl = buildYouTubeGlobalSearchUrl({
+    apiKey: 'TEST_YT_KEY',
+    query: 'Coke Studio Blockbuster',
+    order: 'relevance',
+    maxResults: 20,
+  });
+  assert.equal(globalUrl.includes('https://www.googleapis.com/youtube/v3/search?'), true);
+  assert.equal(globalUrl.includes('channelId='), false);
+  assert.equal(globalUrl.includes('type=video'), true);
+  assert.equal(globalUrl.includes('order=relevance'), true);
+  assert.equal(decodeURIComponent(globalUrl).replace(/\+/g, ' ').includes('q=Coke Studio Blockbuster'), true);
+
+  // 4. Global search returns ANY YouTube video/channel without restricting to drama channels
+  const capturedUrls: string[] = [];
+  const mockGlobalFetch = (async (url: string) => {
+    capturedUrls.push(url);
+    if (url.includes('/search?')) {
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: { videoId: 'csVideo0001' },
+              snippet: {
+                title: 'Coke Studio Season 15 | Blockbuster',
+                description: 'Official Music Video',
+                channelId: 'UCMusicChannelGlobal01',
+                channelTitle: 'Coke Studio Pakistan',
+                publishedAt: '2026-10-01T12:00:00Z',
+                thumbnails: { high: { url: 'https://i.ytimg.com/vi/csVideo0001/hqdefault.jpg' } },
+              },
+            },
+            {
+              id: { videoId: 'mkbhdVid002' },
+              snippet: {
+                title: 'Smartphone Camera Blind Test',
+                description: 'Tech Video',
+                channelId: 'UCBJycsmduvYEL83R_U4JriQ',
+                channelTitle: 'MKBHD',
+                publishedAt: '2026-10-05T12:00:00Z',
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        items: [
+          {
+            id: 'csVideo0001',
+            contentDetails: { duration: 'PT5M12S' },
+            statistics: { viewCount: '25400000' },
+          },
+          {
+            id: 'mkbhdVid002',
+            contentDetails: { duration: 'PT14M03S' },
+            statistics: { viewCount: '4100000' },
+          },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as unknown as typeof fetch;
+
+  const globalRes = await fetchPakistaniDramasFromYouTube(
+    {
+      channelKey: 'ALL',
+      query: 'Coke Studio',
+      apiKeyOverride: 'TEST_YT_KEY',
+      forceRefresh: true,
+    },
+    mockGlobalFetch
+  );
+  assert.equal(globalRes.ok, true);
+  assert.equal(globalRes.source, 'youtube-api-v3');
+  assert.equal(globalRes.items.length, 2);
+  assert.equal(globalRes.items[0].channelTitle, 'Coke Studio Pakistan');
+  assert.equal(globalRes.items[0].durationFormatted, '5:12');
+  assert.equal(globalRes.items[0].viewCountFormatted, '25.4M views');
+  assert.equal(globalRes.items[1].channelTitle, 'MKBHD');
+  // Single unrestricted search call + 1 videos details call
+  assert.equal(
+    capturedUrls.some((u) => u.includes('/search?') && !u.includes('channelId=')),
+    true
+  );
+
+  // 5. YouTube HTML ytInitialData parser (zero-quota fallback + XSS/malformed input resilience)
+  assert.deepEqual(parseYouTubeSearchHtmlResults(null), []);
+  assert.deepEqual(parseYouTubeSearchHtmlResults('<html>no data here</html>'), []);
+  assert.deepEqual(parseYouTubeSearchHtmlResults('var ytInitialData = {broken json;'), []);
+
+  const fakeYtHtml = `<html><head></head><body><script>var ytInitialData = ${JSON.stringify({
+    contents: {
+      twoColumnSearchResultsRenderer: {
+        primaryContents: {
+          sectionListRenderer: {
+            contents: [
+              {
+                itemSectionRenderer: {
+                  contents: [
+                    {
+                      videoRenderer: {
+                        videoId: 'ytWeb001abc',
+                        title: { runs: [{ text: 'Any Global Video <script>xss</script>' }] },
+                        ownerText: {
+                          runs: [
+                            {
+                              text: 'Global Creator',
+                              navigationEndpoint: { browseEndpoint: { browseId: 'UCGlobal123' } },
+                            },
+                          ],
+                        },
+                        lengthText: { simpleText: '12:34' },
+                        shortViewCountText: { simpleText: '1.8M views' },
+                        publishedTimeText: { simpleText: '2 days ago' },
+                        thumbnail: {
+                          thumbnails: [{ url: 'https://i.ytimg.com/vi/ytWeb001abc/hqdefault.jpg' }],
+                        },
+                      },
+                    },
+                    {
+                      videoRenderer: {
+                        videoId: 'bad',
+                        title: { simpleText: 'Should be ignored short id' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  })};</script></body></html>`;
+
+  const parsedHtmlItems = parseYouTubeSearchHtmlResults(fakeYtHtml, 10);
+  assert.equal(parsedHtmlItems.length, 1);
+  assert.equal(parsedHtmlItems[0].videoId, 'ytWeb001abc');
+  assert.equal(parsedHtmlItems[0].title.includes('<script>'), false);
+  assert.equal(parsedHtmlItems[0].channelTitle, 'Global Creator');
+  assert.equal(parsedHtmlItems[0].durationFormatted, '12:34');
+  assert.equal(parsedHtmlItems[0].viewCountFormatted, '1.8M views');
+  assert.equal(parsedHtmlItems[0].embedUrl, 'https://www.youtube.com/embed/ytWeb001abc?autoplay=1');
+
+  // 6. When API key is missing in real runtime (non-override) for global search -> uses ytInitialData web fallback!
+  const mockCorsWebFallback = (async (url: string) => {
+    if (String(url).includes('youtube.com%2Fresults') || String(url).includes('youtube.com/results')) {
+      return new Response(fakeYtHtml, { status: 200 });
+    }
+    return new Response('not found', { status: 404 });
+  }) as unknown as typeof fetch;
+
+  const prevYoutubeEnv = (import.meta as any).env?.VITE_YOUTUBE_API_KEY;
+  if ((import.meta as any).env) {
+    (import.meta as any).env.VITE_YOUTUBE_API_KEY = '';
+  }
+  const openWebRes = await fetchPakistaniDramasFromYouTube(
+    { channelKey: 'ALL', query: 'Any Global Video', forceRefresh: true },
+    mockCorsWebFallback
+  );
+  if ((import.meta as any).env && prevYoutubeEnv !== undefined) {
+    (import.meta as any).env.VITE_YOUTUBE_API_KEY = prevYoutubeEnv;
+  }
+  assert.equal(openWebRes.ok, true);
+  assert.equal(openWebRes.source, 'youtube-web-live');
+  assert.equal(openWebRes.items[0].videoId, 'ytWeb001abc');
+
+  // 7. UI & v1.0.6 checks
+  const pakDramaSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/PakistaniDramasSection.tsx'),
+    'utf8'
+  );
+  assert.equal(pakDramaSource.includes('🇵🇰 Official YouTube Data API v3'), true);
+  assert.equal(pakDramaSource.includes("setSelectedChannel('ALL')"), true);
+  assert.equal(pakDramaSource.includes('pak-drama-sort-relevance'), true);
+  assert.equal(pakDramaSource.includes('pak-drama-search-all-youtube-btn'), true);
+  assert.equal(pakDramaSource.includes('buildYouTubeExternalSearchUrl'), true);
+});
+
+test('67. Multi-Source Iframe Video AdBlocker v1.0.7: Covers ALL Embed Sources (VidSrc.sh, VidLink.pro, VidFast, 2Embed, Custom), Excludes Non-Embeds, Blocks Live Ad Networks/VAST/Popups & Syncs Android Bridge', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    buildEmbedAdBlockCssRules,
+    getEmbedAdBlockerIframeAttributes,
+    getEmbedIframeProviderKey,
+    installEmbedIframeAdInterceptor,
+    isEmbedAdNetworkUrl,
+    isEmbedIframeVideoSourceUrl,
+  } = await import('./streamResolver');
+
+  // 1. Covers ALL iframe video sources ONLY (and strictly excludes direct MP4/HLS, YouTube, null, or unsafe schemes)
+  assert.equal(getEmbedIframeProviderKey('https://vidsrc.sh/embed/movie/533535?ds_lang=en'), 'vidsrc');
+  assert.equal(getEmbedIframeProviderKey('https://vidlink.pro/movie/533535?autoplay=true'), 'vidlink');
+  assert.equal(getEmbedIframeProviderKey('https://vidfast.vc/movie/533535?theme=10d97b'), 'vidfast');
+  assert.equal(getEmbedIframeProviderKey('https://vidfast.pro/tv/123/1/1'), 'vidfast');
+  assert.equal(getEmbedIframeProviderKey('https://www.2embed.cc/embed/533535'), '2embed');
+  assert.equal(getEmbedIframeProviderKey('https://2vcdn.skin/e/o5fbh44hopq1'), '2embed');
+  assert.equal(getEmbedIframeProviderKey('https://multiembed.mov/directstream.php?video_id=533535'), 'custom');
+
+  assert.equal(isEmbedIframeVideoSourceUrl('https://vidsrc.sh/embed/movie/533535'), true);
+  assert.equal(isEmbedIframeVideoSourceUrl('https://vidlink.pro/movie/533535'), true);
+  assert.equal(isEmbedIframeVideoSourceUrl('https://vidfast.vc/movie/533535'), true);
+  assert.equal(isEmbedIframeVideoSourceUrl('https://www.2embed.cc/embed/533535'), true);
+  assert.equal(isEmbedIframeVideoSourceUrl('https://multiembed.mov/embed/1'), true);
+
+  // Strictly FALSE for direct video streams, YouTube official player, null, empty, or javascript: XSS
+  assert.equal(isEmbedIframeVideoSourceUrl('https://cdn.example.com/movie.mp4'), false);
+  assert.equal(isEmbedIframeVideoSourceUrl('https://live.example.com/stream/playlist.m3u8?token=1'), false);
+  assert.equal(isEmbedIframeVideoSourceUrl('https://www.youtube.com/embed/abc123def45'), false);
+  assert.equal(isEmbedIframeVideoSourceUrl('javascript:alert(1)'), false);
+  assert.equal(isEmbedIframeVideoSourceUrl(null), false);
+  assert.equal(isEmbedIframeVideoSourceUrl(''), false);
+
+  // 2. Unified attributes never apply <iframe sandbox> across any provider
+  for (const url of [
+    'https://vidsrc.sh/embed/movie/533535',
+    'https://vidlink.pro/movie/533535',
+    'https://vidfast.vc/movie/533535',
+    'https://www.2embed.cc/embed/533535',
+  ]) {
+    const attrs = getEmbedAdBlockerIframeAttributes(url, 'Test Movie', true);
+    assert.equal(attrs.isEmbedTarget, true);
+    assert.equal(attrs.isEmbedAdBlockerActive, true);
+    assert.equal(attrs.sandbox, undefined);
+  }
+  const directAttrs = getEmbedAdBlockerIframeAttributes('https://cdn.example.com/video.mp4', 'Direct', true);
+  assert.equal(directAttrs.isEmbedTarget, false);
+  assert.equal(directAttrs.isEmbedAdBlockerActive, false);
+
+  // 3. Blocks all live-observed ad scripts, VAST pre-rolls, trackers & DGA popunders from S1-S4
+  const observedAdUrls = [
+    // VidSrc.sh (Source 1)
+    'https://acscdn.com/script/aclib.js',
+    'https://acscdn.com/script/suv5.js',
+    'https://2q4jkmpyygzc2.rc91gizcl1njbiw.cfd/k6Qy2T5ZC79t/VvMrO',
+    'https://f.lhchjg2369ymgg.rest/kXwTr2mMuW2U/VvMrO',
+    'https://rapidadexchange.com/script/suurl5.php',
+    'https://usrpubtrck.com/ut/hb.php',
+    'https://stellarconductornexus.com/fc8e8cab-1a2b-3c4d-5e6f-1234567890ab',
+    // VidLink.pro (Source 2)
+    'https://www.intellipopup.com/wNCCov/gO/wfoundation-datepicker.min.js',
+    'https://c.adsco.re/',
+    'https://4.adsco.re:2087/',
+    'https://mc.yandex.ru/metrika/tag.js',
+    'https://mc.yandex.com/metrika/advert.gif?t=gdpr(14)',
+    // VidFast (Source 3)
+    'https://scripts.clarity.ms/0.8.79-beta/clarity.js',
+    'https://cdn.popads.net/pop.js',
+    // 2Embed (Source 4)
+    'https://tagivi.com/1/82896b2332b74dfc6fec71bfcd31cba6',
+    'https://adplox.com/',
+    'https://whos.amung.us/widget/2embedcc/',
+    'https://2vcdn.skin/player/jw8/vast.js?v=32',
+    'https://p16-ad-site-sign-sg.tiktokcdn.com/ad-site-i18n-sg/202611065d0d5ff288e9829546688c25',
+  ];
+  for (const adUrl of observedAdUrls) {
+    assert.equal(isEmbedAdNetworkUrl(adUrl), true, `Expected ad URL blocked: ${adUrl}`);
+  }
+
+  // Legitimate video player documents & HLS playlists MUST remain allowed
+  const legitimateUrls = [
+    'https://vidsrc.sh/embed/movie/533535?ds_lang=en',
+    'https://vidlink.pro/movie/533535',
+    'https://vidfast.vc/movie/533535',
+    'https://www.2embed.cc/embed/533535',
+    'https://2vcdn.skin/e/o5fbh44hopq1',
+    'https://2vcdn.skin/stream/master.m3u8',
+  ];
+  for (const legUrl of legitimateUrls) {
+    assert.equal(isEmbedAdNetworkUrl(legUrl), false, `Expected stream URL allowed: ${legUrl}`);
+  }
+
+  // 4. CSS hiding rules cover adplox, tagivi, intellipopup, acscdn when active & return empty when inactive
+  const css = buildEmbedAdBlockCssRules(true, true);
+  assert.equal(css.includes('tagivi.com'), true);
+  assert.equal(css.includes('intellipopup.com'), true);
+  assert.equal(css.includes('adplox.com'), true);
+  assert.equal(buildEmbedAdBlockCssRules(true, false), '');
+
+  // 5. Runtime interceptor blocks sendBeacon, HTMLAnchorElement.click _blank popups, and hidden-tab steals + re-arms shield
+  const blocked: Array<{ url: string; kind: string }> = [];
+  let rearmTriggered = 0;
+  let focusCalls = 0;
+  const winListeners = new Map<string, Set<Function>>();
+  const docListeners = new Map<string, Set<Function>>();
+  const beaconCalls: string[] = [];
+  const anchorClicks: string[] = [];
+
+  function MockAnchor(this: any, href: string, target: string) {
+    this.href = href;
+    this._target = target;
+  }
+  MockAnchor.prototype.getAttribute = function (k: string) {
+    if (k === 'href') return this.href;
+    if (k === 'target') return this._target;
+    return null;
+  };
+  MockAnchor.prototype.click = function () {
+    anchorClicks.push(this.href);
+  };
+
+  const mockWin: any = {
+    fetch: async () => ({ ok: true, status: 200 }),
+    open: () => ({ ok: true }),
+    focus: () => {
+      focusCalls += 1;
+    },
+    navigator: {
+      sendBeacon: (u: string) => {
+        beaconCalls.push(u);
+        return true;
+      },
+    },
+    HTMLAnchorElement: MockAnchor,
+    addEventListener: (e: string, fn: Function) => {
+      if (!winListeners.has(e)) winListeners.set(e, new Set());
+      winListeners.get(e)!.add(fn);
+    },
+    removeEventListener: (e: string, fn: Function) => winListeners.get(e)?.delete(fn),
+  };
+  const mockDoc: any = {
+    visibilityState: 'hidden',
+    hidden: true,
+    activeElement: { tagName: 'IFRAME' },
+    addEventListener: (e: string, fn: Function) => {
+      if (!docListeners.has(e)) docListeners.set(e, new Set());
+      docListeners.get(e)!.add(fn);
+    },
+    removeEventListener: (e: string, fn: Function) => docListeners.get(e)?.delete(fn),
+  };
+
+  const cleanup = installEmbedIframeAdInterceptor({
+    enabled: true,
+    isVidSrcTarget: true,
+    targetWindow: mockWin,
+    targetDocument: mockDoc,
+    isInteractiveGraceActive: () => true,
+    onPopupHijackDetected: () => {
+      rearmTriggered += 1;
+    },
+    onAdBlocked: (url, kind) => blocked.push({ url, kind }),
+  });
+
+  // Tracker sendBeacon blocked silently; normal beacon passes through
+  assert.equal(mockWin.navigator.sendBeacon('https://usrpubtrck.com/ut/hb.php', '{}'), true);
+  assert.equal(beaconCalls.length, 0);
+  assert.equal(mockWin.navigator.sendBeacon('https://api.cinebox.local/ping', '{}'), true);
+  assert.equal(beaconCalls.length, 1);
+
+  // Programmatic ad anchor click (_blank / adplox) blocked & re-arms shield
+  const evilAnchor = new (MockAnchor as any)('https://adplox.com/', '_blank');
+  evilAnchor.click();
+  assert.equal(anchorClicks.length, 0);
+  assert.equal(rearmTriggered >= 1, true);
+
+  // Even during interactive grace window, if popup hides tab (visibilityState === 'hidden'), focus is reclaimed & shield re-arms
+  winListeners.get('blur')?.forEach((fn) => fn());
+  assert.equal(focusCalls >= 1, true);
+  assert.equal(rearmTriggered >= 2, true);
+  assert.equal(blocked.some((b) => b.url === 'embed://popup-tab-steal'), true);
+
+  cleanup();
+
+  // 6. Verify VideoPlayerModal.tsx & Android MainActivity.java multi-source bridge & v1.0.7 sync
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  const mainActivitySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('getEmbedAdBlockerIframeAttributes'), true);
+  assert.equal(modalSource.includes('CineboxAndroidAdBlocker'), true);
+  assert.equal(modalSource.includes('__cineboxOnNativeAdBlocked'), true);
+  assert.equal(mainActivitySource.includes('CineboxAdBlockerBridge'), true);
+  assert.equal(mainActivitySource.includes('tagivi.com'), true);
+  assert.equal(mainActivitySource.includes('intellipopup.com'), true);
+  assert.equal(mainActivitySource.includes('isEmbedAdBlockerActive()'), true);
+  assert.equal(mainActivitySource.includes('scheme.equalsIgnoreCase("intent")'), true);
+  assert.equal(mainActivitySource.includes('scheme.equalsIgnoreCase("market")'), true);
+});
+
+test('68. Dedicated src/utils/adblocker.ts Utility v1.0.8: O(1) Domain Filtering, Redirect Unwrapping, URL Sanitization, setAttribute DOM Interception, 1000-URL Load & VideoPlayerModal Wiring', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    AD_SERVING_DOMAINS,
+    createIframeRequestInterceptor,
+    extractSafeHostname,
+    getEmbedAdBlockerIframeAttributes,
+    isAdServingRequestUrl,
+    isKnownAdServingDomain,
+    sanitizeEmbedIframeRequestUrl,
+  } = await import('./adblocker');
+
+  // 1. Null, empty, whitespace & malformed input safety
+  assert.equal(extractSafeHostname(null), '');
+  assert.equal(extractSafeHostname(undefined), '');
+  assert.equal(extractSafeHostname('   '), '');
+  assert.equal(extractSafeHostname('not a valid url://??'), '');
+  assert.equal(isKnownAdServingDomain(null), false);
+  assert.equal(isKnownAdServingDomain(''), false);
+  assert.equal(isAdServingRequestUrl(null), false);
+  assert.equal(isAdServingRequestUrl('   '), false);
+  assert.equal(sanitizeEmbedIframeRequestUrl(null), null);
+
+  // 2. General + live ad-serving domains & subdomain wildcards + wrapped redirect params
+  assert.equal(AD_SERVING_DOMAINS.length >= 60, true);
+  assert.equal(isKnownAdServingDomain('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js'), true);
+  assert.equal(isKnownAdServingDomain('https://c.adsco.re/'), true);
+  assert.equal(isKnownAdServingDomain('https://sub.mgid.com/serv/123'), true);
+  assert.equal(isKnownAdServingDomain('https://vidlink.pro/movie/533535'), false);
+  assert.equal(isKnownAdServingDomain('https://image.tmdb.org/t/p/w500/poster.jpg'), false);
+
+  // Wrapped redirect & XSS schemes
+  assert.equal(
+    isAdServingRequestUrl('https://redir.example.com/out?url=https%3A%2F%2Fadplox.com%2Fpop'),
+    true
+  );
+  assert.equal(isAdServingRequestUrl('https://2vcdn.skin/player/jw8/vmap.xml'), true);
+  assert.equal(isAdServingRequestUrl('javascript:alert(document.cookie)'), true);
+  assert.equal(isAdServingRequestUrl('data:text/html,<script>alert(1)</script>'), true);
+
+  // 3. sanitizeEmbedIframeRequestUrl blocks ad domains / XSS and strips tracking query params while preserving player options
+  assert.equal(sanitizeEmbedIframeRequestUrl('https://doubleclick.net/ad?id=1'), null);
+  assert.equal(sanitizeEmbedIframeRequestUrl('javascript:alert(1)'), null);
+  const cleanedVidLink = sanitizeEmbedIframeRequestUrl(
+    'https://vidlink.pro/movie/533535?primaryColor=10d97b&autoplay=true&utm_source=pop&clickid=9988&zoneid=77'
+  );
+  assert.equal(cleanedVidLink?.includes('primaryColor=10d97b'), true);
+  assert.equal(cleanedVidLink?.includes('autoplay=true'), true);
+  assert.equal(cleanedVidLink?.includes('utm_source'), false);
+  assert.equal(cleanedVidLink?.includes('clickid'), false);
+  assert.equal(cleanedVidLink?.includes('zoneid'), false);
+
+  // Clean un-sandboxed embed attributes preserve player functionality across all sources
+  const embedAttrs = getEmbedAdBlockerIframeAttributes(
+    'https://vidfast.vc/movie/533535?theme=10d97b&clickid=evil',
+    'VidFast Movie',
+    true
+  );
+  assert.equal(embedAttrs.providerKey, 'vidfast');
+  assert.equal(embedAttrs.isEmbedAdBlockerActive, true);
+  assert.equal(embedAttrs.sandbox, undefined);
+  assert.equal(embedAttrs.src.includes('clickid='), false);
+
+  // 4. Dynamic Element.prototype.setAttribute interception blocks ad scripts/iframes/pixels before network fetch
+  const blockedEvents: Array<{ url: string; kind: string }> = [];
+  const appliedAttrs: Array<{ tag: string; name: string; value: string }> = [];
+  function MockElement(this: any, tagName: string) {
+    this.tagName = tagName;
+  }
+  MockElement.prototype.setAttribute = function (name: string, value: string) {
+    appliedAttrs.push({ tag: this.tagName, name, value });
+  };
+
+  const mockWin: any = {
+    fetch: async () => ({ ok: true, status: 200 }),
+    open: () => ({ ok: true }),
+    focus: () => {},
+    Element: MockElement,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  const cleanup = createIframeRequestInterceptor({
+    enabled: true,
+    isEmbedTarget: true,
+    targetWindow: mockWin,
+    targetDocument: { addEventListener: () => {}, removeEventListener: () => {} },
+    onAdBlocked: (url, kind) => blockedEvents.push({ url, kind }),
+  });
+
+  const adScriptEl = new (MockElement as any)('SCRIPT');
+  adScriptEl.setAttribute('src', 'https://intellipopup.com/wNCCov/gO/wfoundation-datepicker.min.js');
+  const adFrameEl = new (MockElement as any)('IFRAME');
+  adFrameEl.setAttribute('src', 'https://tagivi.com/1/82896b2332b74dfc6fec71bfcd31cba6');
+  const safeVideoEl = new (MockElement as any)('IFRAME');
+  safeVideoEl.setAttribute('src', 'https://vidsrc.sh/embed/movie/533535');
+
+  assert.equal(blockedEvents.some((e) => e.url.includes('intellipopup.com') && e.kind === 'dom-node'), true);
+  assert.equal(blockedEvents.some((e) => e.url.includes('tagivi.com') && e.kind === 'dom-node'), true);
+  assert.equal(appliedAttrs.some((a) => a.value.includes('intellipopup.com')), false);
+  assert.equal(appliedAttrs.some((a) => a.value.includes('tagivi.com')), false);
+  assert.equal(appliedAttrs.some((a) => a.value === 'https://vidsrc.sh/embed/movie/533535'), true);
+  cleanup();
+
+  // 5. 1000+ concurrent/rapid request throughput check (< 50ms for 1,200 URL evaluations)
+  const startedAt = Date.now();
+  let blockedHits = 0;
+  for (let i = 0; i < 600; i += 1) {
+    if (isAdServingRequestUrl(`https://sub${i % 10}.adsterra.com/zone/${i}`)) blockedHits += 1;
+    if (isAdServingRequestUrl(`https://cdn.example.com/movie_${i}.m3u8`)) blockedHits += 1;
+  }
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(blockedHits, 600);
+  assert.equal(elapsedMs < 250, true, `Expected fast O(1) filtering (<250ms), got ${elapsedMs}ms`);
+
+  // 6. Verify VideoPlayerModal.tsx imports cleanly from ../utils/adblocker
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes("from '../utils/adblocker'"), true);
+  assert.equal(modalSource.includes('createIframeRequestInterceptor'), true);
+  assert.equal(modalSource.includes('sanitizeEmbedIframeRequestUrl'), true);
+});
+
+test('69. Real Multi-Layer AdBlocker Engine v1.0.9: 3,600+ Peter Lowe Domains, SSRF Protection, HTML Scriptlet Rewriter, Live /api/adblock-proxy Integration & Android Native Shield', async () => {
+  const fs = await import('node:fs');
+  const http = await import('node:http');
+  const path = await import('node:path');
+  const {
+    buildInFrameAdBlockScriptlet,
+    isAdRequestUrl,
+    isPrivateOrReservedIp,
+    parseHostsTextIntoSet,
+    rewriteEmbedHtmlWithAdBlocker,
+    validateProxyTargetUrl,
+  } = await import('./adblockEngine');
+  const {
+    buildAdBlockProxiedEmbedUrl,
+    parseAdBlockTelemetryMessage,
+    probeAdBlockProxyHealth,
+    resetAdBlockProxyHealthCacheForTests,
+  } = await import('./adblocker');
+  const { createCineboxServerApp } = await import('../../server');
+
+  // 1. Real Peter Lowe + EasyList domain asset (>3,500 domains) & safe host allowlist protection
+  const assetPath = path.resolve(process.cwd(), 'android/app/src/main/assets/adblock_domains.txt');
+  assert.equal(fs.existsSync(assetPath), true);
+  const hostsRaw = fs.readFileSync(assetPath, 'utf8');
+  const fullBlocklist = parseHostsTextIntoSet(hostsRaw);
+  assert.equal(fullBlocklist.size >= 3500, true, `Expected >= 3500 domains, got ${fullBlocklist.size}`);
+  assert.equal(isAdRequestUrl('https://1rx.io/banner.js', fullBlocklist), true);
+  assert.equal(isAdRequestUrl('https://acscdn.com/script/aclib.js', fullBlocklist), true);
+  assert.equal(isAdRequestUrl('https://vidsrc.sh/embed/movie/533535', fullBlocklist), false);
+  assert.equal(isAdRequestUrl('https://vidlink.pro/movie/533535', fullBlocklist), false);
+  assert.equal(isAdRequestUrl('https://api.themoviedb.org/3/movie/533535', fullBlocklist), false);
+
+  // 2. SSRF Hardening: reject localhost, private RFC1918, cloud metadata, numeric/hex/IPv6-mapped loopback, credentials & non-HTTP schemes
+  assert.equal(isPrivateOrReservedIp('127.0.0.1'), true);
+  assert.equal(isPrivateOrReservedIp('169.254.169.254'), true);
+  assert.equal(isPrivateOrReservedIp('10.20.30.40'), true);
+  assert.equal(isPrivateOrReservedIp('172.16.0.1'), true);
+  assert.equal(isPrivateOrReservedIp('192.168.1.55'), true);
+  assert.equal(isPrivateOrReservedIp('::1'), true);
+  assert.equal(isPrivateOrReservedIp('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateOrReservedIp('8.8.8.8'), false);
+
+  const ssrfBadTargets = [
+    null,
+    '',
+    'file:///etc/passwd',
+    'javascript:alert(1)',
+    'http://localhost:3000/api/health',
+    'http://127.0.0.1:8080/admin',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://10.0.0.5/',
+    'http://192.168.0.1/',
+    'http://[::1]/',
+    'http://2130706433/',
+    'https://user:secret@vidsrc.sh/embed/movie/533535',
+    'http://metadata.internal/',
+  ];
+  for (const bad of ssrfBadTargets) {
+    assert.equal(validateProxyTargetUrl(bad).valid, false, `Expected SSRF rejection for ${String(bad)}`);
+  }
+  assert.equal(validateProxyTargetUrl('https://vidsrc.sh/embed/movie/533535?ds_lang=en').valid, true);
+
+  // 3. HTML Rewriter strips ad/popunder/anti-devtool scripts, rewrites nested iframes & injects non-writable window.open scriptlet + Next.js path rewrite
+  const dirtyHtml = `<!DOCTYPE html><html><head>
+    <script src="/assets/sbx.js?v=1786671805"></script>
+    <script src="https://cdn.jsdelivr.net/npm/disable-devtool@latest"></script>
+    <script src="https://tagivi.com/1/82896b2332b74dfc6fec71bfcd31cba6"></script>
+    <script>var _Hasync= _Hasync|| []; _Hasync.push(['Histats.start', '1,123,4,0']); (function(){ var s = 'https://s10.histats.com/js15_as.js'; })();</script>
+    <script src="/player/jw8/player.js"></script>
+  </head><body>
+    <a href="https://adplox.com/" target="_blank">Click Here</a>
+    <img src="https://whos.amung.us/widget/2embedcc/" />
+    <iframe src="https://streamsrcs.2embed.cc/swish?id=abc123"></iframe>
+    <iframe src="https://intellipopup.com/popframe"></iframe>
+  </body></html>`;
+
+  const rewritten = rewriteEmbedHtmlWithAdBlocker(
+    dirtyHtml,
+    'https://www.2embed.cc/embed/533535',
+    '/api/adblock-proxy',
+    fullBlocklist
+  );
+  assert.equal(rewritten.strippedCount >= 6, true, `Expected >=6 stripped elements, got ${rewritten.strippedCount}`);
+  assert.equal(rewritten.html.includes('/assets/sbx.js'), true); // present in injected scriptlet rule pattern
+  assert.equal(rewritten.html.includes('src="/assets/sbx.js'), false);
+  assert.equal(rewritten.html.includes('disable-devtool@latest'), false);
+  assert.equal(rewritten.html.includes('tagivi.com/1/'), false);
+  assert.equal(rewritten.html.includes('var _Hasync'), false);
+  assert.equal(rewritten.html.includes('stripped inline popunder script'), true);
+  assert.equal(rewritten.html.includes('whos.amung.us/widget'), false);
+  assert.equal(rewritten.html.includes('/player/jw8/player.js'), true);
+  assert.equal(rewritten.html.includes('https://www.2embed.cc/embed/'), true);
+  assert.equal(rewritten.html.includes('data-cinebox-adblock="1"'), true);
+  assert.equal(
+    rewritten.html.includes('/api/adblock-proxy?url=https%3A%2F%2Fstreamsrcs.2embed.cc%2Fswish%3Fid%3Dabc123'),
+    true
+  );
+  const bareRelativeHtml = '<!DOCTYPE html><html><head><script src="js/app.js"></script></head><body></body></html>';
+  const bareRelativeRewritten = rewriteEmbedHtmlWithAdBlocker(
+    bareRelativeHtml,
+    'https://www.2embed.cc/embed/533535',
+    '/api/adblock-proxy',
+    fullBlocklist
+  );
+  assert.equal(bareRelativeRewritten.html.includes('<base href="https://www.2embed.cc/embed/">'), true);
+
+  const nextJsScriptlet = buildInFrameAdBlockScriptlet('https://vidlink.pro/movie/533535?autoplay=true', '/api/adblock-proxy');
+  assert.equal(nextJsScriptlet.includes('window.history.replaceState'), true);
+  assert.equal(nextJsScriptlet.includes('/movie/533535?autoplay=true'), true);
+  assert.equal(nextJsScriptlet.includes("Object.defineProperty(window, 'open'"), true);
+  const extractedScriptBody = nextJsScriptlet.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, '');
+  assert.doesNotThrow(() => new Function(extractedScriptBody));
+
+  // 4. Proxied embed URL builder leaves YouTube, direct streams, null, and Android direct mode untouched
+  assert.equal(
+    buildAdBlockProxiedEmbedUrl('https://vidsrc.sh/embed/movie/533535', { isAdBlockerEnabled: true, useBackendProxy: true }),
+    '/api/adblock-proxy?url=https%3A%2F%2Fvidsrc.sh%2Fembed%2Fmovie%2F533535'
+  );
+  assert.equal(
+    buildAdBlockProxiedEmbedUrl('https://vidsrc.sh/embed/movie/533535', { isAdBlockerEnabled: false, useBackendProxy: true }),
+    'https://vidsrc.sh/embed/movie/533535'
+  );
+  assert.equal(
+    buildAdBlockProxiedEmbedUrl('https://www.youtube.com/embed/abc123', { isAdBlockerEnabled: true, useBackendProxy: true }),
+    'https://www.youtube.com/embed/abc123'
+  );
+  assert.equal(
+    buildAdBlockProxiedEmbedUrl('https://cdn.example.com/movie.m3u8', { isAdBlockerEnabled: true, useBackendProxy: true }),
+    'https://cdn.example.com/movie.m3u8'
+  );
+
+  // 5. Telemetry message validation
+  assert.deepEqual(parseAdBlockTelemetryMessage({ type: 'CINEBOX_AD_BLOCKED', url: 'about:blank', kind: 'popup' }), {
+    url: 'about:blank',
+    kind: 'popup',
+  });
+  assert.equal(parseAdBlockTelemetryMessage({ type: 'OTHER_EVENT' }), null);
+  assert.equal(parseAdBlockTelemetryMessage(null), null);
+
+  // 6. Live Express /api/health & /api/adblock-proxy Integration Check (ephemeral port)
+  const app = createCineboxServerApp();
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address() as { port: number };
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+  try {
+    resetAdBlockProxyHealthCacheForTests();
+    const healthProbe = await probeAdBlockProxyHealth((input, init) =>
+      fetch(`${baseUrl}${String(input)}`, init)
+    );
+    assert.equal(healthProbe.available, true);
+    assert.equal(healthProbe.blocklistSize >= 3500, true);
+
+    const ssrfRes = await fetch(`${baseUrl}/api/adblock-proxy?url=${encodeURIComponent('http://169.254.169.254/latest/meta-data/')}`);
+    assert.equal(ssrfRes.status, 400);
+
+    const vastRes = await fetch(`${baseUrl}/api/adblock-proxy?url=${encodeURIComponent('https://2vcdn.skin/player/jw8/vast.xml')}`);
+    assert.equal(vastRes.status, 200);
+    assert.equal(vastRes.headers.get('x-cinebox-adblock'), 'blocked');
+    assert.equal(await vastRes.text(), '<VAST version="3.0"></VAST>');
+
+    const adJsRes = await fetch(`${baseUrl}/api/adblock-proxy?url=${encodeURIComponent('https://acscdn.com/script/aclib.js')}`);
+    assert.equal(adJsRes.status, 200);
+    assert.equal(adJsRes.headers.get('x-cinebox-adblock'), 'blocked');
+    assert.equal((await adJsRes.text()).includes('Blocked by CineBox AdBlocker'), true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  // 7. 1,000+ Concurrent Ad Evaluation Load Benchmark (< 250ms against full 3,603-domain set)
+  const t0 = Date.now();
+  let blockedCount = 0;
+  for (let i = 0; i < 1000; i += 1) {
+    if (isAdRequestUrl(`https://sub${i % 20}.intellipopup.com/pop/${i}`, fullBlocklist)) {
+      blockedCount += 1;
+    }
+  }
+  assert.equal(blockedCount, 1000);
+  assert.equal(Date.now() - t0 < 250, true);
+
+  // 8. Android MainActivity.java & VideoPlayerModal.tsx v1.0.9 Verification
+  const mainActivitySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(mainActivitySource.includes('adblock_domains.txt'), true);
+  assert.equal(mainActivitySource.includes('getBridge().setWebViewClient('), true);
+  assert.equal(mainActivitySource.includes('stripAdScriptsAndInjectShield'), true);
+  assert.equal(mainActivitySource.includes('ANDROID_IN_FRAME_SHIELD_SCRIPTLET'), true);
+  assert.equal(mainActivitySource.includes('public void reportBlocked('), true);
+
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('buildAdBlockProxiedEmbedUrl'), true);
+  assert.equal(modalSource.includes('parseAdBlockTelemetryMessage'), true);
+  assert.equal(modalSource.includes('probeAdBlockProxyHealth'), true);
+  assert.equal(/\bsandbox\s*=/.test(modalSource), false);
+});
+
+test('70. v1.0.10 Proxied Movie Playback + Active AdBlocker: VidLink.pro Preferred Default, DASH .mpd & HLS .m3u8 URI Rewriter, Next.js Hydration-Safe Popunder Neutralizer, Null-Body 204 Stub & Newly Discovered Ad Domains', async () => {
+  const fs = await import('node:fs');
+  const http = await import('node:http');
+  const path = await import('node:path');
+  const {
+    CURATED_AD_DOMAINS,
+    buildInFrameAdBlockScriptlet,
+    isAdRequestUrl,
+    rewriteDashMpdManifest,
+    rewriteEmbedHtmlWithAdBlocker,
+    rewriteHlsM3u8Manifest,
+  } = await import('./adblockEngine');
+  const {
+    isAdServingRequestUrl,
+  } = await import('./adblocker');
+  const {
+    PREFERRED_EMBED_SERVER_ID,
+  } = await import('./streamResolver');
+  const { DEFAULT_USER_APP_SETTINGS } = await import('../services/supabaseClient');
+  const { createCineboxServerApp } = await import('../../server');
+
+  // 1. Primary default server switched to verified proxied Source 2 (VidLink.pro)
+  assert.equal(PREFERRED_EMBED_SERVER_ID, 'auto-server-vidlink');
+  assert.equal(DEFAULT_USER_APP_SETTINGS.defaultServer, 'auto-server-vidlink');
+
+  // 2. Newly discovered popup/telemetry domains & paths are blocked across adblockEngine + adblocker + Android MainActivity
+  const blockedCandidates = [
+    'https://mklwfufdtjbwl.online/pop/123',
+    'https://jvaxzufsyldqj.space/tag.js',
+    'https://d3mr7y154d2qg5.cloudfront.net/pixel.js',
+    'https://rxqgeccsz.com/p.js',
+    'https://gowwtsfqlwyfxn.com/v2',
+    'https://alchemmauls.com/popunder',
+    'https://1414.hexa.su/script.js',
+    'https://cdn.example.com/ad.js?cbcdn=123',
+    'https://cdn.example.com/pop?popundersperip=2',
+    'https://cdn.example.com/load?fmt=suv5',
+    'https://vidlink.pro/api/mercury?v=1',
+    'https://vidlink.pro/api/venus',
+  ];
+  for (const cand of blockedCandidates) {
+    assert.equal(isAdRequestUrl(cand), true, `Expected adblockEngine to block ${cand}`);
+    assert.equal(isAdServingRequestUrl(cand), true, `Expected adblocker.ts to block ${cand}`);
+  }
+  assert.equal(CURATED_AD_DOMAINS.includes('rxqgeccsz.com'), true);
+  assert.equal(CURATED_AD_DOMAINS.includes('1414.hexa.su'), true);
+
+  // Never false-positive on real VidLink stream API or DASH/HLS media segments
+  assert.equal(isAdRequestUrl('https://vidlink.pro/api/b/movie/550'), false);
+  assert.equal(isAdRequestUrl('https://surge.flooderrr.store/sacdn/dash/index_web.mpd'), false);
+  assert.equal(isAdRequestUrl('https://surge.flooderrr.store/sacdn/dash/chunk-stream1-00001.m4s'), false);
+
+  // 3. DASH .mpd & HLS .m3u8 URI rewriting resolves root-relative paths against upstream CDN origin
+  const rawMpd = `<?xml version="1.0"?>
+<MPD><Period><AdaptationSet>
+  <SegmentTemplate initialization="/sacdn/dash/init-stream$RepresentationID$.m4s" media="/sacdn/dash/chunk-stream$RepresentationID$-$Number%05d$.m4s" />
+  <BaseURL>/sacdn/dash/</BaseURL>
+</AdaptationSet></Period></MPD>`;
+  const rewrittenMpd = rewriteDashMpdManifest(
+    rawMpd,
+    'https://surge.flooderrr.store/sacdn/dash/index_web.mpd?token=abc'
+  );
+  assert.equal(
+    rewrittenMpd.includes('initialization="https://surge.flooderrr.store/sacdn/dash/init-stream$RepresentationID$.m4s"'),
+    true
+  );
+  assert.equal(
+    rewrittenMpd.includes('media="https://surge.flooderrr.store/sacdn/dash/chunk-stream$RepresentationID$-$Number%05d$.m4s"'),
+    true
+  );
+  assert.equal(rewrittenMpd.includes('<BaseURL>https://surge.flooderrr.store/sacdn/dash/</BaseURL>'), true);
+
+  const rawM3u8 = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,URI="/hls/audio_en.m3u8"
+seg_0001.ts
+/hls/seg_0002.ts`;
+  const rewrittenM3u8 = rewriteHlsM3u8Manifest(rawM3u8, 'https://cdn.vidlink.pro/stream/master.m3u8');
+  assert.equal(rewrittenM3u8.includes('URI="https://cdn.vidlink.pro/hls/audio_en.m3u8"'), true);
+  assert.equal(rewrittenM3u8.includes('https://cdn.vidlink.pro/stream/seg_0001.ts'), true);
+  assert.equal(rewrittenM3u8.includes('https://cdn.vidlink.pro/hls/seg_0002.ts'), true);
+
+  // 4. Next.js hydration-safe popunder neutralization preserves <script> tag count & uses null-body 204 + console.table guard
+  const nextJsDirty = `<!DOCTYPE html><html><head>
+    <script src="/_next/static/chunks/webpack.js"></script>
+    <script>window.unloaded_at=Date.now();window.shown_at=1;window.open('https://rxqgeccsz.com');</script>
+    <script src="/_next/static/chunks/main.js"></script>
+  </head><body></body></html>`;
+  const nextRes = rewriteEmbedHtmlWithAdBlocker(nextJsDirty, 'https://vidlink.pro/movie/550', '/api/adblock-proxy');
+  assert.equal(nextRes.strippedCount, 1);
+  assert.equal(nextRes.html.includes('/* cinebox-adblock: neutralized inline popunder */'), true);
+  assert.equal(nextRes.html.includes('unloaded_at'), false);
+  // 1 injected scriptlet + 3 original <script> tags = 4 total
+  assert.equal((nextRes.html.match(/<script\b/gi) || []).length, 4);
+
+  const scriptlet = buildInFrameAdBlockScriptlet('https://vidlink.pro/movie/550', '/api/adblock-proxy');
+  assert.equal(scriptlet.includes("new Response(isVast ? '<VAST version=\"3.0\"></VAST>' : null"), true);
+  assert.equal(scriptlet.includes('console.table'), true);
+  assert.doesNotThrow(() =>
+    new Function(scriptlet.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, ''))
+  );
+
+  // 5. Live server integration: /api/health returns 1.0.12 & /api/adblock-proxy blocks /api/mercury + SSRF
+  const app = createCineboxServerApp();
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address() as { port: number };
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+  try {
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    assert.equal(healthRes.status, 200);
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.version, '1.0.12');
+    assert.equal(healthJson.adblockProxyEnabled, true);
+
+    const mercuryRes = await fetch(
+      `${baseUrl}/api/adblock-proxy?url=${encodeURIComponent('https://vidlink.pro/api/mercury')}`
+    );
+    assert.equal(mercuryRes.status, 204);
+    assert.equal(mercuryRes.headers.get('x-cinebox-adblock'), 'blocked');
+
+    const localhostSsrf = await fetch(
+      `${baseUrl}/api/adblock-proxy?url=${encodeURIComponent('http://127.0.0.1:3000/api/health')}`
+    );
+    assert.equal(localhostSsrf.status, 400);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  // 6. Synced Android MainActivity.java null-body 204 & new domains check
+  const mainActivitySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(mainActivitySource.includes('rxqgeccsz.com'), true);
+  assert.equal(mainActivitySource.includes('1414.hexa.su'), true);
+  assert.equal(mainActivitySource.includes('new Response(null,{status:204})'), true);
+});
+
+test('71. VidSrc.sh Turnstile Detection, Proxy Static Asset Caching, /api/adblock-proxy/prewarm & Android CookieManager', async () => {
+  const fs = await import('node:fs');
+  const http = await import('node:http');
+  const path = await import('node:path');
+  const {
+    buildInFrameAdBlockScriptlet,
+    requiresDirectOriginForVerification,
+  } = await import('./adblockEngine');
+  const {
+    ADBLOCK_PREWARM_ENDPOINT,
+    buildAdBlockProxiedEmbedUrl,
+    prewarmAdBlockProxyForEmbed,
+  } = await import('./adblocker');
+  const { createCineboxServerApp } = await import('../../server');
+
+  // 1. Turnstile / origin-locked embed providers detected cleanly without blocking VidFast proxying
+  assert.equal(requiresDirectOriginForVerification('https://vidsrc.sh/embed/tv/84773/1/1'), true);
+  assert.equal(requiresDirectOriginForVerification('https://stellarconductornexus.com/embed/tv/84773/1/1'), true);
+  assert.equal(requiresDirectOriginForVerification('https://cloudnestra.com/rcp/abc'), true);
+  assert.equal(requiresDirectOriginForVerification('https://vidfast.pro/movie/550'), false);
+  assert.equal(requiresDirectOriginForVerification('https://vidlink.pro/movie/550'), false);
+  assert.equal(requiresDirectOriginForVerification('https://www.2embed.cc/embed/550'), false);
+  assert.equal(requiresDirectOriginForVerification('https://www.youtube.com/watch?v=abc'), false);
+
+  // 2. buildAdBlockProxiedEmbedUrl honors allowTurnstileDirectOrigin for Turnstile hosts while proxying VidFast/VidLink/2Embed
+  const vidsrcDirect = buildAdBlockProxiedEmbedUrl('https://vidsrc.sh/embed/tv/84773/1/1', {
+    isAdBlockerEnabled: true,
+    useBackendProxy: true,
+    allowTurnstileDirectOrigin: true,
+  });
+  assert.equal(vidsrcDirect, 'https://vidsrc.sh/embed/tv/84773/1/1');
+
+  const vidlinkProxied = buildAdBlockProxiedEmbedUrl('https://vidlink.pro/movie/550', {
+    isAdBlockerEnabled: true,
+    useBackendProxy: true,
+    allowTurnstileDirectOrigin: true,
+  });
+  assert.equal(vidlinkProxied.startsWith('/api/adblock-proxy?url='), true);
+
+  const twoEmbedProxied = buildAdBlockProxiedEmbedUrl('https://www.2embed.cc/embed/550', {
+    isAdBlockerEnabled: true,
+    useBackendProxy: true,
+    allowTurnstileDirectOrigin: true,
+  });
+  assert.equal(twoEmbedProxied.startsWith('/api/adblock-proxy?url='), true);
+
+  // 3. In-frame scriptlet never rewrites challenges.cloudflare.com through /api/adblock-proxy
+  const scriptlet = buildInFrameAdBlockScriptlet('https://vidlink.pro/movie/550', '/api/adblock-proxy');
+  assert.equal(scriptlet.includes('isDirectPassThroughHost(fu.hostname)'), true);
+
+  // 4. Client prewarm helper deduplicates repeated prewarm calls for the same embed URL
+  assert.equal(ADBLOCK_PREWARM_ENDPOINT, '/api/adblock-proxy/prewarm');
+  let prewarmCalls = 0;
+  const mockFetch = (async () => {
+    prewarmCalls += 1;
+    return { ok: true } as globalThis.Response;
+  }) as unknown as typeof fetch;
+  await prewarmAdBlockProxyForEmbed('https://vidlink.pro/tv/99901/1/1', mockFetch);
+  await prewarmAdBlockProxyForEmbed('https://vidlink.pro/tv/99901/1/1', mockFetch);
+  assert.equal(prewarmCalls, 1);
+
+  // 5. Server /api/health returns 1.0.12 and /api/adblock-proxy/prewarm rejects SSRF + ad targets with HTTP 400
+  const app = createCineboxServerApp();
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address() as { port: number };
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+  try {
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    assert.equal(healthRes.status, 200);
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.version, '1.0.12');
+
+    const prewarmSsrf = await fetch(
+      `${baseUrl}/api/adblock-proxy/prewarm?url=${encodeURIComponent('http://169.254.169.254/latest/meta-data/')}`
+    );
+    assert.equal(prewarmSsrf.status, 400);
+
+    const prewarmAd = await fetch(
+      `${baseUrl}/api/adblock-proxy/prewarm?url=${encodeURIComponent('https://rxqgeccsz.com/popunder.html')}`
+    );
+    assert.equal(prewarmAd.status, 400);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  // 6. VideoPlayerModal wires Turnstile-safe S1 mirror resolution + prewarm and NEVER uses sandbox
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('resolveEffectiveEmbedTargetUrl'), true);
+  assert.equal(modalSource.includes('prewarmAdBlockProxyForEmbed'), true);
+  assert.equal(modalSource.includes('requiresDirectOriginForVerification'), true);
+  assert.equal(/\bsandbox\s*=/.test(modalSource), false);
+
+  // 7. Android MainActivity.java carries v1.0.12 and forwards CookieManager cookies for Turnstile clearance
+  const mainActivitySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(mainActivitySource.includes('v1.0.12'), true);
+  assert.equal(mainActivitySource.includes('CookieManager.getInstance()'), true);
+});
+
+test('72. v1.0.12 Permanent AdBlocker & Smooth Playback: S1 Zero-Popup Mirror, Script/Next.js/SRI Rewriter Safety, Child Iframe Lock, /assets Routing & Android Sync', async () => {
+  const fs = await import('node:fs');
+  const http = await import('node:http');
+  const path = await import('node:path');
+  const {
+    buildInFrameAdBlockScriptlet,
+    isAdRequestUrl,
+    isHtmlEmbedProviderHost,
+    rewriteEmbedHtmlWithAdBlocker,
+  } = await import('./adblockEngine');
+  const { resolveEffectiveEmbedTargetUrl } = await import('./adblocker');
+  const { createCineboxServerApp } = await import('../../server');
+
+  // 1. Newly discovered popunder/analytics/beacon domains are blocked cleanly
+  const newAdUrls = [
+    'https://3omcbggo6pw6x3bn92rlehmtu88b.cfd/vvmro',
+    'https://y88fmn8r5.ghzfcfwj4ggcqqv7q3lu4rquy.rest/pop.js',
+    'https://umami.vidcore.net/script.js',
+    'https://unfortunatelyejectinflected.com/zone/123',
+    'https://lahochat.com/lcban.js',
+    'https://createlouisville.org/14/ca0843f2a5e7d293c826930890ccf5f5',
+    'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d8730',
+  ];
+  for (const adUrl of newAdUrls) {
+    assert.equal(isAdRequestUrl(adUrl), true, `Expected ${adUrl} to be blocked`);
+  }
+  assert.equal(isHtmlEmbedProviderHost('2embed.skin'), true);
+  assert.equal(isHtmlEmbedProviderHost('vidcore.io'), true);
+
+  // 2. S1 (VidSrc.sh) upgrades to Turnstile-free ad-free VidFast mirror ONLY when Web AdBlocker + proxy are active;
+  //    stays VidSrc.sh on Android APK or when AdBlocker is OFF
+  const webMovieS1 = resolveEffectiveEmbedTargetUrl('https://vidsrc.sh/embed/movie/550?ds_lang=en', {
+    isAdBlockerEnabled: true,
+    useBackendProxy: true,
+    isNativeAndroidEnv: false,
+  });
+  assert.equal(webMovieS1.startsWith('https://vidfast.vc/movie/550'), true);
+
+  const webTvS1 = resolveEffectiveEmbedTargetUrl('https://vidsrc.sh/embed/tv/84773/1/2?ds_lang=en', {
+    isAdBlockerEnabled: true,
+    useBackendProxy: true,
+    isNativeAndroidEnv: false,
+  });
+  assert.equal(webTvS1.startsWith('https://vidfast.vc/tv/84773/1/2'), true);
+
+  const androidS1 = resolveEffectiveEmbedTargetUrl('https://vidsrc.sh/embed/movie/550?ds_lang=en', {
+    isAdBlockerEnabled: true,
+    useBackendProxy: true,
+    isNativeAndroidEnv: true,
+  });
+  assert.equal(androidS1, 'https://vidsrc.sh/embed/movie/550?ds_lang=en');
+
+  const adblockOffS1 = resolveEffectiveEmbedTargetUrl('https://vidsrc.sh/embed/movie/550?ds_lang=en', {
+    isAdBlockerEnabled: false,
+    useBackendProxy: true,
+    isNativeAndroidEnv: false,
+  });
+  assert.equal(adblockOffS1, 'https://vidsrc.sh/embed/movie/550?ds_lang=en');
+
+  // 3. Inline JS strings containing "<iframe src=...>" or "<a href=...>" inside core player bundles NEVER corrupt JS syntax
+  const inlineJsHtml = `<html><head></head><body>
+    <script src="https://tagivi.com/1/82896b23.js"></script>
+    <script>var tpl = '<iframe src="https://vidsrc.buzz/embed/movie/550"></iframe><a href="https://adplox.com">x</a>'; bootWhenVisible();</script>
+  </body></html>`;
+  const rewrittenInline = rewriteEmbedHtmlWithAdBlocker(inlineJsHtml, 'https://www.2embed.cc/embed/550');
+  assert.equal(rewrittenInline.html.includes('tagivi.com/1/82896b23.js'), false);
+  assert.equal(
+    rewrittenInline.html.includes(`'<iframe src="https://vidsrc.buzz/embed/movie/550"></iframe>'`),
+    false
+  );
+  assert.equal(
+    rewrittenInline.html.includes(`<iframe src="https://vidsrc.buzz/embed/movie/550"></iframe>`),
+    true
+  );
+
+  // 4. Next.js hydration & SRI fix: blocked external scripts strip integrity= and keep empty script elements
+  const nextHtml = `<html><head><link rel="preload" href="https://mc.yandex.ru/watch/123" integrity="sha512-abc"/></head><body><script src="/_next/static/chunks/app.js"></script><script src="https://static.cloudflareinsights.com/beacon.min.js/v123" integrity="sha512-z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg"></script></body></html>`;
+  const nextOut = rewriteEmbedHtmlWithAdBlocker(nextHtml, 'https://vidfast.vc/movie/550');
+  assert.equal(nextOut.html.includes('integrity="sha512-z4PhNX'), false);
+  assert.equal(nextOut.html.includes('integrity="sha512-abc'), false);
+  assert.equal(nextOut.html.includes('data-cinebox-blocked="1"'), true);
+
+  // 5. In-frame scriptlet includes native-mimic console.table + child iframe contentWindow.open lock
+  const scriptlet = buildInFrameAdBlockScriptlet('https://vidfast.vc/movie/550', '/api/adblock-proxy');
+  assert.equal(scriptlet.includes('function table(data)'), true);
+  assert.equal(scriptlet.includes('lockChildWindowOpen'), true);
+  assert.doesNotThrow(() =>
+    new Function(scriptlet.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, ''))
+  );
+
+  // 6. Server returns 200 OK JS stub for versioned .js/* beacon URLs (avoiding strict MIME errors) & 1.0.12 on /api/health
+  const app = createCineboxServerApp();
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address() as { port: number };
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+  try {
+    const beaconRes = await fetch(
+      `${baseUrl}/api/adblock-proxy?url=${encodeURIComponent(
+        'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d8730'
+      )}`
+    );
+    assert.equal(beaconRes.status, 200);
+    assert.equal((beaconRes.headers.get('content-type') || '').includes('javascript'), true);
+    assert.equal(beaconRes.headers.get('x-cinebox-adblock'), 'blocked');
+
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.version, '1.0.12');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  // 7. Android assets & MainActivity synced for v1.0.12
+  const txt = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/assets/adblock_domains.txt'),
+    'utf8'
+  );
+  assert.equal(txt.includes('ghzfcfwj4ggcqqv7q3lu4rquy.rest'), true);
+  assert.equal(txt.includes('createlouisville.org'), true);
+  const mainActivitySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  assert.equal(mainActivitySource.includes('v1.0.12'), true);
+  assert.equal(mainActivitySource.includes('3omcbggo6pw6x3bn92rlehmtu88b.cfd'), true);
+  assert.equal(mainActivitySource.includes('contentWindow'), true);
+});
+
+
+
+
+
+
+
+
 
 
 

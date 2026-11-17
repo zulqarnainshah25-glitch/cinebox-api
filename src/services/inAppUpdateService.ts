@@ -5,7 +5,7 @@ import { AppConfigRecord } from '../types/movie';
 import { sanitizeSafeUrl } from '../utils/securityValidator';
 import { DetectedPlatform, detectAppPlatform } from './platformTrialReferralService';
 
-export const DEFAULT_CURRENT_APP_VERSION = '1.0.3';
+export const DEFAULT_CURRENT_APP_VERSION = '1.0.12';
 export const DEFAULT_VERSION_JSON_URL = '/version.json';
 export const DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL =
   'https://script.google.com/macros/s/AKfycbxFNwn6R_Msl86xQeDY25OGSEZcUl-9hAukbxzWbSLT__wZ9oF6L_XMLCHRLOTgm9QqVg/exec';
@@ -503,8 +503,8 @@ android {
         applicationId "com.cinebox.stream"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 3
-        versionName "1.0.3"
+        versionCode 12
+        versionName "1.0.12"
     }
 
     // IMPORTANT: Signature-Safe Release Signing Config
@@ -848,7 +848,7 @@ export async function checkGitHubLatestReleaseUpdate(options?: {
   }
 
   // 2. Call Deployed Google Apps Script Web App URL (`DEFAULT_GOOGLE_APPS_SCRIPT_VERSION_URL`)
-  // Expects JSON format: `{ "version": "1.0.3", "apk_url": "https://...", "release_notes": "..." }`
+  // Expects JSON format: `{ "version": "1.0.12", "apk_url": "https://...", "release_notes": "..." }`
   // Uses `redirect: 'follow'` because Google Apps Script `/macros/s/.../exec` 302-redirects to `script.googleusercontent.com`.
   const reqHeaders: Record<string, string> = {
     Accept: 'application/json',

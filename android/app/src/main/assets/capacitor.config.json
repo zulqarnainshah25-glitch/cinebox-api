@@ -4,12 +4,17 @@
 	"webDir": "dist",
 	"bundledWebRuntime": false,
 	"server": {
-		"url": "https://cineboxmovies.ai.studio/",
-		"cleartext": true
+		"androidScheme": "https",
+		"cleartext": false
+	},
+	"android": {
+		"allowMixedContent": false,
+		"captureInput": true,
+		"webContentsDebuggingEnabled": false
 	},
 	"plugins": {
-		"Filesystem": {
-			"iosDocumentPickerEnabled": true
+		"CapacitorHttp": {
+			"enabled": true
 		}
 	}
 }

@@ -1639,7 +1639,7 @@ const DEVICE_USER_ID_STORAGE_KEY = 'cinebox_device_user_id_v1';
 const USER_SETTINGS_STORAGE_KEY = 'cinebox_user_app_settings_v1';
 
 export const DEFAULT_USER_APP_SETTINGS: UserAppSettings = {
-  defaultServer: 'auto-server-vidfast',
+  defaultServer: 'auto-server-vidlink',
   defaultDownloadQuality: '720p',
   autoPlayVideo: true,
   wifiOnlyDownloads: false,

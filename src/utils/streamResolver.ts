@@ -20,8 +20,59 @@ import {
 
 export type { AlternateLanguageStream, EmbedServerOption, VerifiedAudioTrack };
 
-export const PREFERRED_EMBED_SERVER_ID = 'auto-server-vidfast';
-export const CONTROLS_AUTO_HIDE_MS = 2000;
+export const PREFERRED_EMBED_SERVER_ID = 'auto-server-vidlink';
+export const CONTROLS_AUTO_HIDE_MS = 3000;
+export const FULLSCREEN_CONTROLS_AUTO_HIDE_MS = 3000;
+export {
+  ADBLOCK_HEALTH_ENDPOINT,
+  ADBLOCK_PROXY_ENDPOINT,
+  ADBLOCK_TOAST_DISABLED,
+  ADBLOCK_TOAST_ENABLED,
+  ADBLOCK_TOAST_TRAP_BLOCKED,
+  AD_SERVING_DOMAINS,
+  buildAdBlockProxiedEmbedUrl,
+  buildEmbedAdBlockCssRules,
+  buildInFrameAdBlockScriptlet,
+  buildVidSrcAdBlockCssRules,
+  CLICK_SHIELD_REARM_IDLE_MS,
+  CLICK_SHIELD_UNLOCK_WINDOW_MS,
+  createBlurHijackEvaluator,
+  createIframeRequestInterceptor,
+  EMBED_AD_BLOCKLIST_DOMAINS,
+  extractSafeHostname,
+  getAdBlockerIframeSandbox,
+  getCleanIframeAttributes,
+  getEmbedAdBlockerIframeAttributes,
+  getEmbedIframeProviderKey,
+  getVidSrcPlayerIframeAttributes,
+  installEmbedIframeAdInterceptor,
+  installVidSrcNetworkAdInterceptor,
+  isAdServingRequestUrl,
+  isEmbedAdNetworkUrl,
+  isEmbedIframeVideoSourceUrl,
+  isHtmlEmbedProviderHost,
+  isKnownAdServingDomain,
+  isPrivateOrReservedIp,
+  isVidSrcAdNetworkUrl,
+  isVidSrcProviderUrl,
+  parseAdBlockTelemetryMessage,
+  parseHostsTextIntoSet,
+  probeAdBlockProxyHealth,
+  registerExtraAdBlockDomains,
+  resolveEffectiveEmbedTargetUrl,
+  rewriteEmbedHtmlWithAdBlocker,
+  sanitizeEmbedIframeRequestUrl,
+  validateProxyTargetUrl,
+  VIDSRC_AD_BLOCKLIST_DOMAINS,
+} from './adblocker';
+export type {
+  AdBlockerStats,
+  BlurHijackEvaluation,
+  EmbedIframeProviderKey,
+  IframeRequestInterceptorOptions,
+  InFrameAdBlockTelemetry,
+  VidSrcInterceptKind,
+} from './adblocker';
 
 export const FALLBACK_TEST_MP4_720P =
   'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
@@ -125,8 +176,8 @@ export function removeRecentSearchQuery(existing: string[], queryToRemove: strin
 /**
  * Builds active Auto-Embed servers for Movies (`movie`) and TV Series (`tv`):
  * - Source 1: VidSrc.sh (`auto-server-1`)
- * - Source 2: VidLink.pro (`auto-server-vidlink`)
- * - Source 3: VidFast (`auto-server-vidfast` — Preferred Default with Original Audio & Rapid/Blaze)
+ * - Source 2: VidLink.pro (`auto-server-vidlink` — Preferred Default, verified proxied playback + AdBlocker)
+ * - Source 3: VidFast (`auto-server-vidfast`)
  * - Source 4: 2Embed (`auto-server-3`)
  */
 export function buildEmbedServerList(
@@ -214,404 +265,7 @@ export function buildEmbedServerList(
   return servers;
 }
 
-/**
- * Known popup, popunder, and click-hijack ad domains loaded by VidSrc.sh.
- * Used by the VidSrc.sh AdBlocker to block ad scripts & redirect targets.
- */
-export const VIDSRC_AD_BLOCKLIST_DOMAINS: readonly string[] = Object.freeze([
-  'doubleclick.net',
-  'googlesyndication.com',
-  'adsterra.com',
-  'popads.net',
-  'popcash.net',
-  'propellerads.com',
-  'onclickads.net',
-  'onclickperformance.com',
-  'adcash.com',
-  'acscdn.com',
-  'exoclick.com',
-  'juicyads.com',
-  'tsyndicate.com',
-  'rtmark.net',
-  'histats.com',
-  's10.histats.com',
-  'sstatic1.histats.com',
-  'trafficjunky.net',
-  'clickadu.com',
-  'hilltopads.net',
-  'admaven.com',
-  'galaksion.com',
-  'a-ads.com',
-  'outbrain.com',
-  'taboola.com',
-  'mc.yandex.ru',
-  'bnhtml.com',
-  'roudodu.com',
-  'cdn4ads.com',
-  'adsco.re',
-  'pushame.com',
-  'notix.io',
-]);
-
-/**
- * Returns `true` ONLY if the given URL belongs to `vidsrc.sh` (or `*.vidsrc.sh`).
- * Ensures the VidSrc.sh AdBlocker targets only VidSrc.sh and never interferes with other servers.
- */
-export function isVidSrcProviderUrl(rawUrl?: string | null): boolean {
-  const safe = sanitizeSafeUrl(rawUrl);
-  if (!safe) return false;
-  try {
-    const parsed = new URL(safe);
-    const host = parsed.hostname.toLowerCase();
-    return host === 'vidsrc.sh' || host.endsWith('.vidsrc.sh');
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Returns `true` if a URL is a known VidSrc.sh popup/popunder ad network domain or ad script path.
- * Includes reverse-engineered signatures for:
- * - `stellarconductornexus.com/embed/<32-hex-md5>.js` (Adcash `aclib.runPop` loader)
- * - `vidsrc.sh` SHA-256 DGA popunder TLDs (`.u08`, `.olfm`, `.uqa9`) & `/vgmoo` paths
- * - `vidsrc.sh/assets/sbx.js` sandbox-detector script
- */
-export function isVidSrcAdNetworkUrl(rawUrl?: string | null): boolean {
-  if (!rawUrl || typeof rawUrl !== 'string') return false;
-  const trimmed = rawUrl.trim().toLowerCase();
-  if (!trimmed) return false;
-
-  try {
-    const parsed = new URL(trimmed.startsWith('//') ? `https:${trimmed}` : trimmed);
-    const host = parsed.hostname.toLowerCase();
-    for (const adDomain of VIDSRC_AD_BLOCKLIST_DOMAINS) {
-      if (host === adDomain || host.endsWith(`.${adDomain}`)) {
-        return true;
-      }
-    }
-    if (
-      host.endsWith('.u08') ||
-      host.endsWith('.olfm') ||
-      host.endsWith('.uqa9')
-    ) {
-      return true;
-    }
-    const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase();
-    if (
-      pathAndQuery.includes('/popunder') ||
-      pathAndQuery.includes('/pop.js') ||
-      pathAndQuery.includes('/adserver') ||
-      pathAndQuery.includes('/assets/sbx.js') ||
-      pathAndQuery.includes('/vgmoo') ||
-      pathAndQuery.includes('clickid=') ||
-      pathAndQuery.includes('zoneid=') ||
-      /\/embed\/[0-9a-f]{32}\.js/.test(pathAndQuery)
-    ) {
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Returns clean, sandbox-free iframe attributes (`src` and `allowFullScreen` only)
- * for general embed providers.
- */
-export function getCleanIframeAttributes(
-  rawUrl?: string | null,
-  title: string = 'Movie Stream Player'
-): {
-  src: string;
-  allowFullScreen: true;
-  title: string;
-  sandbox?: undefined;
-} {
-  const safeSrc = sanitizeSafeUrl(rawUrl) || '';
-  return {
-    src: safeSrc,
-    allowFullScreen: true,
-    title: title.trim() || 'Movie Stream Player',
-  };
-}
-
-/**
- * Returns iframe attributes with real VidSrc.sh AdBlocker enforcement:
- * - When `rawUrl` is `vidsrc.sh` and `isAdBlockerEnabled` is `true`, returns
- *   `isVidSrcTarget: true`, `isVidSrcAdBlockerActive: true`, and `sandbox` metadata.
- *   Note: On web browsers, `<iframe src="https://vidsrc.sh/embed/...">` must NOT
- *   receive the raw HTML `sandbox` attribute directly because `vidsrc.sh/assets/sbx.js`
- *   checks `document.domain` and redirects sandboxed frames to `/sandbox.php`
- *   ("This content can't be embedded in a sandboxed frame"). Instead, web browsers
- *   use the CSS Hiding Layer + Network Interceptor + Interactive Click-Shield Guard,
- *   while Android APK intercepts `/assets/sbx.js` and ad scripts natively in `MainActivity.java`.
- */
-export function getVidSrcPlayerIframeAttributes(
-  rawUrl?: string | null,
-  title: string = 'Movie Stream Player',
-  isAdBlockerEnabled: boolean = true
-): {
-  src: string;
-  allowFullScreen: true;
-  title: string;
-  sandbox?: string;
-  isVidSrcTarget: boolean;
-  isVidSrcAdBlockerActive: boolean;
-} {
-  const safeSrc = sanitizeSafeUrl(rawUrl) || '';
-  const isVidSrcTarget = isVidSrcProviderUrl(safeSrc);
-  const isVidSrcAdBlockerActive = isVidSrcTarget && Boolean(isAdBlockerEnabled);
-
-  if (isVidSrcAdBlockerActive) {
-    return {
-      src: safeSrc,
-      allowFullScreen: true,
-      title: title.trim() || 'Movie Stream Player',
-      sandbox: 'allow-scripts allow-same-origin allow-forms allow-presentation',
-      isVidSrcTarget: true,
-      isVidSrcAdBlockerActive: true,
-    };
-  }
-
-  return {
-    src: safeSrc,
-    allowFullScreen: true,
-    title: title.trim() || 'Movie Stream Player',
-    isVidSrcTarget,
-    isVidSrcAdBlockerActive: false,
-  };
-}
-
-/**
- * Generates targeted CSS hiding rules specifically for `vidsrc.sh` ad overlays,
- * popunder containers, and ad-network iframes/anchors when the Adblocker toggle switch is enabled.
- * Returns an empty string when disabled or when a non-VidSrc server is active.
- */
-export function buildVidSrcAdBlockCssRules(
-  isAdBlockerEnabled: boolean,
-  isVidSrcTarget: boolean
-): string {
-  if (!isAdBlockerEnabled || !isVidSrcTarget) {
-    return '';
-  }
-
-  const domainSelectors = VIDSRC_AD_BLOCKLIST_DOMAINS.map(
-    (domain) =>
-      `iframe[src*="${domain}"], script[src*="${domain}"], a[href*="${domain}"], div[data-domain*="${domain}"]`
-  ).join(',\n  ');
-
-  return `
-  /* CineBox VidSrc.sh Targeted AdBlocker CSS Hiding Layer */
-  ${domainSelectors},
-  [id*="popunder"],
-  [class*="popunder"],
-  [id*="ad-overlay"],
-  [class*="ad-overlay"],
-  [id*="clickjack"],
-  [class*="clickjack"],
-  [data-ad-zone],
-  [data-adblock-hide="true"],
-  a[target="_blank"][href*="clickid="],
-  a[target="_blank"][href*="zoneid="] {
-    display: none !important;
-    visibility: hidden !important;
-    opacity: 0 !important;
-    pointer-events: none !important;
-    width: 0 !important;
-    height: 0 !important;
-    max-width: 0 !important;
-    max-height: 0 !important;
-    overflow: hidden !important;
-    position: absolute !important;
-    z-index: -9999 !important;
-  }
-
-  /* Keep the primary vidsrc.sh video iframe interactive while hiding injected sibling overlays */
-  [data-vidsrc-adblock="active"] > iframe[data-vidsrc-iframe="true"] {
-    display: block !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-    pointer-events: auto !important;
-  }
-
-  [data-vidsrc-adblock="active"] > :not(iframe[data-vidsrc-iframe="true"]):not([data-testid="vidsrc-adblock-toast"]):not([data-testid="vidsrc-click-shield-layer"]) {
-    display: none !important;
-    pointer-events: none !important;
-  }
-`.trim();
-}
-
-export type VidSrcInterceptKind =
-  | 'fetch'
-  | 'xhr'
-  | 'popup'
-  | 'dom-node'
-  | 'focus-steal'
-  | 'clickjack-shield';
-
-/**
- * Installs a runtime ad-filtering logic layer specifically when a `vidsrc.sh` iframe is active
- * and the Adblocker toggle switch is ON:
- * 1. Intercepts `window.fetch` requests to known ad networks (`isVidSrcAdNetworkUrl`) and returns 204.
- * 2. Intercepts `XMLHttpRequest.prototype.open` / `send` requests to known ad networks.
- * 3. Intercepts `window.open` popup tabs triggered by clickjacking scripts.
- * 4. Observes DOM mutations to strip dynamically injected ad `<script>` / `<iframe>` / `<a>` elements.
- * 5. Refocuses the player window if a cross-origin iframe attempts a blur/focus-steal popunder.
- *
- * Returns a cleanup callback that restores all native APIs immediately when toggled OFF or unmounted.
- */
-export function installVidSrcNetworkAdInterceptor(options: {
-  enabled: boolean;
-  isVidSrcTarget: boolean;
-  onAdBlocked?: (blockedUrl: string, kind: VidSrcInterceptKind) => void;
-  targetWindow?: any;
-  targetDocument?: any;
-}): () => void {
-  const { enabled, isVidSrcTarget, onAdBlocked } = options;
-  if (!enabled || !isVidSrcTarget) {
-    return () => {};
-  }
-
-  const win = options.targetWindow ?? (typeof window !== 'undefined' ? window : null);
-  const doc = options.targetDocument ?? (typeof document !== 'undefined' ? document : null);
-  if (!win) {
-    return () => {};
-  }
-
-  // 1. Intercept window.fetch for VidSrc ad-network URLs
-  const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
-  if (originalFetch) {
-    win.fetch = async (input: any, init?: any) => {
-      const rawUrl =
-        typeof input === 'string'
-          ? input
-          : input && typeof input.url === 'string'
-          ? input.url
-          : String(input || '');
-
-      if (isVidSrcAdNetworkUrl(rawUrl)) {
-        onAdBlocked?.(rawUrl, 'fetch');
-        if (typeof Response !== 'undefined') {
-          return new Response(null, {
-            status: 204,
-            statusText: 'Blocked by CineBox VidSrc AdBlocker',
-          });
-        }
-        return { ok: true, status: 204, text: async () => '', json: async () => ({}) };
-      }
-      return originalFetch(input, init);
-    };
-  }
-
-  // 2. Intercept XMLHttpRequest for VidSrc ad-network URLs
-  const XhrProto = win.XMLHttpRequest?.prototype;
-  const originalXhrOpen = XhrProto?.open;
-  const originalXhrSend = XhrProto?.send;
-  if (XhrProto && typeof originalXhrOpen === 'function' && typeof originalXhrSend === 'function') {
-    XhrProto.open = function (method: string, url: string, ...rest: any[]) {
-      (this as any).__cineboxBlockedAdUrl = isVidSrcAdNetworkUrl(url) ? String(url) : null;
-      return originalXhrOpen.call(this, method, url, ...rest);
-    };
-    XhrProto.send = function (body?: any) {
-      const blockedUrl = (this as any).__cineboxBlockedAdUrl;
-      if (blockedUrl) {
-        onAdBlocked?.(blockedUrl, 'xhr');
-        try {
-          Object.defineProperty(this, 'status', { value: 204, configurable: true });
-          Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
-          Object.defineProperty(this, 'responseText', { value: '', configurable: true });
-        } catch {
-          // ignore
-        }
-        return;
-      }
-      return originalXhrSend.call(this, body);
-    };
-  }
-
-  // 3. Intercept window.open popup windows
-  const originalWindowOpen = win.open;
-  win.open = (url?: string | URL) => {
-    onAdBlocked?.(String(url || 'window.open'), 'popup');
-    return null;
-  };
-
-  // 4. Intercept focus-stealing popunders when clicking inside the vidsrc.sh iframe
-  const handleWindowBlur = () => {
-    if (doc?.activeElement && doc.activeElement.tagName === 'IFRAME') {
-      onAdBlocked?.('vidsrc.sh://iframe-focus-popup', 'focus-steal');
-      try {
-        win.focus?.();
-      } catch {
-        // ignore
-      }
-    }
-  };
-  win.addEventListener?.('blur', handleWindowBlur);
-
-  // 5. Intercept click events on injected ad anchors & MutationObserver for injected ad nodes
-  const handleDocumentClickCapture = (ev: any) => {
-    const target = ev?.target?.closest?.('a') as HTMLAnchorElement | null;
-    if (!target) return;
-    const href = target.getAttribute?.('href') || target.href || '';
-    if (isVidSrcAdNetworkUrl(href)) {
-      ev.preventDefault?.();
-      ev.stopPropagation?.();
-      onAdBlocked?.(href, 'dom-node');
-    }
-  };
-  doc?.addEventListener?.('click', handleDocumentClickCapture, true);
-
-  let observer: MutationObserver | null = null;
-  if (typeof MutationObserver !== 'undefined' && doc?.body) {
-    observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        const added = Array.from(mutation.addedNodes || []);
-        for (const node of added) {
-          const el = node as HTMLElement;
-          if (!el || typeof el.tagName !== 'string') continue;
-          const tag = el.tagName.toUpperCase();
-          if (tag === 'SCRIPT' || tag === 'IFRAME' || tag === 'A') {
-            const srcOrHref =
-              el.getAttribute?.('src') ||
-              el.getAttribute?.('href') ||
-              (el as any).src ||
-              (el as any).href ||
-              '';
-            if (isVidSrcAdNetworkUrl(srcOrHref)) {
-              el.setAttribute?.('data-adblock-hide', 'true');
-              try {
-                el.remove?.();
-              } catch {
-                // ignore
-              }
-              onAdBlocked?.(srcOrHref, 'dom-node');
-            }
-          }
-        }
-      }
-    });
-    observer.observe(doc.body, { childList: true, subtree: true });
-  }
-
-  return () => {
-    if (originalFetch) {
-      win.fetch = originalFetch;
-    }
-    if (XhrProto && originalXhrOpen && originalXhrSend) {
-      XhrProto.open = originalXhrOpen;
-      XhrProto.send = originalXhrSend;
-    }
-    win.open = originalWindowOpen;
-    win.removeEventListener?.('blur', handleWindowBlur);
-    doc?.removeEventListener?.('click', handleDocumentClickCapture, true);
-    if (observer) {
-      observer.disconnect();
-      observer = null;
-    }
-  };
-}
+// Re-exported from ./adblocker at top of file.
 
 /**
  * Resolves the Hybrid Video Player plan for a given `tmdb_id`, `mediaType`, `season`, `episode`,
@@ -1132,7 +786,20 @@ export async function lockScreenOrientationSafely(
     }
 
     if (typeof orientationApi.lock === 'function') {
-      await orientationApi.lock(mode);
+      try {
+        await orientationApi.lock(mode);
+        return { ok: true, mode };
+      } catch {
+        if (mode === 'portrait' && typeof orientationApi.unlock === 'function') {
+          orientationApi.unlock();
+          return { ok: true, mode };
+        }
+        return { ok: false, mode };
+      }
+    }
+
+    if (mode === 'portrait' && typeof orientationApi.unlock === 'function') {
+      orientationApi.unlock();
       return { ok: true, mode };
     }
     return { ok: false, mode };

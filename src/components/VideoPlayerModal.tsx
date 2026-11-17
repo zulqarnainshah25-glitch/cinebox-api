@@ -11,6 +11,7 @@ import {
   Loader2,
   Maximize2,
   Minimize2,
+  Play,
   RefreshCw,
   Save,
   Share2,
@@ -20,6 +21,7 @@ import {
   Sparkles,
   Tv,
   Volume2,
+  X,
 } from 'lucide-react';
 import {
   AppConfigRecord,
@@ -31,27 +33,35 @@ import {
 } from '../types/movie';
 import {
   AlternateLanguageStream,
-  auditStickyAncestors,
-  buildVidSrcAdBlockCssRules,
   computeNextControlsVisibility,
   CONTROLS_AUTO_HIDE_MS,
   formatPlayerTimecode,
-  getCleanIframeAttributes,
+  FULLSCREEN_CONTROLS_AUTO_HIDE_MS,
   getFullscreenPlayerConfig,
-  getStickyPlayerWrapperClassName,
-  getVidSrcPlayerIframeAttributes,
-  installVidSrcNetworkAdInterceptor,
-  isVidSrcProviderUrl,
   lockScreenOrientationSafely,
   PLAYABLE_HD_STREAMS_POOL,
   PREFERRED_EMBED_SERVER_ID,
   resolvePlaybackPlan,
-  resolveStickyPlayerPositionStrategy,
-  shouldEnableStickyPlayerOnScroll,
-  STICKY_EMBED_SCROLL_THRESHOLD_PX,
-  supportsCssStickyPosition,
   VerifiedAudioTrack,
 } from '../utils/streamResolver';
+import {
+  ADBLOCK_TOAST_DISABLED,
+  ADBLOCK_TOAST_ENABLED,
+  ADBLOCK_TOAST_TRAP_BLOCKED,
+  buildAdBlockProxiedEmbedUrl,
+  buildEmbedAdBlockCssRules,
+  CLICK_SHIELD_REARM_IDLE_MS,
+  CLICK_SHIELD_UNLOCK_WINDOW_MS,
+  createIframeRequestInterceptor,
+  getCleanIframeAttributes,
+  getEmbedAdBlockerIframeAttributes,
+  parseAdBlockTelemetryMessage,
+  prewarmAdBlockProxyForEmbed,
+  probeAdBlockProxyHealth,
+  requiresDirectOriginForVerification,
+  resolveEffectiveEmbedTargetUrl,
+  sanitizeEmbedIframeRequestUrl,
+} from '../utils/adblocker';
 import {
   detectAppPlatform,
   shareMovieOrSeriesLink,
@@ -265,39 +275,169 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [isSavingLink, setIsSavingLink] = useState<boolean>(false);
   const [linkSaveMessage, setLinkSaveMessage] = useState<string | null>(null);
 
-  // AdBlocker always defaults to ON when opening the player; user can toggle OFF anytime
+  // AdBlocker defaults to ON; backed by real SSRF-safe /api/adblock-proxy (Web) + native WebView blocker (Android)
   const [isVidSrcAdBlockerEnabled, setIsVidSrcAdBlockerEnabled] = useState<boolean>(true);
+  const [isWebAdblockProxyReady, setIsWebAdblockProxyReady] = useState<boolean>(false);
+  const [isClickShieldArmed, setIsClickShieldArmed] = useState<boolean>(false);
   const [blockedAdsCount, setBlockedAdsCount] = useState<number>(0);
   const [adBlockToast, setAdBlockToast] = useState<string | null>(null);
+  const adBlockToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shieldRearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shieldUnlockedUntilRef = useRef<number>(0);
+  const userManuallySelectedServerRef = useRef<boolean>(false);
+
+  const isNativeAndroidEnv = detectAppPlatform() === 'Android';
+  const currentSelectedEmbedUrl =
+    (plan.embedServers.find((s) => s.id === selectedEmbedId) || plan.embedServers[0])?.url || '';
+  const effectiveSelectedEmbedUrl = resolveEffectiveEmbedTargetUrl(currentSelectedEmbedUrl, {
+    isAdBlockerEnabled: isVidSrcAdBlockerEnabled,
+    useBackendProxy: isWebAdblockProxyReady && !isNativeAndroidEnv,
+    isNativeAndroidEnv,
+  });
+  const isTurnstileDirectEmbed =
+    !isNativeAndroidEnv && requiresDirectOriginForVerification(effectiveSelectedEmbedUrl);
+  const hasRealInFrameShield =
+    isNativeAndroidEnv || (isWebAdblockProxyReady && !isTurnstileDirectEmbed);
+  const hasRealInFrameShieldRef = useRef<boolean>(hasRealInFrameShield);
+  hasRealInFrameShieldRef.current = hasRealInFrameShield;
+
+  useEffect(() => {
+    if (isNativeAndroidEnv) return;
+    let active = true;
+    probeAdBlockProxyHealth()
+      .then((res) => {
+        if (!active) return;
+        setIsWebAdblockProxyReady(res.available);
+        const upgradedTarget = resolveEffectiveEmbedTargetUrl(currentSelectedEmbedUrl, {
+          isAdBlockerEnabled: isVidSrcAdBlockerEnabled,
+          useBackendProxy: res.available,
+          isNativeAndroidEnv,
+        });
+        const currentDirectTurnstile = requiresDirectOriginForVerification(upgradedTarget);
+        setIsClickShieldArmed(!res.available || currentDirectTurnstile);
+      })
+      .catch(() => {
+        if (!active) return;
+        setIsWebAdblockProxyReady(false);
+        setIsClickShieldArmed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isNativeAndroidEnv]);
+
+  // Quietly prewarm proxy DNS + static chunks while user views Detail Page so Play starts rapidly
+  useEffect(() => {
+    if (isNativeAndroidEnv || !isWebAdblockProxyReady || !isVidSrcAdBlockerEnabled) return;
+    if (effectiveSelectedEmbedUrl && !requiresDirectOriginForVerification(effectiveSelectedEmbedUrl)) {
+      void prewarmAdBlockProxyForEmbed(effectiveSelectedEmbedUrl);
+    } else {
+      const vidLinkCandidate = plan.embedServers.find(
+        (s) => !requiresDirectOriginForVerification(s.url)
+      )?.url;
+      if (vidLinkCandidate) {
+        void prewarmAdBlockProxyForEmbed(vidLinkCandidate);
+      }
+    }
+    const vidFastBackupUrl = plan.embedServers.find((s) => s.id === 'auto-server-vidfast')?.url;
+    if (vidFastBackupUrl && vidFastBackupUrl !== effectiveSelectedEmbedUrl) {
+      void prewarmAdBlockProxyForEmbed(vidFastBackupUrl);
+    }
+  }, [
+    isNativeAndroidEnv,
+    isWebAdblockProxyReady,
+    isVidSrcAdBlockerEnabled,
+    effectiveSelectedEmbedUrl,
+    movie.id,
+    selectedSeason,
+    selectedEpisode,
+  ]);
+
+  const showSynchronizedAdBlockToast = (message: string) => {
+    if (adBlockToastTimerRef.current) {
+      clearTimeout(adBlockToastTimerRef.current);
+      adBlockToastTimerRef.current = null;
+    }
+    setAdBlockToast(message);
+    adBlockToastTimerRef.current = setTimeout(() => {
+      setAdBlockToast(null);
+      adBlockToastTimerRef.current = null;
+    }, 3000);
+  };
+
+  const clearClickShieldRearmTimer = () => {
+    if (shieldRearmTimerRef.current) {
+      clearTimeout(shieldRearmTimerRef.current);
+      shieldRearmTimerRef.current = null;
+    }
+  };
+
+  const scheduleClickShieldRearm = () => {
+    clearClickShieldRearmTimer();
+    if (hasRealInFrameShieldRef.current) return;
+    const minUnlockRemaining = Math.max(0, shieldUnlockedUntilRef.current - Date.now());
+    const delayMs = Math.max(CLICK_SHIELD_REARM_IDLE_MS, minUnlockRemaining);
+    shieldRearmTimerRef.current = setTimeout(() => {
+      if (!hasRealInFrameShieldRef.current && Date.now() >= shieldUnlockedUntilRef.current) {
+        setIsClickShieldArmed(true);
+      }
+      shieldRearmTimerRef.current = null;
+    }, delayMs);
+  };
+
+  const armClickShieldImmediately = () => {
+    clearClickShieldRearmTimer();
+    shieldUnlockedUntilRef.current = 0;
+    setIsClickShieldArmed(!hasRealInFrameShieldRef.current);
+  };
+
+  const handleAbsorbShieldTrapClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isVidSrcAdBlockerEnabled) return;
+
+    setBlockedAdsCount((c) => c + 1);
+    showSynchronizedAdBlockToast(ADBLOCK_TOAST_TRAP_BLOCKED);
+    shieldUnlockedUntilRef.current = Date.now() + CLICK_SHIELD_UNLOCK_WINDOW_MS;
+    setIsClickShieldArmed(false);
+    scheduleClickShieldRearm();
+
+    try {
+      window.focus?.();
+    } catch {
+      // ignore
+    }
+  };
 
   const handleToggleVidSrcAdBlocker = () => {
-    setIsVidSrcAdBlockerEnabled((prev) => {
-      const next = !prev;
-      setAdBlockToast(
-        next
-          ? '🛡️ AdBlocker Enabled — Popup & Redirect Ads Blocked'
-          : '⚠️ AdBlocker Disabled'
-      );
-      return next;
-    });
+    const nextEnabled = !isVidSrcAdBlockerEnabled;
+    setIsVidSrcAdBlockerEnabled(nextEnabled);
+    if (nextEnabled) {
+      armClickShieldImmediately();
+      showSynchronizedAdBlockToast(ADBLOCK_TOAST_ENABLED);
+    } else {
+      clearClickShieldRearmTimer();
+      shieldUnlockedUntilRef.current = 0;
+      setIsClickShieldArmed(false);
+      showSynchronizedAdBlockToast(ADBLOCK_TOAST_DISABLED);
+    }
   };
 
   useEffect(() => {
-    if (!adBlockToast) return;
-    const timer = setTimeout(() => setAdBlockToast(null), 3000);
-    return () => clearTimeout(timer);
-  }, [adBlockToast]);
+    return () => {
+      if (adBlockToastTimerRef.current) {
+        clearTimeout(adBlockToastTimerRef.current);
+      }
+      clearClickShieldRearmTimer();
+    };
+  }, []);
 
-  // Direct HTML5 & HLS Player State (No fake 596s default duration!)
+  // Direct HTML5, HLS & On-Demand Theater Player Modal State
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  const stickyWrapperRef = useRef<HTMLDivElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
+  const [isPlayerModalOpen, setIsPlayerModalOpen] = useState<boolean>(Boolean(offlineDownload));
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [hasPlaybackStarted, setHasPlaybackStarted] = useState<boolean>(false);
-  const [isScrolledPastThreshold, setIsScrolledPastThreshold] = useState<boolean>(false);
-  const [isEmbedIframeLoaded, setIsEmbedIframeLoaded] = useState<boolean>(false);
-  const [hasBrokenStickyAncestor, setHasBrokenStickyAncestor] = useState<boolean>(false);
-  const [stickyFallbackHeight, setStickyFallbackHeight] = useState<number>(260);
   const [shareStatusNotice, setShareStatusNotice] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
@@ -311,7 +451,24 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [isPipActive, setIsPipActive] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [areControlsVisible, setAreControlsVisible] = useState<boolean>(true);
+  const [isFullscreenExitVisible, setIsFullscreenExitVisible] = useState<boolean>(true);
   const controlsHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fullscreenIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Refs for popstate / back-gesture state machine
+  const isPlayerModalOpenRef = useRef<boolean>(isPlayerModalOpen);
+  const isFullscreenRef = useRef<boolean>(isFullscreen);
+  const pushedPlayerHistoryRef = useRef<boolean>(false);
+  const pushedFullscreenHistoryRef = useRef<boolean>(false);
+  const suppressPopstateCountRef = useRef<number>(0);
+
+  useEffect(() => {
+    isPlayerModalOpenRef.current = isPlayerModalOpen;
+  }, [isPlayerModalOpen]);
+
+  useEffect(() => {
+    isFullscreenRef.current = isFullscreen;
+  }, [isFullscreen]);
 
   // Subtitle State (Real .VTT / .SRT / HLS)
   const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(savedSubPrefs.enabled);
@@ -391,6 +548,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     onAudioSwitchNotice: setAudioSwitchNotice,
   });
 
+  const resetFullscreenIdleTimer = () => {
+    setIsFullscreenExitVisible(true);
+    if (fullscreenIdleTimerRef.current) {
+      clearTimeout(fullscreenIdleTimerRef.current);
+      fullscreenIdleTimerRef.current = null;
+    }
+    fullscreenIdleTimerRef.current = setTimeout(() => {
+      setIsFullscreenExitVisible(false);
+      fullscreenIdleTimerRef.current = null;
+    }, FULLSCREEN_CONTROLS_AUTO_HIDE_MS);
+  };
+
   const scheduleControlsAutoHide = () => {
     if (controlsHideTimerRef.current) {
       clearTimeout(controlsHideTimerRef.current);
@@ -403,6 +572,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   };
 
   const handleWakeOrToggleControls = (forceShow: boolean = false) => {
+    if (isFullscreen) {
+      resetFullscreenIdleTimer();
+    }
     setAreControlsVisible((prev) => {
       const next = computeNextControlsVisibility(prev, forceShow);
       if (next) {
@@ -415,10 +587,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     });
   };
 
-  // Auto-hide controls after 2 seconds whenever playback is active (mobile & fullscreen)
+  // Auto-hide controls after 3 seconds whenever playback is active (mobile & fullscreen)
   useEffect(() => {
-    const shouldAutoHide =
-      playerMode === 'direct' ? isPlaying : true;
+    if (!isPlayerModalOpen) return;
+    const shouldAutoHide = playerMode === 'direct' ? isPlaying : true;
     if (!shouldAutoHide) {
       if (controlsHideTimerRef.current) {
         clearTimeout(controlsHideTimerRef.current);
@@ -435,17 +607,97 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         controlsHideTimerRef.current = null;
       }
     };
-  }, [movie.id, playerMode, selectedEmbedId, selectedSeason, selectedEpisode, isPlaying, isFullscreen]);
+  }, [
+    isPlayerModalOpen,
+    movie.id,
+    playerMode,
+    selectedEmbedId,
+    selectedSeason,
+    selectedEpisode,
+    isPlaying,
+    isFullscreen,
+  ]);
 
-  // Sync fullscreen & orientation
+  // Auto-hide floating "Exit Fullscreen" button after 3 seconds of inactivity; wake on user input
   useEffect(() => {
+    if (!isFullscreen) {
+      if (fullscreenIdleTimerRef.current) {
+        clearTimeout(fullscreenIdleTimerRef.current);
+        fullscreenIdleTimerRef.current = null;
+      }
+      setIsFullscreenExitVisible(true);
+      return;
+    }
+
+    resetFullscreenIdleTimer();
+    const containerEl = playerContainerRef.current;
+    const onUserActivity = () => {
+      resetFullscreenIdleTimer();
+    };
+
+    const activityEvents = [
+      'mousemove',
+      'pointermove',
+      'touchstart',
+      'pointerdown',
+      'click',
+    ] as const;
+    for (const evtName of activityEvents) {
+      containerEl?.addEventListener(evtName, onUserActivity, { passive: true });
+      window.addEventListener(evtName, onUserActivity, { passive: true, capture: true });
+    }
+    window.addEventListener('blur', onUserActivity);
+
+    return () => {
+      if (fullscreenIdleTimerRef.current) {
+        clearTimeout(fullscreenIdleTimerRef.current);
+        fullscreenIdleTimerRef.current = null;
+      }
+      for (const evtName of activityEvents) {
+        containerEl?.removeEventListener(evtName, onUserActivity);
+        window.removeEventListener(evtName, onUserActivity, { capture: true });
+      }
+      window.removeEventListener('blur', onUserActivity);
+    };
+  }, [isFullscreen]);
+
+  // Lock background page body scroll while Detail/Player view is mounted
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
+  // Sync fullscreen, browser Back (popstate), and safe portrait orientation reset
+  useEffect(() => {
+    const exitNativeFullscreenIfActive = () => {
+      const docAny = document as any;
+      if (document.fullscreenElement || docAny.webkitFullscreenElement) {
+        try {
+          if (typeof document.exitFullscreen === 'function') {
+            document.exitFullscreen().catch(() => {});
+          } else if (typeof docAny.webkitExitFullscreen === 'function') {
+            docAny.webkitExitFullscreen();
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
     const handleFullscreenChange = () => {
       const docAny = document as any;
       const activeFsEl = document.fullscreenElement || docAny.webkitFullscreenElement || null;
       if (activeFsEl) {
         setIsFullscreen(true);
+        isFullscreenRef.current = true;
         setAreControlsVisible(true);
+        setIsFullscreenExitVisible(true);
         scheduleControlsAutoHide();
+        resetFullscreenIdleTimer();
         lockScreenOrientationSafely('landscape').catch(() => {});
 
         const containerEl = playerContainerRef.current as any;
@@ -459,21 +711,60 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         }
       } else {
         setIsFullscreen(false);
+        isFullscreenRef.current = false;
         setAreControlsVisible(true);
+        setIsFullscreenExitVisible(true);
+        lockScreenOrientationSafely('portrait').catch(() => {});
+        if (pushedFullscreenHistoryRef.current && typeof window !== 'undefined') {
+          pushedFullscreenHistoryRef.current = false;
+          suppressPopstateCountRef.current += 1;
+          try {
+            window.history.back();
+          } catch {
+            suppressPopstateCountRef.current = Math.max(0, suppressPopstateCountRef.current - 1);
+          }
+        }
+      }
+    };
+
+    const handlePopState = () => {
+      if (suppressPopstateCountRef.current > 0) {
+        suppressPopstateCountRef.current -= 1;
+        return;
+      }
+
+      if (isFullscreenRef.current) {
+        pushedFullscreenHistoryRef.current = false;
+        setIsFullscreen(false);
+        isFullscreenRef.current = false;
+        setAreControlsVisible(true);
+        setIsFullscreenExitVisible(true);
+        exitNativeFullscreenIfActive();
+        lockScreenOrientationSafely('portrait').catch(() => {});
+        return;
+      }
+
+      if (isPlayerModalOpenRef.current) {
+        pushedPlayerHistoryRef.current = false;
+        setIsPlayerModalOpen(false);
+        isPlayerModalOpenRef.current = false;
         lockScreenOrientationSafely('portrait').catch(() => {});
       }
     };
 
     const handleKeyDown = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
-        setIsFullscreen(false);
-        setAreControlsVisible(true);
-        lockScreenOrientationSafely('portrait').catch(() => {});
+        if (isFullscreenRef.current) {
+          handleExitFullscreen();
+        } else if (isPlayerModalOpenRef.current) {
+          handleClosePlayerModal();
+        }
       }
     };
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    window.addEventListener('popstate', handlePopState);
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
@@ -481,22 +772,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         clearTimeout(controlsHideTimerRef.current);
         controlsHideTimerRef.current = null;
       }
+      if (fullscreenIdleTimerRef.current) {
+        clearTimeout(fullscreenIdleTimerRef.current);
+        fullscreenIdleTimerRef.current = null;
+      }
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      window.removeEventListener('popstate', handlePopState);
       window.removeEventListener('keydown', handleKeyDown);
       lockScreenOrientationSafely('portrait').catch(() => {});
-      const docAny = document as any;
-      if (document.fullscreenElement || docAny.webkitFullscreenElement) {
-        try {
-          if (typeof document.exitFullscreen === 'function') {
-            document.exitFullscreen().catch(() => {});
-          } else if (typeof docAny.webkitExitFullscreen === 'function') {
-            docAny.webkitExitFullscreen();
-          }
-        } catch {
-          // ignore
-        }
-      }
+      exitNativeFullscreenIfActive();
     };
   }, []);
 
@@ -601,6 +886,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setPlayerMode(
       offlineDownload ? 'direct' : pakDetected ? 'pak-drama' : 'embed'
     );
+    userManuallySelectedServerRef.current = false;
     setSelectedEmbedId(
       movieLink?.stream_url ? 'custom-supabase' : PREFERRED_EMBED_SERVER_ID
     );
@@ -625,6 +911,8 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setCustomLang(movieLink?.language || movie.language || 'English');
     setLinkSaveMessage(null);
     setActiveDrawer('none');
+    setIsPlayerModalOpen(Boolean(offlineDownload));
+    setIsFullscreen(false);
     failedEmbedServerIdsRef.current.clear();
     pendingResumeTimeRef.current = null;
     setCurrentTime(0);
@@ -657,7 +945,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setVidsrcInfoState(result);
     setIsLoadingVidsrcInfo(false);
 
-    if (!result.ok && !movieLink?.stream_url) {
+    if (!result.ok && !movieLink?.stream_url && !userManuallySelectedServerRef.current) {
       setSelectedEmbedId((prev) =>
         prev === 'auto-server-1' ? PREFERRED_EMBED_SERVER_ID : prev
       );
@@ -688,7 +976,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         if (!active) return;
         setVidsrcInfoState(res);
         setIsLoadingVidsrcInfo(false);
-        if (!res.ok && !movieLink?.stream_url) {
+        if (!res.ok && !movieLink?.stream_url && !userManuallySelectedServerRef.current) {
           setSelectedEmbedId((prev) =>
             prev === 'auto-server-1' ? PREFERRED_EMBED_SERVER_ID : prev
           );
@@ -706,6 +994,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   // Listen for VidSrc.sh (PLAYER_EVENT) & VidLink/VidFast (MEDIA_DATA) postMessages and sync to Supabase watch_history
   useEffect(() => {
     const handlePostMessage = (event: MessageEvent) => {
+      const adTelemetry = parseAdBlockTelemetryMessage(event.data);
+      if (adTelemetry) {
+        if (isVidSrcAdBlockerEnabled) {
+          setBlockedAdsCount((c) => c + 1);
+          showSynchronizedAdBlockToast(
+            adTelemetry.kind === 'popup'
+              ? '🛡️ Popup Ad Blocked'
+              : adTelemetry.kind === 'redirect'
+              ? '🛡️ Ad Redirect Blocked'
+              : `🛡️ Ad Blocked (${adTelemetry.kind})`
+          );
+        }
+        return;
+      }
+
       // 1. VidLink (https://vidlink.pro) & VidFast (9 allowed domains) MEDIA_DATA tracking
       const mediaData = parseEmbedMediaDataMessage(event.data, event.origin, {
         tmdbId: movie.id,
@@ -807,7 +1110,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [activeUserId, movie, selectedSeason, selectedEpisode, reportPlaybackProgress]);
 
-  // Cross-origin iframe click/focus detection (works for both VidSrc.sh and 2Embed.cc even without postMessage)
+  // Cross-origin iframe click/focus detection
   useEffect(() => {
     const handleWindowBlurForIframe = () => {
       try {
@@ -822,28 +1125,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     window.addEventListener('blur', handleWindowBlurForIframe);
     return () => window.removeEventListener('blur', handleWindowBlurForIframe);
   }, []);
-
-  // Audit parent hierarchy for transform/filter/overflow:hidden & measure wrapper height for JS stickybits fallback
-  useEffect(() => {
-    const wrapperEl = stickyWrapperRef.current;
-    if (!wrapperEl) return;
-
-    const audit = auditStickyAncestors(wrapperEl, scrollContainerRef.current);
-    setHasBrokenStickyAncestor(audit.hasBreakingAncestor);
-
-    const updateHeight = () => {
-      if (wrapperEl.offsetHeight > 0) {
-        setStickyFallbackHeight(wrapperEl.offsetHeight);
-      }
-    };
-    updateHeight();
-
-    if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(updateHeight);
-      ro.observe(wrapperEl);
-      return () => ro.disconnect();
-    }
-  }, [playerMode, isFullscreen]);
 
   const handleRunSourceHealthChecks = async () => {
     setIsCheckingHealth(true);
@@ -1008,14 +1289,72 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     setFitMode((prev) => (prev === 'cover' ? 'contain' : prev === 'contain' ? 'fill' : 'cover'));
   };
 
+  const handleOpenPlayerModal = () => {
+    setHasPlaybackStarted(true);
+    setIsPlayerModalOpen(true);
+    isPlayerModalOpenRef.current = true;
+    if (isVidSrcAdBlockerEnabled) {
+      armClickShieldImmediately();
+    }
+    if (typeof window !== 'undefined' && !pushedPlayerHistoryRef.current) {
+      try {
+        window.history.pushState(
+          { cineboxLayer: 'player-modal', movieId: movie.id },
+          ''
+        );
+        pushedPlayerHistoryRef.current = true;
+      } catch {
+        // ignore history errors
+      }
+    }
+  };
+
+  const handleClosePlayerModal = () => {
+    if (isFullscreenRef.current) {
+      handleExitFullscreen();
+    }
+    setIsPlayerModalOpen(false);
+    isPlayerModalOpenRef.current = false;
+    lockScreenOrientationSafely('portrait').catch(() => {});
+    if (pushedPlayerHistoryRef.current && typeof window !== 'undefined') {
+      pushedPlayerHistoryRef.current = false;
+      suppressPopstateCountRef.current += 1;
+      try {
+        window.history.back();
+      } catch {
+        suppressPopstateCountRef.current = Math.max(0, suppressPopstateCountRef.current - 1);
+      }
+    }
+  };
+
+  const handleCloseDetailView = () => {
+    if (isFullscreenRef.current) {
+      setIsFullscreen(false);
+      isFullscreenRef.current = false;
+    }
+    if (isPlayerModalOpenRef.current) {
+      setIsPlayerModalOpen(false);
+      isPlayerModalOpenRef.current = false;
+    }
+    lockScreenOrientationSafely('portrait').catch(() => {});
+    onClose();
+  };
+
   const handleExitFullscreen = () => {
     if (controlsHideTimerRef.current) {
       clearTimeout(controlsHideTimerRef.current);
       controlsHideTimerRef.current = null;
     }
+    if (fullscreenIdleTimerRef.current) {
+      clearTimeout(fullscreenIdleTimerRef.current);
+      fullscreenIdleTimerRef.current = null;
+    }
     setIsFullscreen(false);
+    isFullscreenRef.current = false;
     setAreControlsVisible(true);
+    setIsFullscreenExitVisible(true);
     lockScreenOrientationSafely('portrait').catch(() => {});
+
     const docAny = document as any;
     try {
       if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
@@ -1029,6 +1368,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     } catch {
       // ignore
     }
+
+    if (pushedFullscreenHistoryRef.current && typeof window !== 'undefined') {
+      pushedFullscreenHistoryRef.current = false;
+      suppressPopstateCountRef.current += 1;
+      try {
+        window.history.back();
+      } catch {
+        suppressPopstateCountRef.current = Math.max(0, suppressPopstateCountRef.current - 1);
+      }
+    }
   };
 
   const handleToggleFullscreen = () => {
@@ -1039,9 +1388,25 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     }
 
     setIsFullscreen(true);
+    isFullscreenRef.current = true;
     setAreControlsVisible(true);
+    setIsFullscreenExitVisible(true);
     scheduleControlsAutoHide();
+    resetFullscreenIdleTimer();
     lockScreenOrientationSafely('landscape').catch(() => {});
+
+    if (typeof window !== 'undefined' && !pushedFullscreenHistoryRef.current) {
+      try {
+        window.history.pushState(
+          { cineboxLayer: 'fullscreen', movieId: movie.id },
+          ''
+        );
+        pushedFullscreenHistoryRef.current = true;
+      } catch {
+        // ignore history errors
+      }
+    }
+
     const el = playerContainerRef.current as any;
     if (!el) return;
     try {
@@ -1129,35 +1494,104 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const activeEmbedServer = plan.embedServers[activeEmbedServerIdx] || plan.embedServers[0];
   const activeFriendlySourceName = formatUserFriendlySourceLabel(activeEmbedServerIdx);
 
+  const effectiveEmbedTargetUrl = resolveEffectiveEmbedTargetUrl(activeEmbedServer?.url, {
+    isAdBlockerEnabled: isVidSrcAdBlockerEnabled,
+    useBackendProxy: isWebAdblockProxyReady && !isNativeAndroidEnv,
+    isNativeAndroidEnv,
+  });
+
   const cleanIframeAttrs = getCleanIframeAttributes(
-    activeEmbedServer?.url,
+    effectiveEmbedTargetUrl,
     `${movie.title} - ${activeFriendlySourceName}`
   );
 
-  const vidsrcIframeAttrs = getVidSrcPlayerIframeAttributes(
-    activeEmbedServer?.url,
+  const embedIframeAttrs = getEmbedAdBlockerIframeAttributes(
+    effectiveEmbedTargetUrl,
     `${movie.title} - ${activeFriendlySourceName}`,
     isVidSrcAdBlockerEnabled
   );
 
-  const isCurrentServerVidSrc = isVidSrcProviderUrl(activeEmbedServer?.url);
+  const effectiveEmbedIframeSrc = buildAdBlockProxiedEmbedUrl(cleanIframeAttrs.src, {
+    isAdBlockerEnabled: isVidSrcAdBlockerEnabled,
+    useBackendProxy: isWebAdblockProxyReady && !isNativeAndroidEnv,
+    allowTurnstileDirectOrigin: !isNativeAndroidEnv,
+  });
 
-  const vidsrcAdBlockCss = buildVidSrcAdBlockCssRules(
+  const isEmbedIframeActive =
+    isPlayerModalOpen && playerMode === 'embed' && embedIframeAttrs.isEmbedTarget;
+
+  const vidsrcAdBlockCss = buildEmbedAdBlockCssRules(
     isVidSrcAdBlockerEnabled,
-    playerMode === 'embed' && isCurrentServerVidSrc
+    isEmbedIframeActive
   );
 
+  // Sync Android WebView native AdBlocker state & live blocked-ad telemetry ONLY for iframe video sources
   useEffect(() => {
-    const cleanup = installVidSrcNetworkAdInterceptor({
-      enabled: playerMode === 'embed' && isVidSrcAdBlockerEnabled,
-      isVidSrcTarget: playerMode === 'embed',
+    const win = window as any;
+    try {
+      win.CineboxAndroidAdBlocker?.setState?.(
+        Boolean(isVidSrcAdBlockerEnabled),
+        Boolean(isEmbedIframeActive)
+      );
+    } catch {
+      // Non-Android browser environment
+    }
+
+    if (isEmbedIframeActive && isVidSrcAdBlockerEnabled) {
+      win.__cineboxOnNativeAdBlocked = (_blockedUrl: string, kind: string) => {
+        setBlockedAdsCount((c) => c + 1);
+        showSynchronizedAdBlockToast(
+          kind === 'redirect'
+            ? '🛡️ Ad Redirect Blocked'
+            : kind === 'popup'
+            ? '🛡️ Popup Ad Blocked'
+            : `🛡️ ${kind === 'network' ? 'Ad Script' : 'Ad'} Blocked`
+        );
+      };
+    }
+
+    return () => {
+      try {
+        win.CineboxAndroidAdBlocker?.setState?.(Boolean(isVidSrcAdBlockerEnabled), false);
+      } catch {
+        // ignore
+      }
+      if (win.__cineboxOnNativeAdBlocked) {
+        delete win.__cineboxOnNativeAdBlocked;
+      }
+    };
+  }, [isEmbedIframeActive, isVidSrcAdBlockerEnabled]);
+
+  // Re-arm Click-Shield whenever switching sources (S1-S4) or episodes while Adblocker is ON
+  useEffect(() => {
+    if (isEmbedIframeActive && isVidSrcAdBlockerEnabled) {
+      armClickShieldImmediately();
+    }
+  }, [isEmbedIframeActive, selectedEmbedId, selectedSeason, selectedEpisode, isVidSrcAdBlockerEnabled]);
+
+  useEffect(() => {
+    const cleanup = createIframeRequestInterceptor({
+      enabled: isEmbedIframeActive && isVidSrcAdBlockerEnabled,
+      isEmbedTarget: isEmbedIframeActive,
+      isInteractiveGraceActive: () => Date.now() < shieldUnlockedUntilRef.current,
+      onPopupHijackDetected: () => {
+        if (isVidSrcAdBlockerEnabled) {
+          armClickShieldImmediately();
+        }
+      },
       onAdBlocked: (_blockedUrl, kind) => {
         setBlockedAdsCount((c) => c + 1);
-        setAdBlockToast(`🛡️ Ad Blocked (${kind})`);
+        showSynchronizedAdBlockToast(
+          kind === 'redirect'
+            ? '🛡️ Ad Redirect Blocked'
+            : kind === 'popup'
+            ? '🛡️ Popup Ad Blocked'
+            : `🛡️ Ad Blocked (${kind})`
+        );
       },
     });
     return cleanup;
-  }, [playerMode, isCurrentServerVidSrc, isVidSrcAdBlockerEnabled]);
+  }, [isEmbedIframeActive, isVidSrcAdBlockerEnabled]);
 
   const activePlayingTitle =
     playerMode === 'pak-drama'
@@ -1176,43 +1610,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       ? `${movie.title} — S${selectedSeason}:E${selectedEpisode}`
       : `${activeQualityLabel.toUpperCase()} ${movie.title}`;
 
-  const fsConfig = getFullscreenPlayerConfig(isFullscreen, fitMode, areControlsVisible);
-  const isAndroidPlatform = detectAppPlatform() === 'Android';
-  const stickyFlagEnabled = (() => {
-    try {
-      if (String((import.meta as any).env?.VITE_ENABLE_STICKY_PLAYER || '') === 'true') {
-        return true;
-      }
-      if (typeof window !== 'undefined') {
-        const params = new URLSearchParams(window.location.search);
-        if (params.get('stickyPlayer') === '1' || params.get('sticky') === '1') {
-          return true;
-        }
-        if (window.localStorage?.getItem('cinebox_sticky_player_v1') === 'true') {
-          return true;
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return false;
-  })();
-
-  const cssStickySupported = supportsCssStickyPosition();
-  const stickyConfigInput = {
+  const fsConfig = getFullscreenPlayerConfig(
     isFullscreen,
-    hasPlaybackStarted,
-    isAndroidPlatform,
-    stickyFlagEnabled,
-    cssStickySupported,
-    hasBrokenStickyAncestor,
-    playerMode,
-    isScrolledPastThreshold,
-  };
-
-  const isStickyPlayerOnScroll = shouldEnableStickyPlayerOnScroll(stickyConfigInput);
-  const stickyStrategy = resolveStickyPlayerPositionStrategy(stickyConfigInput);
-  const stickyPlayerWrapperClass = getStickyPlayerWrapperClassName(stickyConfigInput);
+    fitMode,
+    isFullscreen ? isFullscreenExitVisible : areControlsVisible
+  );
 
   const subtitleTracksList = sanitizeSubtitleTracksList(movieLink?.subtitles || []);
   const effectiveResumeSeconds =
@@ -1226,338 +1628,427 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     <div
       ref={scrollContainerRef}
       data-testid="video-player-modal-scroll-container"
-      onScroll={(e) => {
-        const scrollTop = e.currentTarget.scrollTop;
-        const pastThreshold = scrollTop > STICKY_EMBED_SCROLL_THRESHOLD_PX;
-        if (pastThreshold !== isScrolledPastThreshold) {
-          setIsScrolledPastThreshold(pastThreshold);
-        }
-        // In embed/pak-drama/trailer modes, once the iframe has loaded and the user scrolls past the threshold,
-        // activate sticky playback state without false positives on mere clicks.
-        if (
-          !hasPlaybackStarted &&
-          isEmbedIframeLoaded &&
-          playerMode !== 'direct' &&
-          pastThreshold
-        ) {
-          setHasPlaybackStarted(true);
-        }
-      }}
-      className="fixed inset-0 z-50 bg-[#000000] text-slate-100 overflow-y-auto border-0 outline-none"
-      style={{ backgroundColor: '#000000' }}
+      className={`fixed inset-0 z-50 bg-[#0b0d12] text-slate-100 border-0 outline-none ${
+        isPlayerModalOpen ? 'overflow-hidden' : 'overflow-y-auto'
+      }`}
       role="dialog"
-      aria-label={`Playing ${movie.title}`}
+      aria-label={`Details and player for ${movie.title}`}
     >
-      {/* Dynamic CSS Hiding Rules Layer for VidSrc.sh Adblocker */}
+      {/* Dynamic CSS Hiding Rules Layer for Adblocker */}
       {vidsrcAdBlockCss && (
         <style id="cinebox-vidsrc-adblocker-css" data-testid="vidsrc-adblocker-css-rules">
           {vidsrcAdBlockCss}
         </style>
       )}
 
-      <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#000000] border-0 outline-none">
-        {/* JS Fallback Spacer (stickybits-style) ONLY when CSS.supports('position', 'sticky') is false */}
-        {stickyStrategy === 'js-fixed-fallback' && (
-          <div
-            data-testid="sticky-player-js-fallback-spacer"
-            style={{ height: `${stickyFallbackHeight}px` }}
-            className="w-full shrink-0 bg-[#000000]"
-            aria-hidden="true"
-          />
-        )}
-
-        {/* STICKY VIDEO PLAYER WRAPPER (CSS position: sticky; top: 0; z-index: 40 on Android/Capacitor after playback starts) */}
-        <div
-          ref={stickyWrapperRef}
-          data-testid="sticky-video-player-wrapper"
-          data-sticky-active={isStickyPlayerOnScroll ? 'true' : 'false'}
-          data-sticky-strategy={stickyStrategy}
-          onTouchStartCapture={() => {
-            if (!hasPlaybackStarted) {
-              setHasPlaybackStarted(true);
-            }
-          }}
-          onPointerDownCapture={() => {
-            if (!hasPlaybackStarted) {
-              setHasPlaybackStarted(true);
-            }
-          }}
-          className={stickyPlayerWrapperClass}
-        >
-        {/* ===================================================================
-            HYBRID VIDEO PLAYER SURFACE (Unified Top Bar; Click Show/Hide; Auto-Hide 2s)
-           =================================================================== */}
-        <div
-          ref={playerContainerRef}
-          data-testid="video-player-surface-container"
-          onClick={() => {
-            if (!hasPlaybackStarted) {
-              setHasPlaybackStarted(true);
-            }
-            handleWakeOrToggleControls(false);
-          }}
-          className={fsConfig.containerClassName}
-          style={{
-            filter: brightness === 100 ? undefined : `brightness(${brightness}%)`,
-            backgroundColor: '#000000',
-          }}
-        >
-          {/* Normal Mode Top Overlay: ONLY Back Button & Title (auto-hides after 2s, tap to toggle) */}
-          {!isFullscreen && playerMode !== 'direct' && (
-            <div
-              data-testid="player-top-header-bar"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleWakeOrToggleControls(false);
-              }}
-              className={`absolute top-0 left-0 right-0 z-30 flex items-center gap-2.5 px-3 sm:px-5 pt-[max(0.5rem,env(safe-area-inset-top,0px))] pb-4 bg-gradient-to-b from-black/90 via-black/55 to-transparent transition-all duration-300 ease-out ${
-                areControlsVisible
-                  ? 'opacity-100 pointer-events-auto translate-y-0'
-                  : 'opacity-0 pointer-events-none -translate-y-3'
-              }`}
+      {/* Clean Sticky Movie Detail Top Header (Never Overlapped by Sticky Iframe) */}
+      <header
+        data-testid="detail-top-nav-header"
+        className="sticky top-0 z-30 w-full bg-[#0b0f19]/90 backdrop-blur-md border-b border-slate-800/80"
+      >
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              data-testid="close-player-btn"
+              onClick={handleCloseDetailView}
+              aria-label="Back to catalog"
+              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-full bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-white transition-colors shrink-0"
             >
-              <button
-                type="button"
-                data-testid="close-player-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onClose();
-                }}
-                aria-label="Back to catalog"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors shrink-0 backdrop-blur-sm"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <div className="min-w-0 flex-1">
-                <span className="text-xs sm:text-sm font-bold text-white truncate block drop-shadow">
-                  {activePlayingTitle}
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <div className="min-w-0">
+              <div className="text-sm sm:text-base font-extrabold text-white truncate">
+                {movie.title}
+              </div>
+              <div className="text-[11px] text-slate-400 flex items-center gap-1.5 truncate">
+                <span className="text-[#10d97b] font-bold">★ {movie.rating.toFixed(1)}</span>
+                <span>·</span>
+                <span>{movie.releaseYear}</span>
+                <span>·</span>
+                <span>{movie.runtime}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleOpenPlayerModal}
+              data-testid="header-quick-play-btn"
+              className="px-3.5 py-1.5 rounded-xl bg-[#10d97b] hover:bg-[#0fc36d] text-slate-950 font-extrabold text-xs flex items-center gap-1.5 shadow-lg shadow-[#10d97b]/20 transition-transform active:scale-95"
+            >
+              <Play className="w-3.5 h-3.5 fill-slate-950" />
+              <span>Watch Now</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="max-w-6xl mx-auto min-h-screen flex flex-col bg-[#0b0d12] border-0 outline-none">
+        {/* ===================================================================
+            ON-DEMAND BACKDROP / POSTER PREVIEW CARD (NO AUTO-LOADED IFRAME!)
+           =================================================================== */}
+        <section
+          data-testid="movie-detail-hero-preview"
+          className="px-3 sm:px-6 pt-4 sm:pt-5"
+        >
+          <div className="relative aspect-video w-full max-h-[540px] rounded-2xl overflow-hidden bg-[#0b0f19] border border-slate-800/90 shadow-2xl group">
+            <img
+              src={movie.backdropUrl || movie.posterUrl}
+              alt={movie.title}
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-cover object-center transition-transform duration-700 group-hover:scale-[1.03]"
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-[#0b0d12] via-[#0b0d12]/45 to-black/35" />
+            <div className="absolute inset-0 bg-gradient-to-r from-[#0b0d12]/80 via-transparent to-[#0b0d12]/40" />
+
+            {/* Top Badges */}
+            <div className="absolute top-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-full bg-black/75 backdrop-blur-md border border-[#10d97b]/40 text-[11px] font-extrabold text-[#10d97b]">
+                  {movie.mediaType === 'tv'
+                    ? `S${selectedSeason}:E${selectedEpisode} Ready`
+                    : `${activeQualityLabel.toUpperCase()} Stream Ready`}
+                </span>
+                <span className="px-2.5 py-1 rounded-full bg-black/70 backdrop-blur-md border border-white/15 text-[11px] font-semibold text-slate-200 flex items-center gap-1">
+                  {isVidSrcAdBlockerEnabled ? (
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b]" />
+                  ) : (
+                    <ShieldOff className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  <span>{isVidSrcAdBlockerEnabled ? 'Adblock ON' : 'Adblock OFF'}</span>
                 </span>
               </div>
             </div>
-          )}
 
-          {/* Tap-to-wake top strip when controls auto-hide in iframe/fullscreen modes */}
-          {!areControlsVisible && (isFullscreen || playerMode !== 'direct') && (
-            <div
-              data-testid="fullscreen-top-wake-strip"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleWakeOrToggleControls(true);
-              }}
-              onTouchStart={(e) => {
-                e.stopPropagation();
-                handleWakeOrToggleControls(true);
-              }}
-              className={`top-0 left-0 right-0 h-16 bg-transparent cursor-pointer ${
-                isFullscreen ? 'fixed z-[9999]' : 'absolute z-30'
-              }`}
-              aria-label="Tap to show player controls"
-            />
-          )}
+            {/* Prominent Centered Play Button */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
+              <button
+                type="button"
+                data-testid="detail-play-now-btn"
+                onClick={handleOpenPlayerModal}
+                aria-label={`Play ${movie.title}`}
+                className="group/play flex flex-col items-center gap-3 focus:outline-none"
+              >
+                <span className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-[#10d97b] hover:bg-[#19eb8a] text-slate-950 flex items-center justify-center shadow-[0_0_40px_rgba(16,217,123,0.45)] ring-4 ring-[#10d97b]/30 transition-all duration-200 group-hover/play:scale-110 active:scale-95">
+                  <Play className="w-7 h-7 sm:w-9 sm:h-9 fill-slate-950 ml-1" />
+                </span>
+                <span className="px-4 py-1.5 rounded-full bg-black/80 backdrop-blur-md border border-white/20 text-xs sm:text-sm font-extrabold text-white shadow-xl">
+                  {effectiveResumeSeconds > 0
+                    ? `Resume Playing · ${formatPlayerTimecode(effectiveResumeSeconds)}`
+                    : `Play ${movie.mediaType === 'tv' ? `S${selectedSeason}:E${selectedEpisode}` : 'Now'} (${activeFriendlySourceName})`}
+                </span>
+              </button>
+            </div>
 
-          {/* Unified Fullscreen Top Bar: Left "<" Back + Playing Movie Name + Compact Right Controls */}
-          {fsConfig.showAlwaysVisibleExitButton && playerMode !== 'direct' && (
-            <div
-              data-testid="fullscreen-top-header-bar"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleWakeOrToggleControls(false);
-              }}
-              className={fsConfig.topBarClassName}
-            >
-              <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                <button
-                  type="button"
-                  data-testid="fullscreen-exit-back-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleExitFullscreen();
-                  }}
-                  aria-label="Back / Exit Fullscreen"
-                  className={fsConfig.exitButtonClassName}
-                >
-                  <ChevronLeft className="w-5 h-5 text-white stroke-[2.5]" />
-                </button>
-                <div className="min-w-0 flex-1">
-                  <span
-                    data-testid="fullscreen-movie-title"
-                    className="text-xs sm:text-sm font-bold text-white truncate block drop-shadow"
-                  >
+            {/* Bottom Poster & Preview Info */}
+            <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between gap-3 pointer-events-none">
+              <div className="flex items-center gap-3 min-w-0">
+                {movie.posterUrl && (
+                  <img
+                    src={movie.posterUrl}
+                    alt=""
+                    aria-hidden="true"
+                    referrerPolicy="no-referrer"
+                    className="hidden sm:block w-12 h-16 rounded-xl object-cover border border-white/20 shadow-lg shrink-0"
+                  />
+                )}
+                <div className="min-w-0">
+                  <div className="text-sm sm:text-lg font-extrabold text-white truncate drop-shadow">
                     {activePlayingTitle}
-                  </span>
+                  </div>
+                  <div className="text-[11px] sm:text-xs text-slate-300 truncate">
+                    {movie.genres.join(' · ')} · Click Play to launch distraction-free theater
+                  </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </section>
 
-              <div
-                data-testid="fullscreen-top-right-controls"
-                onClick={(e) => e.stopPropagation()}
-                className={fsConfig.topRightControlsClassName}
-              >
-                {playerMode === 'embed' && (
+        {/* ===================================================================
+            DEDICATED CENTERED THEATER / PLAYER MODAL (ON-DEMAND IFRAME MOUNT)
+           =================================================================== */}
+        {isPlayerModalOpen && (
+          <div
+            data-testid="theater-player-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Theater player for ${movie.title}`}
+            className="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex items-center justify-center p-2 sm:p-6"
+          >
+            <div
+              className={
+                isFullscreen
+                  ? 'w-full h-full'
+                  : 'w-full max-w-5xl rounded-2xl overflow-hidden bg-[#0b0f19] border border-slate-800/90 shadow-2xl flex flex-col'
+              }
+            >
+              {/* Theater Modal Header Bar (Non-Fullscreen) */}
+              {!isFullscreen && (
+                <div
+                  data-testid="theater-modal-header"
+                  className="flex items-center justify-between gap-3 px-3 sm:px-4 py-2.5 bg-[#0e1422] border-b border-slate-800/90"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="px-2 py-0.5 rounded bg-[#10d97b]/15 border border-[#10d97b]/40 text-[10px] font-extrabold text-[#10d97b] uppercase shrink-0">
+                      Theater
+                    </span>
+                    <h2 className="text-xs sm:text-sm font-bold text-white truncate">
+                      {activePlayingTitle}
+                    </h2>
+                  </div>
+
                   <button
                     type="button"
-                    role="switch"
-                    aria-checked={isVidSrcAdBlockerEnabled}
-                    aria-label="Fullscreen Adblocker Toggle"
-                    data-testid="fullscreen-adblocker-toggle-btn"
-                    onClick={() => {
-                      handleToggleVidSrcAdBlocker();
-                      scheduleControlsAutoHide();
-                    }}
-                    className={`px-2.5 py-1.5 rounded-full text-[11px] font-bold flex items-center gap-1 min-h-[36px] border transition-all active:scale-95 ${
-                      isVidSrcAdBlockerEnabled
-                        ? 'bg-emerald-950/85 border-[#10d97b]/70 text-[#10d97b]'
-                        : 'bg-white/10 border-white/15 text-slate-300'
-                    }`}
+                    data-testid="close-theater-player-btn"
+                    onClick={handleClosePlayerModal}
+                    aria-label="Close video player"
+                    className="min-h-[34px] px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-bold flex items-center gap-1.5 shrink-0 transition-colors"
                   >
-                    {isVidSrcAdBlockerEnabled ? (
-                      <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
-                    ) : (
-                      <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    )}
-                    <span>{isVidSrcAdBlockerEnabled ? 'Adblock ON' : 'Adblock OFF'}</span>
+                    <X className="w-4 h-4 text-[#10d97b]" />
+                    <span>Close</span>
                   </button>
+                </div>
+              )}
+
+              {/* Video Player Stage Container */}
+              <div
+                ref={playerContainerRef}
+                data-testid="video-player-surface-container"
+                onMouseMove={() => {
+                  if (isFullscreen) resetFullscreenIdleTimer();
+                }}
+                onTouchStart={() => {
+                  if (isFullscreen) resetFullscreenIdleTimer();
+                }}
+                onPointerDown={() => {
+                  if (isFullscreen) resetFullscreenIdleTimer();
+                }}
+                onClick={() => {
+                  if (!hasPlaybackStarted) {
+                    setHasPlaybackStarted(true);
+                  }
+                  if (playerMode === 'direct') {
+                    handleWakeOrToggleControls(false);
+                  } else if (isFullscreen) {
+                    resetFullscreenIdleTimer();
+                  }
+                }}
+                className={fsConfig.containerClassName}
+                style={{
+                  filter: brightness === 100 ? undefined : `brightness(${brightness}%)`,
+                  backgroundColor: '#000000',
+                }}
+              >
+                {/* Non-blocking top wake zone so hovering/tapping the top edge over an iframe wakes Exit Fullscreen */}
+                {isFullscreen && playerMode !== 'direct' && (
+                  <div
+                    data-testid="fullscreen-top-wake-zone"
+                    onMouseMove={resetFullscreenIdleTimer}
+                    onPointerMove={resetFullscreenIdleTimer}
+                    onPointerDown={resetFullscreenIdleTimer}
+                    onTouchStart={resetFullscreenIdleTimer}
+                    className="fixed top-0 left-0 right-0 h-16 z-[9999] pointer-events-auto bg-transparent"
+                  />
                 )}
 
-                <button
-                  type="button"
-                  data-testid="fullscreen-exit-corner-x-btn"
-                  onClick={handleExitFullscreen}
-                  aria-label="Exit Fullscreen"
-                  title="Exit Fullscreen"
-                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-white transition-all duration-200 active:scale-95"
-                >
-                  <Minimize2 className="w-4 h-4 text-[#10d97b]" />
-                </button>
-              </div>
-            </div>
-          )}
+                {/* Floating Top-Left "Exit Fullscreen" Pill & Top-Right Controls (Auto-Hides After 3s Inactivity) */}
+                {isFullscreen && playerMode !== 'direct' && (
+                  <div
+                    data-testid="fullscreen-top-header-bar"
+                    className={`fixed top-0 left-0 right-0 z-[10000] flex items-center justify-between gap-2.5 px-3 sm:px-5 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent transition-opacity duration-300 ${
+                      isFullscreenExitVisible
+                        ? 'opacity-100 pointer-events-auto'
+                        : 'opacity-0 pointer-events-none'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      data-testid="fullscreen-exit-pill-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleExitFullscreen();
+                      }}
+                      aria-label="Exit Fullscreen"
+                      className={`px-3.5 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md flex items-center gap-1.5 min-h-[38px] transition-opacity duration-300 ${
+                        isFullscreenExitVisible
+                          ? 'opacity-100 pointer-events-auto'
+                          : 'opacity-0 pointer-events-none'
+                      }`}
+                    >
+                      <Minimize2 className="w-3.5 h-3.5 text-[#10d97b]" />
+                      <span>Exit Fullscreen</span>
+                    </button>
 
-          {playerMode === 'trailer' && movie.youtubeKey ? (
-            <div className="relative w-full h-full bg-[#000000]">
-              <iframe
-                key={movie.youtubeKey}
-                src={`https://www.youtube.com/embed/${movie.youtubeKey}?autoplay=1&rel=0&modestbranding=1`}
-                title={`${movie.title} Official TMDb Video`}
-                onLoad={() => setIsEmbedIframeLoaded(true)}
-                className="w-full h-full border-0 bg-[#000000]"
-                style={{ backgroundColor: '#000000' }}
-                allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-                allowFullScreen
-              />
-            </div>
-          ) : playerMode === 'pak-drama' ? (
-            <div className="relative w-full h-full bg-[#000000] flex items-center justify-center">
-              {isLoadingPakDrama ? (
-                <div className="flex flex-col items-center gap-2 text-center p-4">
-                  <Loader2 className="w-9 h-9 text-[#10d97b] animate-spin" />
-                  <span className="text-xs font-bold text-white">
-                    Loading Full Episode / Hindi Dubbed Stream for &ldquo;{movie.title}&rdquo;...
-                  </span>
-                </div>
-              ) : pakDramaStreams[activePakStreamIdx] ? (
-                <iframe
-                  key={pakDramaStreams[activePakStreamIdx].embedUrl}
-                  data-testid="pak-drama-iframe-player"
-                  src={pakDramaStreams[activePakStreamIdx].embedUrl}
-                  onLoad={() => setIsEmbedIframeLoaded(true)}
-                  allow="autoplay; fullscreen; picture-in-picture"
-                  allowFullScreen
-                  title={pakDramaStreams[activePakStreamIdx].title}
-                  className="w-full h-full border-0 bg-[#000000]"
-                  style={{ backgroundColor: '#000000' }}
-                />
-              ) : (
-                <div className="text-center p-6 space-y-2 max-w-md">
-                  <div className="text-sm font-bold text-amber-300">
-                    {pakDramaError || 'No stream found for this query.'}
+                    <div className="min-w-0 flex-1 hidden sm:block">
+                      <span
+                        data-testid="fullscreen-movie-title"
+                        className="text-xs sm:text-sm font-bold text-white truncate block drop-shadow"
+                      >
+                        {activePlayingTitle}
+                      </span>
+                    </div>
+
+                    <div
+                      data-testid="fullscreen-top-right-controls"
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex items-center gap-1.5 sm:gap-2 shrink-0"
+                    >
+                      {playerMode === 'embed' && (
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={isVidSrcAdBlockerEnabled}
+                          aria-label="Fullscreen Adblocker Toggle"
+                          data-testid="fullscreen-adblocker-toggle-btn"
+                          onClick={() => {
+                            handleToggleVidSrcAdBlocker();
+                            resetFullscreenIdleTimer();
+                          }}
+                          className={`px-2.5 py-1.5 rounded-full text-[11px] font-bold flex items-center gap-1 min-h-[36px] border transition-all active:scale-95 ${
+                            isVidSrcAdBlockerEnabled
+                              ? 'bg-emerald-950/85 border-[#10d97b]/70 text-[#10d97b]'
+                              : 'bg-white/10 border-white/15 text-slate-300'
+                          }`}
+                        >
+                          {isVidSrcAdBlockerEnabled ? (
+                            <ShieldCheck className="w-3.5 h-3.5 text-[#10d97b] shrink-0" />
+                          ) : (
+                            <ShieldOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          )}
+                          <span>
+                            {isVidSrcAdBlockerEnabled ? 'Adblock ON' : 'Adblock OFF'}
+                            {blockedAdsCount > 0 ? ` (${blockedAdsCount} blocked)` : ''}
+                          </span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        data-testid="fullscreen-exit-back-btn"
+                        onClick={handleExitFullscreen}
+                        aria-label="Back / Exit Fullscreen"
+                        title="Exit Fullscreen"
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-full bg-black/75 hover:bg-black border border-white/20 text-white transition-all duration-200 active:scale-95"
+                      >
+                        <X className="w-4 h-4 text-[#10d97b]" />
+                      </button>
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-400">
-                    Use the search bar below the player to search any Episode number, or switch to Source 1.
-                  </p>
-                </div>
-              )}
-            </div>
-          ) : playerMode === 'embed' ? (
-            <div
-              data-vidsrc-adblock={
-                vidsrcIframeAttrs.isVidSrcAdBlockerActive ? 'active' : 'inactive'
-              }
-              className="relative w-full h-full bg-[#000000]"
-            >
-              {adBlockToast && (
-                <div
-                  data-testid="vidsrc-adblock-toast"
-                  className="absolute top-3 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-full bg-black/90 border border-[#10d97b] text-xs font-extrabold text-[#10d97b] shadow-xl pointer-events-none"
-                >
-                  {adBlockToast}
-                </div>
-              )}
+                )}
 
-              {vidsrcIframeAttrs.isVidSrcAdBlockerActive && (
-                <div
-                  data-testid="vidsrc-click-shield-layer"
-                  className="absolute inset-0 z-30 pointer-events-none select-none"
-                  aria-hidden="true"
-                >
+                {playerMode === 'trailer' && movie.youtubeKey ? (
+                  <div className="relative w-full h-full bg-[#000000]">
+                    <iframe
+                      key={movie.youtubeKey}
+                      src={`https://www.youtube.com/embed/${movie.youtubeKey}?autoplay=1&rel=0&modestbranding=1`}
+                      title={`${movie.title} Official TMDb Video`}
+                      className="w-full h-full border-0 bg-[#000000]"
+                      style={{ backgroundColor: '#000000' }}
+                      allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                      allowFullScreen
+                    />
+                  </div>
+                ) : playerMode === 'pak-drama' ? (
+                  <div className="relative w-full h-full bg-[#000000] flex items-center justify-center">
+                    {isLoadingPakDrama ? (
+                      <div className="flex flex-col items-center gap-2 text-center p-4">
+                        <Loader2 className="w-9 h-9 text-[#10d97b] animate-spin" />
+                        <span className="text-xs font-bold text-white">
+                          Loading Full Episode / Hindi Dubbed Stream for &ldquo;{movie.title}&rdquo;...
+                        </span>
+                      </div>
+                    ) : pakDramaStreams[activePakStreamIdx] ? (
+                      <iframe
+                        key={pakDramaStreams[activePakStreamIdx].embedUrl}
+                        data-testid="pak-drama-iframe-player"
+                        src={
+                          sanitizeEmbedIframeRequestUrl(pakDramaStreams[activePakStreamIdx].embedUrl) ||
+                          pakDramaStreams[activePakStreamIdx].embedUrl
+                        }
+                        allow="autoplay; fullscreen; picture-in-picture"
+                        allowFullScreen
+                        title={pakDramaStreams[activePakStreamIdx].title}
+                        className="w-full h-full border-0 bg-[#000000]"
+                        style={{ backgroundColor: '#000000' }}
+                      />
+                    ) : (
+                      <div className="text-center p-6 space-y-2 max-w-md">
+                        <div className="text-sm font-bold text-amber-300">
+                          {pakDramaError || 'No stream found for this query.'}
+                        </div>
+                        <p className="text-xs text-slate-400">
+                          Close player to search another Episode number on the detail page, or switch to Source 1.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : playerMode === 'embed' ? (
                   <div
-                    data-testid="vidsrc-shield-zone-top"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setBlockedAdsCount((c) => c + 1);
-                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
+                    data-vidsrc-adblock={
+                      embedIframeAttrs.isEmbedAdBlockerActive ? 'active' : 'inactive'
+                    }
+                    data-embed-provider={embedIframeAttrs.providerKey}
+                    onMouseMove={() => {
+                      if (isVidSrcAdBlockerEnabled && !isClickShieldArmed) {
+                        scheduleClickShieldRearm();
+                      }
                     }}
-                    className="absolute top-0 left-0 right-[240px] h-[26%] pointer-events-auto cursor-default"
-                  />
-                  <div
-                    data-testid="vidsrc-shield-zone-left"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setBlockedAdsCount((c) => c + 1);
-                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
+                    onTouchStart={() => {
+                      if (isVidSrcAdBlockerEnabled && !isClickShieldArmed) {
+                        scheduleClickShieldRearm();
+                      }
                     }}
-                    className="absolute top-[26%] bottom-[60px] left-0 w-[22%] pointer-events-auto cursor-default"
-                  />
-                  <div
-                    data-testid="vidsrc-shield-zone-right"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setBlockedAdsCount((c) => c + 1);
-                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
-                    }}
-                    className="absolute top-[52px] bottom-[60px] right-0 w-[22%] pointer-events-auto cursor-default"
-                  />
-                  <div
-                    data-testid="vidsrc-shield-zone-lower"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setBlockedAdsCount((c) => c + 1);
-                      setAdBlockToast('🛡️ VidSrc.sh Popup Ad Click Blocked (clickjack-shield)');
-                    }}
-                    className="absolute top-[72%] bottom-[60px] left-[22%] right-[22%] pointer-events-auto cursor-default"
-                  />
-                </div>
-              )}
+                    className="relative w-full h-full bg-[#000000]"
+                  >
+                    {adBlockToast && (
+                      <div
+                        data-testid="vidsrc-adblock-toast"
+                        className={`absolute left-1/2 -translate-x-1/2 z-[10001] px-3.5 py-1.5 rounded-full bg-black/90 border border-[#10d97b] text-xs font-extrabold text-[#10d97b] shadow-xl pointer-events-none whitespace-nowrap max-w-[92%] truncate ${
+                          isFullscreen ? 'top-16' : 'top-3'
+                        }`}
+                      >
+                        {adBlockToast}
+                      </div>
+                    )}
 
-              <iframe
-                key={`${cleanIframeAttrs.src}::adblock-${vidsrcIframeAttrs.isVidSrcAdBlockerActive ? 'on' : 'off'}`}
-                data-testid="embed-iframe-player"
-                data-vidsrc-iframe={vidsrcIframeAttrs.isVidSrcTarget ? 'true' : 'false'}
-                data-adblock-policy={vidsrcIframeAttrs.sandbox || 'none'}
-                src={cleanIframeAttrs.src}
-                allowFullScreen={cleanIframeAttrs.allowFullScreen}
-                onLoad={() => setIsEmbedIframeLoaded(true)}
-                onError={handleTriggerAutoFailover}
-                title={cleanIframeAttrs.title}
-                className="w-full h-full border-0 bg-[#000000]"
-                style={{ backgroundColor: '#000000' }}
-              />
-            </div>
-          ) : (
+                    {isVidSrcAdBlockerEnabled && embedIframeAttrs.isEmbedTarget && (
+                      <div
+                        data-testid="vidsrc-click-shield-layer"
+                        data-shield-armed={isClickShieldArmed ? 'true' : 'false'}
+                        onClick={isClickShieldArmed ? handleAbsorbShieldTrapClick : undefined}
+                        className={`absolute inset-0 z-20 bg-transparent select-none ${
+                          isClickShieldArmed
+                            ? 'pointer-events-auto cursor-pointer'
+                            : 'pointer-events-none'
+                        }`}
+                        aria-hidden={isClickShieldArmed ? undefined : 'true'}
+                        title={
+                          isClickShieldArmed
+                            ? 'Tap once to clear popup trap, then tap again to play'
+                            : undefined
+                        }
+                      />
+                    )}
+
+                    <iframe
+                      key={cleanIframeAttrs.src}
+                      data-testid="embed-iframe-player"
+                      data-vidsrc-iframe={embedIframeAttrs.isEmbedTarget ? 'true' : 'false'}
+                      data-adblock-proxy={effectiveEmbedIframeSrc !== cleanIframeAttrs.src ? 'active' : 'direct'}
+                      src={effectiveEmbedIframeSrc || cleanIframeAttrs.src}
+                      allow={cleanIframeAttrs.allow}
+                      referrerPolicy={cleanIframeAttrs.referrerPolicy}
+                      allowFullScreen={cleanIframeAttrs.allowFullScreen}
+                      onError={handleTriggerAutoFailover}
+                      title={cleanIframeAttrs.title}
+                      className="w-full h-full border-0 bg-[#000000]"
+                      style={{ backgroundColor: '#000000' }}
+                    />
+                  </div>
+                ) : (
             /* DIRECT NATIVE HTML5 + HLS PLAYER MODULAR STACK */
             <>
               <video
@@ -1783,11 +2274,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           )}
         </div>
 
-        {/* CLEAN BELOW-VIDEO CONTROL BAR (Adblocker, Fullscreen, Open in New Tab moved below video) */}
+        {/* CLEAN BELOW-VIDEO CONTROL BAR INSIDE THEATER MODAL (Adblocker, Fullscreen, Open in New Tab) */}
         {!isFullscreen && playerMode !== 'direct' && (
           <div
             data-testid="below-video-controls-bar"
-            className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-5 py-2 bg-[#0b0f19] border-b border-slate-800/80"
+            className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-5 py-2.5 bg-[#0b0f19] border-t border-slate-800/80"
           >
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-[11px] font-semibold text-[#10d97b] truncate">
@@ -1831,7 +2322,34 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto max-w-full">
+              {playerMode === 'embed' && plan.embedServers.length > 1 && (
+                <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full">
+                  {plan.embedServers.map((srv, sIdx) => {
+                    const isSrvActive = srv.id === activeEmbedServer?.id;
+                    return (
+                      <button
+                        key={srv.id}
+                        type="button"
+                        data-testid={`theater-quick-source-${sIdx + 1}`}
+                        onClick={() => {
+                          userManuallySelectedServerRef.current = true;
+                          setSelectedEmbedId(srv.id);
+                          setPlayerMode('embed');
+                        }}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors shrink-0 ${
+                          isSrvActive
+                            ? 'bg-[#10d97b] text-slate-950 border-[#10d97b]'
+                            : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:text-white'
+                        }`}
+                      >
+                        S{sIdx + 1}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               {playerMode === 'embed' && (
                 <button
                   type="button"
@@ -1840,7 +2358,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                   aria-label="Adblocker toggle switch"
                   data-testid="vidsrc-adblocker-toggle-btn"
                   onClick={handleToggleVidSrcAdBlocker}
-                  className={`px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold shadow-sm flex items-center gap-1.5 min-h-[34px] transition-all active:scale-95 border ${
+                  className={`px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold shadow-sm flex items-center gap-1.5 min-h-[34px] transition-all active:scale-95 border shrink-0 ${
                     isVidSrcAdBlockerEnabled
                       ? 'bg-emerald-950/95 hover:bg-emerald-900 border-[#10d97b] text-[#10d97b]'
                       : 'bg-slate-800/90 hover:bg-slate-700 border-slate-600 text-slate-300'
@@ -1869,7 +2387,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       data-testid="vidsrc-blocked-ads-badge"
                       className="px-1.5 py-0.5 rounded-full bg-[#10d97b] text-slate-950 text-[10px] font-black leading-none"
                     >
-                      {blockedAdsCount}
+                      ({blockedAdsCount} blocked)
                     </span>
                   )}
                 </button>
@@ -1880,7 +2398,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 data-testid="enter-fullscreen-btn"
                 onClick={handleToggleFullscreen}
                 aria-label="Enter Fullscreen"
-                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] font-extrabold flex items-center gap-1.5 min-h-[34px] transition-transform active:scale-95"
+                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-[11px] font-extrabold flex items-center gap-1.5 min-h-[34px] transition-transform active:scale-95 shrink-0"
               >
                 <Maximize2 className="w-3.5 h-3.5 text-[#10d97b]" />
                 <span>Fullscreen</span>
@@ -1895,7 +2413,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="open-in-new-tab-btn"
-                className="inline-flex px-2.5 sm:px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] font-extrabold shadow-md shadow-[#10d97b]/20 items-center gap-1.5 min-h-[34px] transition-transform active:scale-95"
+                className="inline-flex px-2.5 sm:px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#10d97b] via-[#22e58a] to-[#facc15] hover:opacity-95 text-slate-950 text-[11px] font-extrabold shadow-md shadow-[#10d97b]/20 items-center gap-1.5 min-h-[34px] transition-transform active:scale-95 shrink-0"
               >
                 <ExternalLink className="w-3.5 h-3.5 stroke-[2.5]" />
                 <span>Open in New Tab</span>
@@ -1903,7 +2421,9 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </div>
           </div>
         )}
-        </div>
+            </div>
+          </div>
+        )}
 
         {/* ===================================================================
             BELOW-PLAYER CONTROLS: METADATA, SOURCE PICKER, EPISODES
@@ -1982,7 +2502,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 <div className="flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                   <div className="text-xs font-bold text-amber-200">
-                    Source 1 (VidSrc.sh) unavailable (404) — Preferred Source 3 (VidFast) Active
+                    Source 1 (VidSrc.sh) unavailable (404) — Preferred Source 2 (VidLink.pro) Active
                   </div>
                 </div>
                 <button
@@ -2053,6 +2573,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 }
               }}
               onSelectEmbedServer={(serverId) => {
+                userManuallySelectedServerRef.current = true;
                 setSelectedEmbedId(serverId);
                 setPlayerMode('embed');
               }}
@@ -2475,12 +2996,12 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               )}
             </div>
 
-            {/* Right Column: VidSrc.sh AdBlocker Shield */}
+            {/* Right Column: Multi-Source Iframe Video AdBlocker Shield */}
             <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3.5 h-fit">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <Shield className="w-4 h-4 text-[#10d97b]" />
-                  <span>VidSrc.sh AdBlocker Shield</span>
+                  <span>Iframe Video AdBlocker Shield</span>
                 </h3>
                 <span
                   className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
@@ -2489,15 +3010,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                       : 'bg-slate-800 text-slate-400'
                   }`}
                 >
-                  {isVidSrcAdBlockerEnabled ? 'ACTIVE (VIDSRC.SH)' : 'DISABLED'}
+                  {isVidSrcAdBlockerEnabled ? 'ACTIVE (ALL EMBEDS)' : 'DISABLED'}
                 </span>
               </div>
 
               <p className="text-xs text-slate-400 leading-relaxed">
-                Blocks click-jacking popup windows, <code className="text-slate-200">window.open</code>{' '}
-                ad redirects, and ad-network scripts strictly on{' '}
-                <code className="text-[#10d97b]">vidsrc.sh</code> while keeping Source 1 and
-                video playback untouched.
+                Blocks click-jacking popups, popunder scripts, VAST pre-rolls, and ad redirects
+                strictly for embed iframe video sources (
+                <code className="text-[#10d97b]">VidSrc.sh</code>,{' '}
+                <code className="text-[#10d97b]">VidLink.pro</code>,{' '}
+                <code className="text-[#10d97b]">VidFast</code>,{' '}
+                <code className="text-[#10d97b]">2Embed</code> &amp; custom embeds) without touching
+                direct streams.
               </p>
 
               <button
