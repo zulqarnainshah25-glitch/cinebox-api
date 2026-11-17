@@ -14,7 +14,7 @@ import {
 } from './adblockEngine';
 
 /**
- * CineBox Robust Real Iframe Video AdBlocker Utility (v1.0.12)
+ * CineBox Robust Real Iframe Video AdBlocker Utility (v1.0.13)
  *
  * Dual-layer real adblocker across ALL third-party embed video sources
  * (`VidSrc.sh`, `VidLink.pro`, `VidFast`, `2Embed`, and Custom Embeds):

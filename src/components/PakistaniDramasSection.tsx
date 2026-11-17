@@ -23,6 +23,7 @@ import {
 import {
   FULLSCREEN_CONTROLS_AUTO_HIDE_MS,
   lockScreenOrientationSafely,
+  shouldIgnoreFullscreenWakeEvent,
 } from '../utils/streamResolver';
 
 interface PakistaniDramasSectionProps {
@@ -47,6 +48,7 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
 
   const dramaPlayerContainerRef = useRef<HTMLDivElement>(null);
   const dramaIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dramaFullscreenEnteredAtRef = useRef<number>(0);
   const dramaFsHistoryPushedRef = useRef<boolean>(false);
   const dramaSuppressPopCountRef = useRef<number>(0);
 
@@ -65,11 +67,19 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
   }, [isDramaFullscreen]);
 
   const exitDramaFullscreenSafely = useCallback((fromPopstate: boolean = false) => {
+    dramaFullscreenEnteredAtRef.current = 0;
     setIsDramaFullscreen(false);
     setShowDramaFsControls(true);
     if (dramaIdleTimerRef.current) {
       clearTimeout(dramaIdleTimerRef.current);
       dramaIdleTimerRef.current = null;
+    }
+    try {
+      (window as unknown as {
+        CineboxAndroidAdBlocker?: { setImmersiveFullscreen?: (v: boolean) => void };
+      }).CineboxAndroidAdBlocker?.setImmersiveFullscreen?.(false);
+    } catch {
+      // Ignore on Web
     }
     lockScreenOrientationSafely('portrait').catch(() => {});
     if (!fromPopstate && dramaFsHistoryPushedRef.current && typeof window !== 'undefined') {
@@ -86,7 +96,19 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
   }, []);
 
   useEffect(() => {
+    const syncNativeImmersive = (enabled: boolean) => {
+      try {
+        (window as unknown as {
+          CineboxAndroidAdBlocker?: { setImmersiveFullscreen?: (v: boolean) => void };
+        }).CineboxAndroidAdBlocker?.setImmersiveFullscreen?.(enabled);
+      } catch {
+        // Ignore on Web
+      }
+    };
+
     if (!isDramaFullscreen) {
+      dramaFullscreenEnteredAtRef.current = 0;
+      syncNativeImmersive(false);
       if (dramaIdleTimerRef.current) {
         clearTimeout(dramaIdleTimerRef.current);
         dramaIdleTimerRef.current = null;
@@ -95,9 +117,23 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
       return;
     }
 
+    dramaFullscreenEnteredAtRef.current = Date.now();
+    syncNativeImmersive(true);
     wakeDramaFsControls();
     const container = dramaPlayerContainerRef.current;
-    const onActivity = () => wakeDramaFsControls();
+    const onActivity = (ev?: Event) => {
+      if (
+        shouldIgnoreFullscreenWakeEvent(ev?.type || '', {
+          pointerType: (ev as PointerEvent | undefined)?.pointerType,
+          fullscreenEnteredAtMs: dramaFullscreenEnteredAtRef.current,
+          isDocumentHidden:
+            typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false,
+        })
+      ) {
+        return;
+      }
+      wakeDramaFsControls();
+    };
 
     container?.addEventListener('mousemove', onActivity, { passive: true });
     container?.addEventListener('pointermove', onActivity, { passive: true });
@@ -455,8 +491,16 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
           >
             {isDramaFullscreen && (
               <div
-                onMouseMove={wakeDramaFsControls}
-                onPointerMove={wakeDramaFsControls}
+                onMouseMove={() => {
+                  if (!shouldIgnoreFullscreenWakeEvent('mousemove', { fullscreenEnteredAtMs: dramaFullscreenEnteredAtRef.current })) {
+                    wakeDramaFsControls();
+                  }
+                }}
+                onPointerMove={(e) => {
+                  if (!shouldIgnoreFullscreenWakeEvent('pointermove', { pointerType: e.pointerType, fullscreenEnteredAtMs: dramaFullscreenEnteredAtRef.current })) {
+                    wakeDramaFsControls();
+                  }
+                }}
                 onPointerDown={wakeDramaFsControls}
                 onTouchStart={wakeDramaFsControls}
                 className="fixed top-0 left-0 right-0 h-16 z-[9999] pointer-events-auto bg-transparent"
@@ -471,10 +515,10 @@ export const PakistaniDramasSection: React.FC<PakistaniDramasSectionProps> = ({
                   exitDramaFullscreenSafely(false);
                 }}
                 aria-label="Exit Fullscreen"
-                className={`fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md min-h-[40px] transition-opacity duration-300 ${
+                className={`fixed top-[max(0.75rem,env(safe-area-inset-top,12px))] left-[max(0.75rem,env(safe-area-inset-left,12px))] z-[10000] flex items-center gap-1.5 px-3 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md min-h-[40px] transition-all duration-300 ${
                   showDramaFsControls
-                    ? 'opacity-100 pointer-events-auto'
-                    : 'opacity-0 pointer-events-none'
+                    ? 'opacity-100 visible pointer-events-auto'
+                    : 'opacity-0 invisible pointer-events-none'
                 }`}
               >
                 <ChevronLeft className="w-4 h-4 text-[#10d97b] stroke-[2.5]" />

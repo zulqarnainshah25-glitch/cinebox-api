@@ -1977,7 +1977,7 @@ test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0
     currentVersionOverride: '1.0.0',
     globalAppConfig: {
       apk_download_url: 'https://drive.google.com/uc?export=download&id=1RealGoogleDriveFileId123',
-      apk_latest_version: '1.0.12',
+      apk_latest_version: '1.0.13',
     },
   });
   assert.equal(webCheck.checked, true);
@@ -1994,32 +1994,32 @@ test('v1.0.2 Update Verification: Web Update Popup Disabled, Version Bump to 1.0
     false
   );
 
-  // 3. Version Number Update (1.0.11 -> 1.0.12, versionCode 12)
-  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.12');
-  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.12');
+  // 3. Version Number Update (1.0.12 -> 1.0.13, versionCode 13)
+  assert.equal(DEFAULT_CURRENT_APP_VERSION, '1.0.13');
+  assert.equal(DEFAULT_APP_CONFIG.apk_latest_version, '1.0.13');
 
   const pkgJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')
   );
-  assert.equal(pkgJson.version, '1.0.12');
+  assert.equal(pkgJson.version, '1.0.13');
 
   const envExample = fs.readFileSync(
     path.resolve(process.cwd(), '.env.example'),
     'utf8'
   );
-  assert.equal(envExample.includes('VITE_APP_VERSION="1.0.12"'), true);
+  assert.equal(envExample.includes('VITE_APP_VERSION="1.0.13"'), true);
 
   const buildGradle = fs.readFileSync(
     path.resolve(process.cwd(), 'android/app/build.gradle'),
     'utf8'
   );
-  assert.equal(buildGradle.includes('versionCode 12'), true);
-  assert.equal(buildGradle.includes('versionName "1.0.12"'), true);
+  assert.equal(buildGradle.includes('versionCode 13'), true);
+  assert.equal(buildGradle.includes('versionName "1.0.13"'), true);
 
   const versionJson = JSON.parse(
     fs.readFileSync(path.resolve(process.cwd(), 'public/version.json'), 'utf8')
   );
-  assert.equal(versionJson.version, '1.0.12');
+  assert.equal(versionJson.version, '1.0.13');
 
   // 4. Fullscreen Back Button (Controls-Synced Visibility & Taskbar Blending) + Borderless #000000 object-fit: contain
   const fsVisible = getFullscreenPlayerConfig(true, 'contain', true);
@@ -6408,7 +6408,7 @@ seg_0001.ts
     new Function(scriptlet.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, ''))
   );
 
-  // 5. Live server integration: /api/health returns 1.0.12 & /api/adblock-proxy blocks /api/mercury + SSRF
+  // 5. Live server integration: /api/health returns 1.0.13 & /api/adblock-proxy blocks /api/mercury + SSRF
   const app = createCineboxServerApp();
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -6418,7 +6418,7 @@ seg_0001.ts
     const healthRes = await fetch(`${baseUrl}/api/health`);
     assert.equal(healthRes.status, 200);
     const healthJson = await healthRes.json();
-    assert.equal(healthJson.version, '1.0.12');
+    assert.equal(healthJson.version, '1.0.13');
     assert.equal(healthJson.adblockProxyEnabled, true);
 
     const mercuryRes = await fetch(
@@ -6506,7 +6506,7 @@ test('71. VidSrc.sh Turnstile Detection, Proxy Static Asset Caching, /api/adbloc
   await prewarmAdBlockProxyForEmbed('https://vidlink.pro/tv/99901/1/1', mockFetch);
   assert.equal(prewarmCalls, 1);
 
-  // 5. Server /api/health returns 1.0.12 and /api/adblock-proxy/prewarm rejects SSRF + ad targets with HTTP 400
+  // 5. Server /api/health returns 1.0.13 and /api/adblock-proxy/prewarm rejects SSRF + ad targets with HTTP 400
   const app = createCineboxServerApp();
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -6516,7 +6516,7 @@ test('71. VidSrc.sh Turnstile Detection, Proxy Static Asset Caching, /api/adbloc
     const healthRes = await fetch(`${baseUrl}/api/health`);
     assert.equal(healthRes.status, 200);
     const healthJson = await healthRes.json();
-    assert.equal(healthJson.version, '1.0.12');
+    assert.equal(healthJson.version, '1.0.13');
 
     const prewarmSsrf = await fetch(
       `${baseUrl}/api/adblock-proxy/prewarm?url=${encodeURIComponent('http://169.254.169.254/latest/meta-data/')}`
@@ -6541,12 +6541,12 @@ test('71. VidSrc.sh Turnstile Detection, Proxy Static Asset Caching, /api/adbloc
   assert.equal(modalSource.includes('requiresDirectOriginForVerification'), true);
   assert.equal(/\bsandbox\s*=/.test(modalSource), false);
 
-  // 7. Android MainActivity.java carries v1.0.12 and forwards CookieManager cookies for Turnstile clearance
+  // 7. Android MainActivity.java carries v1.0.13 and forwards CookieManager cookies for Turnstile clearance
   const mainActivitySource = fs.readFileSync(
     path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
     'utf8'
   );
-  assert.equal(mainActivitySource.includes('v1.0.12'), true);
+  assert.equal(mainActivitySource.includes('v1.0.13'), true);
   assert.equal(mainActivitySource.includes('CookieManager.getInstance()'), true);
 });
 
@@ -6640,7 +6640,7 @@ test('72. v1.0.12 Permanent AdBlocker & Smooth Playback: S1 Zero-Popup Mirror, S
     new Function(scriptlet.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, ''))
   );
 
-  // 6. Server returns 200 OK JS stub for versioned .js/* beacon URLs (avoiding strict MIME errors) & 1.0.12 on /api/health
+  // 6. Server returns 200 OK JS stub for versioned .js/* beacon URLs (avoiding strict MIME errors) & 1.0.13 on /api/health
   const app = createCineboxServerApp();
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -6658,12 +6658,12 @@ test('72. v1.0.12 Permanent AdBlocker & Smooth Playback: S1 Zero-Popup Mirror, S
 
     const healthRes = await fetch(`${baseUrl}/api/health`);
     const healthJson = await healthRes.json();
-    assert.equal(healthJson.version, '1.0.12');
+    assert.equal(healthJson.version, '1.0.13');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
-  // 7. Android assets & MainActivity synced for v1.0.12
+  // 7. Android assets & MainActivity synced for v1.0.13
   const txt = fs.readFileSync(
     path.resolve(process.cwd(), 'android/app/src/main/assets/adblock_domains.txt'),
     'utf8'
@@ -6674,9 +6674,99 @@ test('72. v1.0.12 Permanent AdBlocker & Smooth Playback: S1 Zero-Popup Mirror, S
     path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
     'utf8'
   );
-  assert.equal(mainActivitySource.includes('v1.0.12'), true);
+  assert.equal(mainActivitySource.includes('v1.0.13'), true);
   assert.equal(mainActivitySource.includes('3omcbggo6pw6x3bn92rlehmtu88b.cfd'), true);
   assert.equal(mainActivitySource.includes('contentWindow'), true);
+});
+
+test('73. v1.0.13 Mobile APK Fullscreen Exit Button Auto-Hide Fix: Spurious Wake Filter, Invisible Compositor State & Capacitor CustomView Lifecycle', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const {
+    getFullscreenPlayerConfig,
+    shouldIgnoreFullscreenWakeEvent,
+  } = await import('./streamResolver');
+
+  // 1. Spurious orientation/blur within 1200ms of fullscreen entry & touch pointermove are ignored
+  const t0 = 1_700_000_000_000;
+  assert.equal(
+    shouldIgnoreFullscreenWakeEvent('blur', { fullscreenEnteredAtMs: t0, nowMs: t0 + 400 }),
+    true
+  );
+  assert.equal(
+    shouldIgnoreFullscreenWakeEvent('blur', { fullscreenEnteredAtMs: t0, nowMs: t0 + 1800 }),
+    false
+  );
+  assert.equal(
+    shouldIgnoreFullscreenWakeEvent('pointermove', {
+      pointerType: 'touch',
+      fullscreenEnteredAtMs: t0,
+      nowMs: t0 + 4000,
+    }),
+    true
+  );
+  assert.equal(
+    shouldIgnoreFullscreenWakeEvent('pointermove', {
+      pointerType: 'mouse',
+      fullscreenEnteredAtMs: t0,
+      nowMs: t0 + 4000,
+    }),
+    false
+  );
+  assert.equal(
+    shouldIgnoreFullscreenWakeEvent('touchstart', {
+      pointerType: 'touch',
+      fullscreenEnteredAtMs: t0,
+      nowMs: t0 + 4000,
+    }),
+    false
+  );
+  assert.equal(
+    shouldIgnoreFullscreenWakeEvent('touchstart', {
+      isDocumentHidden: true,
+      fullscreenEnteredAtMs: t0,
+      nowMs: t0 + 4000,
+    }),
+    true
+  );
+
+  // 2. Hidden fullscreen bar includes `invisible` alongside `opacity-0` for Android GPU compositor release
+  const hiddenCfg = getFullscreenPlayerConfig(true, 'contain', false);
+  assert.equal(hiddenCfg.topBarClassName.includes('opacity-0'), true);
+  assert.equal(hiddenCfg.topBarClassName.includes('invisible'), true);
+  assert.equal(hiddenCfg.exitButtonClassName.includes('invisible'), true);
+
+  // 3. VideoPlayerModal & PakistaniDramasSection filter spurious wakes, use invisible hidden state & bridge immersive bars
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VideoPlayerModal.tsx'),
+    'utf8'
+  );
+  assert.equal(modalSource.includes('shouldIgnoreFullscreenWakeEvent'), true);
+  assert.equal(modalSource.includes('opacity-0 invisible pointer-events-none'), true);
+  assert.equal(modalSource.includes('setImmersiveFullscreen'), true);
+  assert.equal(modalSource.includes('isNativeCapacitorAndroid'), true);
+
+  const dramaSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/PakistaniDramasSection.tsx'),
+    'utf8'
+  );
+  assert.equal(dramaSource.includes('shouldIgnoreFullscreenWakeEvent'), true);
+  assert.equal(dramaSource.includes('opacity-0 invisible pointer-events-none'), true);
+  assert.equal(dramaSource.includes('setImmersiveFullscreen'), true);
+
+  // 4. MainActivity.java handles custom fullscreen natively without calling BridgeWebChromeClient's onCustomViewHidden(),
+  //    guarantees GONE visibility on 3s auto-hide timeout, and exposes setImmersiveFullscreen bridge.
+  const mainActivitySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'android/app/src/main/java/com/cinebox/stream/MainActivity.java'),
+    'utf8'
+  );
+  const mainActivitySourceNoComments = mainActivitySource.replace(/\/\/.*$/gm, '');
+  assert.equal(mainActivitySource.includes('v1.0.13'), true);
+  assert.equal(mainActivitySourceNoComments.includes('super.onShowCustomView('), false);
+  assert.equal(mainActivitySource.includes('customFullscreenContainer'), true);
+  assert.equal(mainActivitySource.includes('NATIVE_EXIT_AUTO_HIDE_MS = 3000L'), true);
+  assert.equal(mainActivitySource.includes('finalizeHideExitButtonRunnable'), true);
+  assert.equal(mainActivitySource.includes('public void setImmersiveFullscreen(boolean enabled)'), true);
 });
 
 

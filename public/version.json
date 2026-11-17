@@ -1,5 +1,5 @@
 {
-  "version": "1.0.12",
-  "apk_url": "https://github.com/zulqarnainshah25-glitch/cinebox-api/releases/download/v1.0.12/app-release.apk",
-  "release_notes": "v1.0.12 Update: Permanent AdBlocker + Smooth Playback fix — eliminated React #418 hydration & SRI errors on VidFast/VidCore, protected inline player scripts on VidSrc.buzz/Videm.buzz, fixed Turnstile-free Web AdBlocker routing for Source 1 with 0 popups, and synced Android native WebView child-iframe popup blocking."
+  "version": "1.0.13",
+  "apk_url": "https://github.com/zulqarnainshah25-glitch/cinebox-api/releases/download/v1.0.13/app-release.apk",
+  "release_notes": "v1.0.13 Update: Mobile APK Fullscreen Exit Button Auto-Hide Fix — fixed Capacitor BridgeWebChromeClient onShowCustomView conflict so the Android Exit Fullscreen button reliably auto-hides after 3s, hardened React fullscreen timer against spurious orientation/blur/touch events, added native immersive bar sync, and preserved 100% popup/ad blocking across all sources."
 }

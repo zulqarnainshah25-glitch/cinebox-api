@@ -279,7 +279,7 @@ export const ProfileMeView: React.FC<ProfileMeViewProps> = ({
             </div>
             <div className="min-w-0">
               <div className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-2 flex-wrap">
-                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.12'})</span>
+                <span>Official Android APK (v{appConfig.apk_latest_version || '1.0.13'})</span>
                 <span className="px-2 py-0.5 rounded bg-emerald-950 border border-[#10d97b]/40 text-[10px] font-mono text-[#10d97b]">
                   Global Cloud Link
                 </span>

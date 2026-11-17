@@ -48,7 +48,7 @@ import java.util.regex.Pattern;
 import org.json.JSONObject;
 
 /**
- * CineBox Android MainActivity (v1.0.12)
+ * CineBox Android MainActivity (v1.0.13)
  *
  * 1. Native WebView Real Multi-Layer Iframe Video AdBlocker:
  *    - Loads 3,600+ real ad-serving domains from `assets/adblock_domains.txt` (Peter Lowe + EasyList core)
@@ -600,26 +600,49 @@ public class MainActivity extends BridgeActivity {
                 notifyWebAdBlocked(getBridge().getWebView(), url, kind);
             }
         }
+
+        @JavascriptInterface
+        public void setImmersiveFullscreen(boolean enabled) {
+            controlsHideHandler.post(() -> {
+                isReactAppFullscreenActive = enabled;
+                if (!isCustomFullscreenActive) {
+                    configureSystemBarsPureBlack(enabled);
+                }
+            });
+        }
     }
 
+    private static final long NATIVE_EXIT_AUTO_HIDE_MS = 3000L;
     private boolean isCustomFullscreenActive = false;
+    private volatile boolean isReactAppFullscreenActive = false;
     private WebChromeClient.CustomViewCallback activeCustomViewCallback = null;
+    private View customFullscreenView = null;
+    private FrameLayout customFullscreenContainer = null;
     private TextView nativeExitFullscreenButton = null;
     private final Handler controlsHideHandler = new Handler(Looper.getMainLooper());
+    private final Runnable finalizeHideExitButtonRunnable = () -> {
+        if (nativeExitFullscreenButton != null) {
+            nativeExitFullscreenButton.setAlpha(0f);
+            nativeExitFullscreenButton.setVisibility(View.GONE);
+            nativeExitFullscreenButton.setClickable(false);
+        }
+    };
     private final Runnable hideExitButtonRunnable = () -> {
         if (nativeExitFullscreenButton != null) {
+            nativeExitFullscreenButton.animate().cancel();
             nativeExitFullscreenButton.animate()
                 .alpha(0f)
                 .setDuration(220)
                 .withEndAction(() -> {
                     if (nativeExitFullscreenButton != null) {
                         nativeExitFullscreenButton.setVisibility(View.GONE);
+                        nativeExitFullscreenButton.setClickable(false);
                     }
                 })
                 .start();
-        }
-        if (isCustomFullscreenActive) {
-            configureSystemBarsPureBlack(true);
+            // Guarantee GONE even if device animator duration scale is 0x or interrupted
+            controlsHideHandler.removeCallbacks(finalizeHideExitButtonRunnable);
+            controlsHideHandler.postDelayed(finalizeHideExitButtonRunnable, 260L);
         }
     };
 
@@ -725,23 +748,56 @@ public class MainActivity extends BridgeActivity {
 
                 @Override
                 public void onShowCustomView(View view, WebChromeClient.CustomViewCallback callback) {
-                    if (view != null) {
-                        view.setBackgroundColor(Color.BLACK);
+                    if (view == null) {
+                        if (callback != null) callback.onCustomViewHidden();
+                        return;
                     }
+                    if (customFullscreenView != null) {
+                        if (callback != null) callback.onCustomViewHidden();
+                        return;
+                    }
+                    // Do NOT invoke super.onShowCustomView(view, callback): Capacitor's BridgeWebChromeClient
+                    // unconditionally calls callback.onCustomViewHidden(), which previously tore down fullscreen
+                    // while leaving the native Exit button orphaned with no auto-hide timer.
+                    view.setBackgroundColor(Color.BLACK);
                     isCustomFullscreenActive = true;
+                    customFullscreenView = view;
                     activeCustomViewCallback = callback;
+
+                    try {
+                        ViewGroup decorGroup = (ViewGroup) getWindow().getDecorView();
+                        FrameLayout container = new FrameLayout(MainActivity.this);
+                        container.setBackgroundColor(Color.BLACK);
+                        container.addView(
+                            view,
+                            new FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                        );
+                        decorGroup.addView(
+                            container,
+                            new FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                        );
+                        customFullscreenContainer = container;
+                        if (getBridge() != null && getBridge().getWebView() != null) {
+                            getBridge().getWebView().setVisibility(View.INVISIBLE);
+                        }
+                    } catch (Exception ignored) {
+                        // Continue gracefully with overlay fallback
+                    }
+
                     configureSystemBarsPureBlack(true);
-                    super.onShowCustomView(view, callback);
                     attachNativeExitFullscreenOverlay();
                     showNativeExitButtonTemporarily();
                 }
 
                 @Override
                 public void onHideCustomView() {
-                    isCustomFullscreenActive = false;
-                    activeCustomViewCallback = null;
-                    removeNativeExitFullscreenOverlay();
-                    configureSystemBarsPureBlack(false);
+                    teardownNativeCustomFullscreenUi(false);
                     super.onHideCustomView();
                 }
             });
@@ -750,7 +806,9 @@ public class MainActivity extends BridgeActivity {
 
     private void attachNativeExitFullscreenOverlay() {
         try {
-            ViewGroup decorGroup = (ViewGroup) getWindow().getDecorView();
+            ViewGroup hostGroup = customFullscreenContainer != null
+                ? customFullscreenContainer
+                : (ViewGroup) getWindow().getDecorView();
             removeNativeExitFullscreenOverlay();
 
             TextView btn = new TextView(this);
@@ -777,7 +835,7 @@ public class MainActivity extends BridgeActivity {
 
             btn.setOnClickListener(v -> exitNativeCustomFullscreen());
 
-            decorGroup.addView(btn, params);
+            hostGroup.addView(btn, params);
             nativeExitFullscreenButton = btn;
         } catch (Exception ignored) {
             // Safe fallback
@@ -786,8 +844,10 @@ public class MainActivity extends BridgeActivity {
 
     private void removeNativeExitFullscreenOverlay() {
         controlsHideHandler.removeCallbacks(hideExitButtonRunnable);
+        controlsHideHandler.removeCallbacks(finalizeHideExitButtonRunnable);
         if (nativeExitFullscreenButton != null) {
             try {
+                nativeExitFullscreenButton.animate().cancel();
                 ViewGroup parent = (ViewGroup) nativeExitFullscreenButton.getParent();
                 if (parent != null) {
                     parent.removeView(nativeExitFullscreenButton);
@@ -802,19 +862,53 @@ public class MainActivity extends BridgeActivity {
     private void showNativeExitButtonTemporarily() {
         if (!isCustomFullscreenActive || nativeExitFullscreenButton == null) return;
         controlsHideHandler.removeCallbacks(hideExitButtonRunnable);
+        controlsHideHandler.removeCallbacks(finalizeHideExitButtonRunnable);
         nativeExitFullscreenButton.animate().cancel();
         nativeExitFullscreenButton.setAlpha(1f);
         nativeExitFullscreenButton.setVisibility(View.VISIBLE);
+        nativeExitFullscreenButton.setClickable(true);
         nativeExitFullscreenButton.bringToFront();
-        controlsHideHandler.postDelayed(hideExitButtonRunnable, 3000);
+        controlsHideHandler.postDelayed(hideExitButtonRunnable, NATIVE_EXIT_AUTO_HIDE_MS);
+    }
+
+    private void teardownNativeCustomFullscreenUi(boolean invokeCallback) {
+        if (invokeCallback && activeCustomViewCallback != null) {
+            try {
+                activeCustomViewCallback.onCustomViewHidden();
+            } catch (Exception ignored) {
+                // ignore
+            }
+        }
+        activeCustomViewCallback = null;
+        isCustomFullscreenActive = false;
+        removeNativeExitFullscreenOverlay();
+
+        if (customFullscreenContainer != null) {
+            try {
+                customFullscreenContainer.removeAllViews();
+                ViewGroup parent = (ViewGroup) customFullscreenContainer.getParent();
+                if (parent != null) {
+                    parent.removeView(customFullscreenContainer);
+                }
+            } catch (Exception ignored) {
+                // ignore
+            }
+            customFullscreenContainer = null;
+        }
+        customFullscreenView = null;
+
+        if (getBridge() != null && getBridge().getWebView() != null) {
+            getBridge().getWebView().setVisibility(View.VISIBLE);
+        }
+
+        if (!isReactAppFullscreenActive) {
+            configureSystemBarsPureBlack(false);
+        }
     }
 
     private void exitNativeCustomFullscreen() {
+        teardownNativeCustomFullscreenUi(true);
         try {
-            if (activeCustomViewCallback != null) {
-                activeCustomViewCallback.onCustomViewHidden();
-                activeCustomViewCallback = null;
-            }
             if (getBridge() != null && getBridge().getWebView() != null) {
                 getBridge().getWebView().evaluateJavascript(
                     "if (document.fullscreenElement) { document.exitFullscreen().catch(()=>{}); }",
@@ -824,14 +918,11 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {
             // ignore
         }
-        isCustomFullscreenActive = false;
-        removeNativeExitFullscreenOverlay();
-        configureSystemBarsPureBlack(false);
     }
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
-        if (isCustomFullscreenActive && ev != null && ev.getAction() == MotionEvent.ACTION_DOWN) {
+        if (isCustomFullscreenActive && ev != null && ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
             showNativeExitButtonTemporarily();
         }
         return super.dispatchTouchEvent(ev);

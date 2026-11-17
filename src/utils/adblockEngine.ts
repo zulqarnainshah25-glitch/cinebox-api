@@ -1,5 +1,5 @@
 /**
- * CineBox Real Multi-Layer AdBlock Engine & SSRF-Safe Rewriter (v1.0.12)
+ * CineBox Real Multi-Layer AdBlock Engine & SSRF-Safe Rewriter (v1.0.13)
  *
  * Shared pure TypeScript module compatible with Node v22 native type-stripping,
  * tsx, Vite, and TypeScript (`allowImportingTsExtensions: true`).

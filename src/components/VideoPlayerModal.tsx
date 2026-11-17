@@ -42,6 +42,7 @@ import {
   PLAYABLE_HD_STREAMS_POOL,
   PREFERRED_EMBED_SERVER_ID,
   resolvePlaybackPlan,
+  shouldIgnoreFullscreenWakeEvent,
   VerifiedAudioTrack,
 } from '../utils/streamResolver';
 import {
@@ -454,6 +455,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const [isFullscreenExitVisible, setIsFullscreenExitVisible] = useState<boolean>(true);
   const controlsHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fullscreenIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fullscreenEnteredAtRef = useRef<number>(0);
 
   // Refs for popstate / back-gesture state machine
   const isPlayerModalOpenRef = useRef<boolean>(isPlayerModalOpen);
@@ -620,7 +622,19 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   // Auto-hide floating "Exit Fullscreen" button after 3 seconds of inactivity; wake on user input
   useEffect(() => {
+    const syncNativeImmersive = (enabled: boolean) => {
+      try {
+        (window as unknown as {
+          CineboxAndroidAdBlocker?: { setImmersiveFullscreen?: (v: boolean) => void };
+        }).CineboxAndroidAdBlocker?.setImmersiveFullscreen?.(enabled);
+      } catch {
+        // Ignore on Web
+      }
+    };
+
     if (!isFullscreen) {
+      fullscreenEnteredAtRef.current = 0;
+      syncNativeImmersive(false);
       if (fullscreenIdleTimerRef.current) {
         clearTimeout(fullscreenIdleTimerRef.current);
         fullscreenIdleTimerRef.current = null;
@@ -629,9 +643,21 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       return;
     }
 
+    fullscreenEnteredAtRef.current = Date.now();
+    syncNativeImmersive(true);
     resetFullscreenIdleTimer();
     const containerEl = playerContainerRef.current;
-    const onUserActivity = () => {
+    const onUserActivity = (ev?: Event) => {
+      if (
+        shouldIgnoreFullscreenWakeEvent(ev?.type || '', {
+          pointerType: (ev as PointerEvent | undefined)?.pointerType,
+          fullscreenEnteredAtMs: fullscreenEnteredAtRef.current,
+          isDocumentHidden:
+            typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false,
+        })
+      ) {
+        return;
+      }
       resetFullscreenIdleTimer();
     };
 
@@ -1387,6 +1413,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       return;
     }
 
+    fullscreenEnteredAtRef.current = Date.now();
     setIsFullscreen(true);
     isFullscreenRef.current = true;
     setAreControlsVisible(true);
@@ -1405,6 +1432,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
       } catch {
         // ignore history errors
       }
+    }
+
+    const winAny = typeof window !== 'undefined' ? (window as any) : null;
+    const isNativeCapacitorAndroid = Boolean(
+      winAny?.Capacitor?.isNativePlatform?.() || winAny?.CineboxAndroidAdBlocker
+    );
+    if (isNativeCapacitorAndroid) {
+      // Android APK uses edge-to-edge CSS fullscreen + native immersive system bar bridge
+      // to avoid Capacitor BridgeWebChromeClient.onShowCustomView duplicate Exit Fullscreen overlays.
+      return;
     }
 
     const el = playerContainerRef.current as any;
@@ -1846,8 +1883,16 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 {isFullscreen && playerMode !== 'direct' && (
                   <div
                     data-testid="fullscreen-top-wake-zone"
-                    onMouseMove={resetFullscreenIdleTimer}
-                    onPointerMove={resetFullscreenIdleTimer}
+                    onMouseMove={() => {
+                      if (!shouldIgnoreFullscreenWakeEvent('mousemove', { fullscreenEnteredAtMs: fullscreenEnteredAtRef.current })) {
+                        resetFullscreenIdleTimer();
+                      }
+                    }}
+                    onPointerMove={(e) => {
+                      if (!shouldIgnoreFullscreenWakeEvent('pointermove', { pointerType: e.pointerType, fullscreenEnteredAtMs: fullscreenEnteredAtRef.current })) {
+                        resetFullscreenIdleTimer();
+                      }
+                    }}
                     onPointerDown={resetFullscreenIdleTimer}
                     onTouchStart={resetFullscreenIdleTimer}
                     className="fixed top-0 left-0 right-0 h-16 z-[9999] pointer-events-auto bg-transparent"
@@ -1858,10 +1903,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                 {isFullscreen && playerMode !== 'direct' && (
                   <div
                     data-testid="fullscreen-top-header-bar"
-                    className={`fixed top-0 left-0 right-0 z-[10000] flex items-center justify-between gap-2.5 px-3 sm:px-5 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent transition-opacity duration-300 ${
+                    className={`fixed top-0 left-0 right-0 z-[10000] flex items-center justify-between gap-2.5 px-3 sm:px-5 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent transition-all duration-300 ${
                       isFullscreenExitVisible
-                        ? 'opacity-100 pointer-events-auto'
-                        : 'opacity-0 pointer-events-none'
+                        ? 'opacity-100 visible pointer-events-auto'
+                        : 'opacity-0 invisible pointer-events-none'
                     }`}
                   >
                     <button
@@ -1872,10 +1917,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                         handleExitFullscreen();
                       }}
                       aria-label="Exit Fullscreen"
-                      className={`px-3.5 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md flex items-center gap-1.5 min-h-[38px] transition-opacity duration-300 ${
+                      className={`px-3.5 py-2 rounded-full bg-black/80 hover:bg-black border border-white/25 text-white text-xs font-extrabold shadow-2xl backdrop-blur-md flex items-center gap-1.5 min-h-[38px] transition-all duration-300 ${
                         isFullscreenExitVisible
-                          ? 'opacity-100 pointer-events-auto'
-                          : 'opacity-0 pointer-events-none'
+                          ? 'opacity-100 visible pointer-events-auto'
+                          : 'opacity-0 invisible pointer-events-none'
                       }`}
                     >
                       <Minimize2 className="w-3.5 h-3.5 text-[#10d97b]" />

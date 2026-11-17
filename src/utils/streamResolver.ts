@@ -686,6 +686,50 @@ export interface FullscreenPlayerLayoutConfig {
 }
 
 /**
+ * Determines whether a window/container activity event should be ignored by the
+ * fullscreen Exit-button 3-second auto-hide timer (prevents Android WebView
+ * orientation/iframe focus `blur` or synthetic touch `mousemove`/`pointermove`
+ * events from keeping the Exit Fullscreen button permanently visible).
+ */
+export function shouldIgnoreFullscreenWakeEvent(
+  eventType: string,
+  options?: {
+    pointerType?: string;
+    fullscreenEnteredAtMs?: number;
+    nowMs?: number;
+    isDocumentHidden?: boolean;
+  }
+): boolean {
+  const type = String(eventType || '').toLowerCase();
+  if (options?.isDocumentHidden) {
+    return true;
+  }
+  const now = options?.nowMs ?? Date.now();
+  const enteredAt = options?.fullscreenEnteredAtMs ?? 0;
+
+  if (type === 'blur') {
+    // Ignore spurious blur caused by orientation lock / WebView resize / initial iframe focus
+    if (enteredAt > 0 && now - enteredAt < 1200) {
+      return true;
+    }
+    return false;
+  }
+
+  if (type === 'pointermove' || type === 'mousemove') {
+    const pType = String(options?.pointerType || '').toLowerCase();
+    // Touch devices emit synthetic mousemove/pointermove that shouldn't keep controls awake
+    if (pType === 'touch' || pType === 'pen') {
+      return true;
+    }
+    if (type === 'mousemove' && enteredAt > 0 && now - enteredAt < 600) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Pure helper for player click/tap toggle visibility:
  * - If `forceShow` is true (e.g. tapping the wake strip when hidden), returns `true`.
  * - Otherwise toggles between visible (`true`) and hidden (`false`) on every player tap.
@@ -701,7 +745,7 @@ export function computeNextControlsVisibility(
 /**
  * Computes fullscreen player container classes, pure #000000 borderless background,
  * unified top fullscreen bar (left "<" back + playing movie name + compact right actions)
- * with smooth 300ms transition & 2-second auto-hide, and mobile safe-area padding.
+ * with smooth 300ms transition & 3-second auto-hide, and mobile safe-area padding.
  */
 export function getFullscreenPlayerConfig(
   isFullscreen: boolean,
@@ -724,8 +768,8 @@ export function getFullscreenPlayerConfig(
     : 'px-3 sm:px-4 pb-[max(0.875rem,calc(env(safe-area-inset-bottom,10px)+6px))] pt-2.5 bg-gradient-to-t from-black/95 via-black/75 to-transparent';
 
   const visibilityMotionClass = areControlsVisible
-    ? 'opacity-100 pointer-events-auto translate-y-0'
-    : 'opacity-0 pointer-events-none -translate-y-3';
+    ? 'opacity-100 visible pointer-events-auto translate-y-0'
+    : 'opacity-0 invisible pointer-events-none -translate-y-3';
 
   const topBarClassName = `fixed top-0 left-0 right-0 z-[10000] flex items-center justify-between gap-2.5 px-3 sm:px-5 pt-[max(0.75rem,env(safe-area-inset-top,12px))] pb-5 bg-gradient-to-b from-black/95 via-black/70 to-transparent backdrop-blur-[2px] transition-all duration-300 ease-out ${visibilityMotionClass}`;
 

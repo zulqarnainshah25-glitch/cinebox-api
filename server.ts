@@ -640,7 +640,7 @@ export function createCineboxServerApp() {
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       ok: true,
-      version: '1.0.12',
+      version: '1.0.13',
       blocklistSize: activeBlocklistSet.size,
       adblockProxyEnabled: true,
     });
