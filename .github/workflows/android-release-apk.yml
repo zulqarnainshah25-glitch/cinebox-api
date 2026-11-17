@@ -28,7 +28,7 @@ jobs:
             npm ci || npm install
           else
             npm install --legacy-peer-deps
-          if
+          fi
           test -f node_modules/@capacitor/android/capacitor/build.gradle
           npm run build
           # Remove any stale com.example.app sources or committed Gradle build caches
